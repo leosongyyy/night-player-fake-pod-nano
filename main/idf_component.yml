@@ -1,0 +1,16 @@
+version: "1.0.0"
+
+dependencies:
+  espressif/esp_lcd_touch: "^1.1.2"
+  idf: ">5.0.4,!=5.1.1"
+
+  chmorgan/esp-libhelix-mp3:
+    version: "^1.0.3"
+
+  esp_lcd_sh8601:
+    version: "*"
+    public: true
+
+  lvgl/lvgl:
+    version: "^8"
+    public: true

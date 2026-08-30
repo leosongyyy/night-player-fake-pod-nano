@@ -1,0 +1,90 @@
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief MP3 播放器（Helix 解码 + 播放控制 + 基于时钟的进度）
+ *
+ * 单曲播放：mp3_player_play() 启动 Core1 后台任务解码并输出到 I2S。
+ * 提供暂停/恢复/停止控制与基于系统时钟的播放进度查询。
+ */
+
+/** 播放状态 */
+typedef enum {
+    MP3_STATE_IDLE = 0,     /* 未在播放 */
+    MP3_STATE_PLAYING,      /* 播放中 */
+    MP3_STATE_PAUSED,       /* 已暂停 */
+} mp3_player_state_t;
+
+/**
+ * @brief 播放停止回调（在播放任务上下文调用，用于自动播放下一曲等）
+ * @param is_from_user true = 用户主动停止；false = 自然播完
+ */
+typedef void (*mp3_player_stopped_cb_t)(bool is_from_user);
+
+/**
+ * @brief 开始播放指定 MP3（Core1 后台任务，非阻塞）
+ *
+ * 若当前正在播放/暂停，会先停止旧曲并等待其释放资源（解码器、文件句柄、
+ * I2S），再启动新曲，因此可用于切换播放不同采样率的文件（采样率在解码
+ * 首帧后自动重配 CS43131 与 I2S）。
+ *
+ * 前置条件：audio_init() 与 sd_card_init() 已完成。
+ *
+ * @param path 文件完整路径（须为静态字符串字面量）
+ * @return ESP_OK 任务创建成功；ESP_ERR_NO_MEM 创建失败；
+ *         ESP_ERR_TIMEOUT 停止旧曲超时（2s 内未释放资源）
+ */
+esp_err_t mp3_player_play(const char *path);
+
+/** @brief 暂停播放（若正在播放） */
+esp_err_t mp3_player_pause(void);
+
+/** @brief 恢复播放（若已暂停） */
+esp_err_t mp3_player_resume(void);
+
+/** @brief 停止播放并释放资源 */
+esp_err_t mp3_player_stop(void);
+
+/**
+ * @brief 跳转到指定播放位置（秒）
+ *
+ * 按时间比例映射到文件字节偏移（CBR），seek 后重新找帧同步。
+ * 播放中或暂停中均可调用。
+ *
+ * @param target_s 目标时间（秒，超出总时长会被截断）
+ * @return ESP_OK 成功
+ */
+esp_err_t mp3_player_seek(uint32_t target_s);
+
+/** @brief 获取当前播放状态 */
+mp3_player_state_t mp3_player_get_state(void);
+
+/**
+ * @brief 获取当前播放位置（秒），基于开始播放时间 + 当前时钟推算
+ */
+uint32_t mp3_player_get_position_s(void);
+
+/** @brief 获取总时长（秒，由文件大小 / 码率估算） */
+uint32_t mp3_player_get_duration_s(void);
+
+/**
+ * @brief 设置播放停止回调
+ *
+ * 播放自然播完或用户停止时都会触发；回调在播放任务（Core1）上下文运行，
+ * 内部会先把状态置为 IDLE，因此回调里可直接调用 mp3_player_play() 续播。
+ *
+ * @param cb 回调函数，传 NULL 取消
+ */
+void mp3_player_set_stopped_callback(mp3_player_stopped_cb_t cb);
+
+#ifdef __cplusplus
+}
+#endif

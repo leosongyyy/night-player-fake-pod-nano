@@ -1,0 +1,10 @@
+menu "FakePodNanoNightPlayer 应用配置"
+
+    config TOUCH_TEST
+        bool "触摸区域测试（白色圆点）"
+        default y
+        help
+            启用后，显示一个 20px 白色圆点跟随手指移动，
+            抬起后 1 秒内渐变消失，用于触摸区域调试。
+
+endmenu
