@@ -31,6 +31,45 @@ static const char *TAG = "touch";
 #endif
 
 static esp_lcd_touch_handle_t tp = NULL;
+static TaskHandle_t s_touch_init_task = NULL;   /* 触摸异步初始化任务句柄 */
+static volatile bool s_touch_ready = false;     /* 触摸初始化是否已完成 */
+
+/* 触摸初始化完成回调（由初始化任务完成后调用，可经 touch_register_ready_cb 注册） */
+static touch_ready_cb_t s_ready_cb = NULL;
+static void *s_ready_ctx = NULL;
+
+/* 触摸异步初始化任务：执行耗时的控制器完整初始化（含约 400ms 复位等待），
+   不阻塞开机流程；完成后通知已注册的回调（如 LVGL 启用触摸输入）。 */
+static void touch_init_task(void *arg)
+{
+    esp_lcd_panel_io_handle_t tp_io_handle = (esp_lcd_panel_io_handle_t)arg;
+
+    const esp_lcd_touch_config_t tp_cfg = {
+        .x_max = EXAMPLE_LCD_H_RES + 20,
+        .y_max = EXAMPLE_LCD_V_RES,
+        .rst_gpio_num = EXAMPLE_PIN_NUM_TOUCH_RST,
+        .int_gpio_num = EXAMPLE_PIN_NUM_TOUCH_INT,
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = 0,
+            .mirror_x = 0,
+            .mirror_y = 0,
+        },
+    };
+
+    ESP_LOGI(TAG, "Initialize touch controller (background)");
+    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c(tp_io_handle, &tp_cfg, &tp));
+    s_touch_ready = true;
+
+    ESP_LOGI(TAG, "Touch controller ready");
+    if (s_ready_cb != NULL) {
+        s_ready_cb(tp, s_ready_ctx);
+    }
+    vTaskDelete(NULL);
+}
 
 static void i2c_scan(void)
 {
@@ -74,26 +113,27 @@ esp_lcd_touch_handle_t touch_init(void)
     // Attach the TOUCH to the I2C bus
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)TOUCH_HOST, &tp_io_config, &tp_io_handle));
 
-    const esp_lcd_touch_config_t tp_cfg = {
-        .x_max = EXAMPLE_LCD_H_RES+20,
-        .y_max = EXAMPLE_LCD_V_RES,
-        .rst_gpio_num = EXAMPLE_PIN_NUM_TOUCH_RST,
-        .int_gpio_num = EXAMPLE_PIN_NUM_TOUCH_INT,
-        .levels = {
-            .reset = 0,
-            .interrupt = 0,
-        },
-        .flags = {
-            .swap_xy = 0,
-            .mirror_x = 0,
-            .mirror_y = 0,
-        },
-    };
+    // 异步初始化触摸控制器：控制器完整初始化（含约 400ms 复位等待）放到
+    // 后台任务执行，不阻塞后续硬件/UI 初始化。就绪后调用 ready 回调
+    //（上层注册，如把句柄交给 LVGL），在此之前触摸回调不给数据。
+    BaseType_t ret = xTaskCreate(touch_init_task, "touch_init", 4096, tp_io_handle, 5, &s_touch_init_task);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create touch init task");
+        return NULL;
+    }
 
-    ESP_LOGI(TAG, "Initialize touch controller");
-    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c(tp_io_handle, &tp_cfg, &tp));
+    // 初始化进行中：返回 NULL，LVGL 触摸输入设备在就绪前不提供数据
+    return NULL;
+}
 
-    return tp;
+void touch_register_ready_cb(touch_ready_cb_t cb, void *ctx)
+{
+    s_ready_cb = cb;
+    s_ready_ctx = ctx;
+    /* 若触摸已完成初始化（极端情况：回调注册晚于任务完成），立即补发一次 */
+    if (s_touch_ready && cb != NULL) {
+        cb(tp, ctx);
+    }
 }
 
 esp_lcd_touch_handle_t touch_get_handle(void)
@@ -103,6 +143,15 @@ esp_lcd_touch_handle_t touch_get_handle(void)
 
 void touch_power_off(void)
 {
+    /* 若触摸初始化任务仍在执行（开机极早期触发 deep sleep），先等它完成，
+       避免 i2c_driver_delete 与任务内的 I2C 复位/读 ID 操作冲突 */
+    if (s_touch_init_task != NULL && !s_touch_ready) {
+        ESP_LOGI(TAG, "touch init task still running, waiting...");
+        while (!s_touch_ready) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
     /* 触摸控制器复位：RST 拉低进入复位低功耗 */
     gpio_config_t rst_cfg = {
         .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_TOUCH_RST,
@@ -126,6 +175,12 @@ void touch_power_off(void)
 esp_lcd_touch_handle_t touch_init(void)
 {
     return NULL;
+}
+
+void touch_register_ready_cb(touch_ready_cb_t cb, void *ctx)
+{
+    (void)cb;
+    (void)ctx;
 }
 
 esp_lcd_touch_handle_t touch_get_handle(void)

@@ -44,7 +44,6 @@ static const char *TAG = "cs43131";
 #define REG_PCM_PATH_CTL   0x090004  /* PCM 路径信号控制 2（极性/复制/交换） */
 #define REG_HV_MODE        0x0B0000  /* Class H 高压模式控制 */
 #define REG_INT_STATUS1    0x0F0000  /* 中断状态 1（读一次清 sticky） */
-#define REG_INT_MASK1      0x0F0010  /* 中断掩码 1（bit0 = PDN_DONE_INT_MASK，0 使能） */
 
 /* 0x010006 系统时钟源：Direct XTAL + 24.576MHz（MCLK_SRC_SEL=00, MCLK_INT=0） */
 #define MCLK_DIRECT_24576   0x00
@@ -370,145 +369,23 @@ uint32_t cs43131_get_sample_rate(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* 电源开关（依据数据手册 §5.6/§5.7 耳机上电/掉电时序，供深度休眠使用）    */
+/* 深度休眠复位（RESET# 硬件复位，供 deepsleep 使用）                    */
 /*                                                                     */
-/* 关机 = 关闭耳机输出路径（HP → 等 PDN_DONE → ASP），保留 I2C 控制；     */
-/* 晶振（PDN_XTAL）按手册保持常开（本板 Direct XTAL 直通 MCLK 依赖它，    */
-/* 且晶振功耗极低），PLL/XSP/DSDIF/CLKOUT 本就处于掉电态，不参与操作。    */
+/* 背景：寄存器级关机（PDN_HP/PDN_ASP）时 PDN_DONE 掉电完成中断永不触发   */
+/* ——它是"整芯片掉电完成"边沿事件，而寄存器级关机保持晶振常开，芯片达不到 */
+/* 完全掉电（手册 §4.12 边沿锁存机制实测确认）。硬件复位直接回到出厂默认   */
+/* （0x20000=0xFE，全部电源域含晶振一起掉电），状态完全确定且最省电。      */
 /* ------------------------------------------------------------------ */
 
-bool cs43131_is_powered_down(void)
+esp_err_t cs43131_reset_for_sleep(void)
 {
-    if (!s_ready) {
-        return true;   /* 设备不可用视为关机 */
-    }
-    uint8_t reg = 0;
-    if (cs43131_read_reg(REG_PWR_CTL, &reg) != ESP_OK) {
-        return true;   /* I2C 读不到也视为关机（异常状态） */
-    }
-    /* 关机 = 耳机功放与模拟信号路径均已掉电（PDN_HP 与 PDN_ASP 均为 1）；
-       晶振常开、其余域保持原值，不参与判断 */
-    return (reg & (CS43131_PWR_HP | CS43131_PWR_ASP)) ==
-           (CS43131_PWR_HP | CS43131_PWR_ASP);
-}
-
-esp_err_t cs43131_power_down(void)
-{
-    if (!s_ready) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    /* 1. 解除 PDN_DONE 中断掩码（0xF0010 清 bit0），使能掉电完成中断（读改写） */
-    uint8_t reg = 0;
-    esp_err_t ret = cs43131_read_reg(REG_INT_MASK1, &reg);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = cs43131_write_reg(REG_INT_MASK1, (uint8_t)(reg & 0xFE));
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    /* 1.5 读一次中断状态，清掉可能残留的 PDN_DONE sticky 位（读即清），
-       避免把上次掉电的旧标志误当成本次完成信号 */
-    uint8_t stale = 0;
-    cs43131_read_reg(REG_INT_STATUS1, &stale);
-
-    /* 2. 先关耳机功放（PDN_HP=1，读改写，不影响晶振等其它位） */
-    ret = cs43131_read_reg(REG_PWR_CTL, &reg);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = cs43131_write_reg(REG_PWR_CTL, (uint8_t)(reg | CS43131_PWR_HP));
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    /* 3. 等待 HP 掉电完成（数据手册 Example 5-3 要求等 PDN_DONE_INT）。
-       实测结论（手册 §4.12）：PDN_DONE 是"整芯片掉电完成"的边沿锁存事件，
-       而本设计晶振保持常开（Direct XTAL 直通 MCLK 依赖它），芯片永远达不到
-       完全掉电，故 PDN_DONE 不会置位。这里保留短轮询作为安全网（未来深度
-       休眠若连晶振一起关，它能生效），超时 20ms 直接继续——关机前播放已
-       暂停（输出已静音），不影响功能。 */
-    uint32_t wait = 0;
-    uint8_t last_st = 0;
-    while (wait < 20) {
-        uint8_t st = 0;
-        if (cs43131_read_reg(REG_INT_STATUS1, &st) != ESP_OK) {
-            break;   /* I2C 异常，放弃等待 */
-        }
-        last_st = st;
-        if (st & 0x01) {
-            break;   /* PDN_DONE 置位，HP 掉电完成 */
-        }
-        vTaskDelay(pdMS_TO_TICKS(2));
-        wait += 2;
-    }
-    if (last_st & 0x01) {
-        ESP_LOGI(TAG, "PDN_DONE asserted after %ums", (unsigned)wait);
-    } else {
-        ESP_LOGI(TAG, "PDN_DONE not asserted in %ums (partial power-down, expected), continuing",
-                 (unsigned)wait);
-    }
-
-    /* 4. 最后关模拟信号处理路径（PDN_ASP=1，读改写） */
-    ret = cs43131_read_reg(REG_PWR_CTL, &reg);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = cs43131_write_reg(REG_PWR_CTL, (uint8_t)(reg | CS43131_PWR_ASP));
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "CS43131 powered down (HP+ASP off, XTAL kept running)");
-    return ESP_OK;
-}
-
-esp_err_t cs43131_power_up(void)
-{
-    if (!s_ready) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    /* 1. 去 pop（无爆音）上电设置 */
-    esp_err_t ret = cs43131_write_reg(REG_POP_FREE, 0x99);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = cs43131_write_reg(REG_HP_CTL, 0x20);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    /* 2. 开 ASP（清 PDN_ASP=0，读改写） */
-    uint8_t reg = 0;
-    ret = cs43131_read_reg(REG_PWR_CTL, &reg);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = cs43131_write_reg(REG_PWR_CTL, (uint8_t)(reg & ~CS43131_PWR_ASP));
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    /* 3. 开 HP（清 PDN_HP=0，读改写） */
-    ret = cs43131_read_reg(REG_PWR_CTL, &reg);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    ret = cs43131_write_reg(REG_PWR_CTL, (uint8_t)(reg & ~CS43131_PWR_HP));
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    /* 4. 等 12ms（HP/DAC 上电稳定，手册要求） */
-    vTaskDelay(pdMS_TO_TICKS(12));
-
-    /* 5. 恢复默认设置 */
-    cs43131_write_reg(REG_HP_CTL, 0x00);
-    cs43131_write_reg(REG_POP_FREE, 0x00);
-
-    ESP_LOGI(TAG, "CS43131 powered up (HP+ASP on)");
+    /* RESET#（GPIO41）拉低进入硬件复位：全部电源域（含晶振）默认掉电。
+       拉低后保持低电平直至 esp_deep_sleep_start（芯片持续复位，功耗最低）。
+       唤醒后 cs43131_init() 会重新做完整复位+配置，无需在此恢复。 */
+    gpio_reset_pin(CS43131_RST_PIN);
+    gpio_set_direction(CS43131_RST_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CS43131_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(12));   /* 等待复位稳定（手册 tPUD 1.5ms 以上） */
+    ESP_LOGI(TAG, "CS43131 hardware reset for deep sleep (all power domains off)");
     return ESP_OK;
 }

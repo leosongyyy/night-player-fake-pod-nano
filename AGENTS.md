@@ -71,7 +71,7 @@
 - 通过顶部的状态栏/下拉通知栏提供系统级信息（时间、电池、亮度）——下拉通知栏架构已就绪
 
 **当前实现状态：**
-- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换）、触摸（CST816/820/CHSC6417 按屏幕自动选择）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + MP3 解码播放）、SD 卡（SDMMC 4-bit + FAT，挂载 `/sdcard`）
+- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + MP3 解码播放）、SD 卡（SDMMC 4-bit + FAT，挂载 `/sdcard`）
 - LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（15ms，Y 坐标 ×23/24 校准）、触摸事件订阅回调
 - UI：主界面（Hello World 占位）、顶部状态栏（运行时长时钟）、下拉通知栏（电池显示 + 亮度滑块 + 底部上拉把手，**纯 LVGL 事件驱动**拖拽）
 - 工具：双核 CPU/内存性能监视（串口每 2s 输出）、触摸区域测试（Kconfig 控制）
@@ -162,6 +162,7 @@ components/
 - 显示驱动注册（flush/rounder 回调、DMA draw buffer、2ms tick）、LVGL 任务固定 **Core0**（`xTaskCreatePinnedToCore`）
 - 互斥锁 `lvgl_port_lock/unlock`：LVGL API 非线程安全，所有外部 UI 操作必须先持锁
 - 触摸输入设备：`lvgl_touchpad_read_cb` 统一读取触摸（**触摸数据全项目只读一次**），并支持事件订阅 `lvgl_port_register_touch_cb(pressed, x, y, ctx)`，避免各功能重复轮询
+- **触摸异步初始化**：`touch_init()` 只同步做 I2C 总线/扫描/面板 IO，控制器完整初始化（`esp_lcd_touch_new_i2c_xxx`，含约 400ms 复位等待）放后台任务，就绪后经 `touch_register_ready_cb` 回调把句柄交给 LVGL（`lvgl_port_set_touch_handle`）；就绪前 `read_cb` 判空返回"未按下"不给数据
 - **触摸 Y 坐标校准：`y = y * 23 / 24`**，在 `lvgl_touchpad_read_cb` 中统一应用，LVGL 与订阅回调共用（触摸面板纵向比例修正，经实测最符合直觉）
 
 **3. 下拉通知栏**（`ui/notification_panel.c`，已完成）
@@ -182,6 +183,9 @@ components/
 
 ### 关键技术要点与踩坑记录（务必遵守）
 
+- **开机防白屏（全黑启动）**：AMOLED 面板 RAM 上电未初始化，若以默认亮度点亮会闪白屏。所有屏幕的 init 序列中亮度命令 `0x51` **必须**位于 `0x29`（DISPON 打开显示器）**之前**且值置 `0x00`（全黑）；`display_init()` 末尾同步亮度状态为 0，UI 首帧渲染完成（`app_main` 中 `lv_refr_now(NULL)` 后）再调用 `display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT)` 恢复。默认亮度宏 `DISPLAY_BRIGHTNESS_DEFAULT`（0xFF）定义在 `display.h`。
+- **显示初始化耗时优化**：display_init 的 ~360ms 主要来自组件 `panel_qspi_amoled_reset()` 的 RST 释放后 150ms 等待（模板保守值）与 init 序列延时。已压缩为 RST 释放后 30ms（组件 `esp_lcd_qspi_amoled.c`，配合 `0x11` Sleep Out 的 120ms 总恢复时间充足）+ 序列中 `0x29`（DISPON）后延时 60→0ms；`0x11` 的 120ms 是规格书要求的恢复时间**不可省**。另外序列中的 `0x3A`/`0x36` 与组件内部 COLMOD/MADCTL 重复，删掉可消除 "3Ah command overwritten" 警告。若切其它屏幕，需实测确认 30ms 复位等待足够。
+- **触摸异步初始化**：`esp_lcd_touch_new_i2c_xxx` 内部 `reset()` 含 200ms×2 复位等待（约 400ms），若在开机关键路径同步调用会拖慢启动。`touch_init()` 只同步做 I2C 总线/扫描/面板 IO，控制器初始化放后台任务（优先级 5，栈 4KB），完成回调（`touch_register_ready_cb` → `lvgl_port_set_touch_handle`）交给 LVGL；就绪前 `lvgl_touchpad_read_cb` 判空返回"未按下"（不给数据）。`touch_power_off()` 需先等初始化任务完成，避免与 `i2c_driver_delete` 冲突。
 - **触摸只读一次**：全项目触摸数据统一由 `lvgl_port` 的 indev 回调读取，需要触摸的功能一律通过 `lvgl_port_register_touch_cb` 订阅，**禁止**再自行调用 `esp_lcd_touch_read_data`/轮询。
 - **LVGL 线程安全**：非 LVGL 任务的线程操作 UI 必须先 `lvgl_port_lock(-1)`，用完 `lvgl_port_unlock()`；LVGL 任务回调（timer/event）内已持锁，无需重复加锁。
 - **事件驱动优先**：控件交互（拖拽、点击）优先用 LVGL 事件回调，避免自建轮询 timer。可点击控件默认不冒泡事件，天然隔离交互区域。

@@ -70,6 +70,17 @@ typedef void (*lvgl_port_touch_cb_t)(bool pressed, uint16_t x, uint16_t y, void 
 void lvgl_port_register_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
 
 /**
+ * @brief 设置触摸句柄（触摸异步初始化完成后调用）
+ *
+ * 触摸控制器初始化在后台任务中异步执行（touch_init() 立即返回），
+ * 就绪后由上层调用本接口把句柄交给 LVGL 输入设备。
+ * 在句柄就绪前，触摸 read_cb 返回"未按下"（不给数据），就绪后自动恢复。
+ *
+ * @param touch_handle 就绪的触摸句柄
+ */
+void lvgl_port_set_touch_handle(esp_lcd_touch_handle_t touch_handle);
+
+/**
  * @brief 挂起 LVGL 任务（停止刷屏与触摸轮询），供深度休眠前调用
  *
  * 唤醒后系统重启会重新初始化，无需恢复接口。

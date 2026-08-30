@@ -101,6 +101,11 @@ extern "C" {
   #error "Unsupported screen size"
 #endif
 
+/* 开机默认亮度（最亮）。
+   开机流程：display_init() 以亮度 0（全黑）初始化，避免面板 RAM 未初始化时
+   闪白屏；LVGL 首帧渲染完成后由 app_main 调用 display_set_brightness() 恢复该值。 */
+#define DISPLAY_BRIGHTNESS_DEFAULT (0xFF)
+
 /**
  * @brief 初始化 AMOLED 显示屏（SPI 总线 + 面板 IO + 面板驱动）
  *

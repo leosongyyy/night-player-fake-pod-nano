@@ -23,11 +23,34 @@ extern "C" {
 #define EXAMPLE_PIN_NUM_TOUCH_INT         (GPIO_NUM_4)
 
 /**
- * @brief 初始化 I2C 总线并创建触摸控制器
+ * @brief 初始化 I2C 总线并启动触摸控制器（异步）
  *
- * @return esp_lcd_touch_handle_t 触摸句柄；失败时为 NULL
+ * I2C 总线 / 扫描 / 面板 IO 同步完成（约 20ms）；控制器完整初始化
+ * （含约 400ms 复位等待）放到后台任务，函数立即返回。
+ *
+ * @return esp_lcd_touch_handle_t 触摸句柄；初始化进行中返回 NULL，
+ *         就绪后经 touch_register_ready_cb 注册的回调获取
  */
 esp_lcd_touch_handle_t touch_init(void);
+
+/**
+ * @brief 触摸初始化完成回调类型
+ *
+ * 触摸控制器完整初始化（含约 400ms 复位等待）在后台任务中异步执行，
+ * 完成后在触摸任务上下文中调用该回调，把就绪的句柄交给上层（如 LVGL）。
+ *
+ * @param tp     初始化完成的触摸句柄
+ * @param ctx    注册时传入的用户上下文
+ */
+typedef void (*touch_ready_cb_t)(esp_lcd_touch_handle_t tp, void *ctx);
+
+/**
+ * @brief 注册触摸初始化完成回调（异步初始化完成后调用）
+ *
+ * @param cb  回调；传 NULL 取消注册
+ * @param ctx 透传给回调的用户上下文
+ */
+void touch_register_ready_cb(touch_ready_cb_t cb, void *ctx);
 
 /**
  * @brief 获取触摸句柄（供 UI 轮询使用）

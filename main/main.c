@@ -52,8 +52,10 @@ static void enter_deep_sleep(void)
     /* 2. 挂起 LVGL 任务（停止刷屏与触摸轮询，避免后面删除 I2C 驱动后报错） */
     lvgl_port_suspend();
 
-    /* 3. 关闭 CS43131（HP+ASP 掉电，仅保留 I2C 接口；晶振按设计保持运行） */
-    cs43131_power_down();
+    /* 3. 复位 CS43131（GPIO41 拉低硬件复位：全部电源域含晶振一起掉电，
+           最彻底关机且状态确定；唤醒后 audio_init → cs43131_init 会重新
+           走完整复位+配置流程恢复） */
+    cs43131_reset_for_sleep();
 
     /* 4. 关闭显示屏（AMOLED 显示关断） */
     display_power_off();
@@ -95,6 +97,15 @@ static void on_button_event(button_event_t event, void *ctx)
     enter_deep_sleep();
 }
 
+/* 触摸初始化完成回调（触摸异步初始化任务上下文）：
+   把就绪的触摸句柄交给 LVGL 输入设备，触摸输入即刻生效 */
+static void on_touch_ready(esp_lcd_touch_handle_t tp, void *ctx)
+{
+    (void)ctx;
+    lvgl_port_set_touch_handle(tp);
+    ESP_LOGI(TAG, "Touch ready, LVGL touch input enabled");
+}
+
 void app_main(void)
 {
     // 检查唤醒原因（deep sleep 调试：确认是否为按键唤醒，排查误唤醒）
@@ -112,7 +123,9 @@ void app_main(void)
     esp_lcd_panel_handle_t panel_handle = display_init();
 
     ESP_LOGI(TAG, "Initialize touch");
-    esp_lcd_touch_handle_t tp = touch_init();
+    esp_lcd_touch_handle_t tp = touch_init();   // 异步初始化：立即返回（就绪前为 NULL）
+    /* 触摸就绪回调：把句柄交给 LVGL 输入设备（就绪前触摸回调不给数据） */
+    touch_register_ready_cb(on_touch_ready, NULL);
 
     ESP_LOGI(TAG, "Initialize battery ADC");
     battery_init();
@@ -139,8 +152,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Create UI");
     if (lvgl_port_lock(-1)) {
         app_ui_create();
+        // 强制同步渲染首帧（此时屏幕仍为全黑亮度 0），确保点亮前首帧已
+        // 提交到屏幕，避免出现"点亮后空白/半帧刷新"的窗口
+        lv_refr_now(NULL);
         lvgl_port_unlock();
     }
+
+    // 点亮屏幕：display_init() 以亮度 0（全黑）初始化避免开机白屏闪烁，
+    // LVGL 首帧渲染完成后再恢复默认亮度
+    ESP_LOGI(TAG, "Turn on display (restore brightness %d)", DISPLAY_BRIGHTNESS_DEFAULT);
+    display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
 
     ESP_LOGI(TAG, "App started");
 

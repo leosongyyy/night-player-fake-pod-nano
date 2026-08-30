@@ -7,6 +7,8 @@
 #include "driver/sdmmc_host.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "sd_protocol_defs.h"
+#include "sd_protocol_types.h"
 #include "sdmmc_cmd.h"
 
 static const char *TAG = "sd_card";
@@ -98,8 +100,26 @@ esp_err_t sd_card_deinit(void)
     if (!s_mounted) {
         return ESP_OK;
     }
+
+    /* 深睡前先取消选中卡（CMD7, RCA=0）→ 卡进入 Standby 状态，显著降低卡
+       在 Transfer/active 态的高待命电流（实测无卡深睡比插卡低 ~15mA，
+       卡未进 Standby 是主因）。唤醒后 sd_card_init() 重新初始化
+       （含重新选中）自动恢复。 */
+    sdmmc_command_t cmd = {
+        .opcode = MMC_SELECT_CARD,
+        .arg = 0,                 /* RCA=0 = 取消选中 */
+        .flags = SCF_RSP_R1,
+        .timeout_ms = 1000,
+    };
+    esp_err_t ret = s_card->host.do_transaction(s_card->host.slot, &cmd);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "SD card deselected (CMD7, standby)");
+    } else {
+        ESP_LOGW(TAG, "CMD7 deselect failed: %s", esp_err_to_name(ret));
+    }
+
     /* 卸载 FAT 文件系统并释放 SDMMC 主机（deepsleep 前降低外设功耗） */
-    esp_err_t ret = esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_card);
+    ret = esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_card);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SD card unmount failed: %s", esp_err_to_name(ret));
         return ret;

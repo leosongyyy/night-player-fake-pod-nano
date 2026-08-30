@@ -20,6 +20,10 @@ static lv_disp_draw_buf_t disp_buf;  // contains internal graphic buffer(s) call
 static lv_disp_drv_t disp_drv;       // contains callback functions
 static lv_indev_drv_t indev_drv;     // 触摸输入设备驱动（供 LVGL 控件接收触摸事件）
 
+/* 触摸句柄（触摸异步初始化，就绪前为 NULL）：由触摸初始化完成回调
+   （lvgl_port_set_touch_handle）写入，read_cb 读取；就绪前不给触摸数据 */
+static esp_lcd_touch_handle_t s_touch_handle = NULL;
+
 #define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
@@ -134,7 +138,18 @@ static void *s_touch_cb_ctx = NULL;
    Y 坐标按比例修正：先乘以 23 再除以 24（触摸面板与屏幕的纵向比例校准）。 */
 static void lvgl_touchpad_read_cb(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 {
-    esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)indev_driver->user_data;
+    (void)indev_driver;
+
+    /* 触摸控制器异步初始化中（句柄未就绪）：不给数据，保持未按下，
+       避免操作无效指针；就绪后（lvgl_port_set_touch_handle）自动恢复 */
+    data->state = LV_INDEV_STATE_RELEASED;
+    data->point.x = 0;
+    data->point.y = 0;
+    if (s_touch_handle == NULL) {
+        return;
+    }
+
+    esp_lcd_touch_handle_t tp = s_touch_handle;
     uint16_t touchpad_x = 0, touchpad_y = 0;
     uint8_t touchpad_cnt = 0;
 
@@ -158,6 +173,13 @@ void lvgl_port_register_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx)
 {
     s_touch_cb = cb;
     s_touch_cb_ctx = user_ctx;
+}
+
+/* 设置触摸句柄：触摸异步初始化完成后由上层（main.c 的 ready 回调）调用，
+   read_cb 在句柄就绪前返回"未按下"，就绪后自动恢复触摸输入 */
+void lvgl_port_set_touch_handle(esp_lcd_touch_handle_t touch_handle)
+{
+    s_touch_handle = touch_handle;
 }
 
 void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t touch_handle)
@@ -201,15 +223,14 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     lvgl_mux = xSemaphoreCreateMutex();
     assert(lvgl_mux);
 
-    // 注册触摸输入设备（若提供了触摸句柄），使 LVGL 控件可接收触摸事件
-    if (touch_handle != NULL) {
-        ESP_LOGI(TAG, "Register touch input device to LVGL");
-        lv_indev_drv_init(&indev_drv);
-        indev_drv.type = LV_INDEV_TYPE_POINTER;
-        indev_drv.read_cb = lvgl_touchpad_read_cb;
-        indev_drv.user_data = touch_handle;
-        lv_indev_drv_register(&indev_drv);
-    }
+    // 注册触摸输入设备：无条件注册（触摸可能异步初始化，传入句柄为 NULL），
+    // read_cb 内部判空，句柄就绪前不给数据；就绪后经 lvgl_port_set_touch_handle 生效
+    ESP_LOGI(TAG, "Register touch input device to LVGL");
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = lvgl_touchpad_read_cb;
+    indev_drv.user_data = touch_handle;
+    lv_indev_drv_register(&indev_drv);
 
     // 将 LVGL 任务固定到核心 0，避免在多核调度下与其它任务竞争导致 UI 抖动
     xTaskCreatePinnedToCore(lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE,

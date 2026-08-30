@@ -24,14 +24,12 @@ extern "C" {
  * 从根本上避免 MCLK 源切换导致的芯片失响应（卡死）。
  */
 
-/* 电源控制寄存器（0x020000）各电源域 PDN 位（置 1 = 掉电） */
-#define CS43131_PWR_XSP    (1U << 7)
+/* 电源控制寄存器（0x020000）各电源域 PDN 位（置 1 = 掉电）。
+   仅 XTAL/ASP/HP 参与上电配置（cs43131_apply_full_config），其余域
+   （XSP/DSDIF/PLL/CLKOUT）默认掉电且本项目不使用。 */
 #define CS43131_PWR_ASP    (1U << 6)
-#define CS43131_PWR_DSDIF  (1U << 5)
 #define CS43131_PWR_HP     (1U << 4)
 #define CS43131_PWR_XTAL   (1U << 3)
-#define CS43131_PWR_PLL    (1U << 2)
-#define CS43131_PWR_CLKOUT (1U << 1)
 
 /**
  * @brief 初始化 CS43131（复位 → 晶振 → 直通 MCLK → ASP → HP → PCM 路径）
@@ -74,40 +72,17 @@ esp_err_t cs43131_set_mute(bool mute);
 uint32_t cs43131_get_sample_rate(void);
 
 /**
- * @brief 查询 CS43131 当前是否处于关机状态（耳机输出路径掉电，仅保留 I2C 控制）
+ * @brief 深度休眠前复位 CS43131（RESET# 拉低硬件复位，供 deepsleep 使用）
  *
- * 读 0x020000 电源控制寄存器判断：读不到（I2C 异常）或 HP 与 ASP 均已掉电
- * （PDN_HP、PDN_ASP 均为 1）视为已关机。关机后 I2C 接口仍存活，可随时安全调用。
- *
- * @return true = 已关机；false = 处于开机状态
- */
-bool cs43131_is_powered_down(void);
-
-/**
- * @brief 关机（关闭耳机输出路径，仅保留 I2C 控制接口，供深度休眠等低功耗场景）
- *
- * 按数据手册 §5.6.1（Example 5-3）顺序：解除 PDN_DONE 中断掩码 → 关 HP
- * （PDN_HP=1）→ 轮询等掉电完成中断（PDN_DONE_INT，100ms 超时）→ 关 ASP
- * （PDN_ASP=1）。晶振（PDN_XTAL）按手册保持常开（Direct XTAL 直通 MCLK
- * 依赖它且功耗极低），PLL/XSP/DSDIF/CLKOUT 本就掉电，不参与操作。
- * 寄存器内容不受影响，开机后无需重新探测。
- * 注意：调用前应确保无播放进行中（UI 层负责先暂停）。
+ * 直接拉低 GPIO41：芯片回到出厂默认态（0x020000=0xFE，全部电源域含晶振
+ * 一起掉电），比寄存器级关机更彻底且状态完全确定——寄存器级关机时
+ * PDN_DONE 掉电完成中断永不触发（晶振保持常开，芯片达不到"完全掉电"）。
+ * 调用后 GPIO41 保持低电平直至进入 deepsleep（芯片持续复位，功耗最低）；
+ * 唤醒后由 cs43131_init() 重新走完整复位+配置流程恢复，无需在此处理。
  *
  * @return ESP_OK 成功
  */
-esp_err_t cs43131_power_down(void);
-
-/**
- * @brief 开机（恢复耳机输出路径，供深度休眠等低功耗场景恢复）
- *
- * 按数据手册 §5.7.1（Example 5-5）顺序：去 pop 设置（0x010010=0x99、
- * 0x080032=0x20）→ 开 ASP（清 PDN_ASP）→ 开 HP（清 PDN_HP）→ 等 12ms →
- * 恢复默认设置。其余寄存器（采样率/音量/路径等）在关机时保持不变，无需重写。
- * 内部含 12ms 等待，属阻塞调用。
- *
- * @return ESP_OK 成功
- */
-esp_err_t cs43131_power_up(void);
+esp_err_t cs43131_reset_for_sleep(void);
 
 #ifdef __cplusplus
 }

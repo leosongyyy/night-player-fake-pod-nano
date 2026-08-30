@@ -24,8 +24,8 @@ static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
     {0x63, (uint8_t []){0xFF}, 1, 0},// 设置 HBM 模式下的亮度值
     {0x2A, (uint8_t []){0x00, 0x00, 0x01, 0xBF}, 4, 0},
     {0x2B, (uint8_t []){0x00, 0x00, 0x01, 0x6F}, 4, 0},
+    {0x51, (uint8_t []){0x00}, 1, 0},// 打开显示器前先置亮度 0（全黑启动，避免 RAM 未初始化时闪白屏）
     {0x29, (uint8_t []){0x00}, 0, 60},// 打开显示器
-    {0x51, (uint8_t []){0xFF}, 1, 0},// 设置正常模式下的亮度值
     {0x58, (uint8_t []){0x07}, 1, 10},// 设置正常模式下的亮度值
   };
 #elif CURRENT_SCREEN_SIZE == AM178Q368448LK_178_368x448
@@ -41,8 +41,8 @@ static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
     {0x63, (uint8_t []){0xFF}, 1, 0},// 设置 HBM 模式下的亮度值
     {0x2A, (uint8_t []){0x00, 0x00, 0x01, 0xBF}, 4, 0},
     {0x2B, (uint8_t []){0x00, 0x00, 0x01, 0x6F}, 4, 0},
+    {0x51, (uint8_t []){0x00}, 1, 0},// 打开显示器前先置亮度 0（全黑启动，避免 RAM 未初始化时闪白屏）
     {0x29, (uint8_t []){0x00}, 0, 60},// 打开显示器
-    {0x51, (uint8_t []){0xA0}, 1, 0},// 设置正常模式下的亮度值
     {0x58, (uint8_t []){0x07}, 1, 10},// 设置正常模式下的亮度值
   };
 #elif CURRENT_SCREEN_SIZE == AM151Q466466LK_151_466x466_C
@@ -58,7 +58,7 @@ static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
     {0x63, (uint8_t []){0xFF}, 1, 0},// 设置 HBM 模式下的亮度值
     {0x2A, (uint8_t []){0x00, 0x00, 0x01, 0xBF}, 4, 0},
     {0x2B, (uint8_t []){0x00, 0x00, 0x01, 0x6F}, 4, 0},
-    {0x51, (uint8_t []){0xA0}, 1, 0},// 设置正常模式下的亮度值
+    {0x51, (uint8_t []){0x00}, 1, 0},// 亮度先置 0（全黑启动，避免 RAM 未初始化时闪白屏）
     {0x58, (uint8_t []){0x07}, 1, 10},// 设置正常模式下的亮度值
   };
 #elif CURRENT_SCREEN_SIZE == AM160Q480480LK_160_480x480_C
@@ -71,7 +71,7 @@ static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
     {0x36, (uint8_t []){0x00}, 1, 0},
     {0x3A, (uint8_t []){0x55}, 1, 0},
     {0x53, (uint8_t []){0x20}, 1, 0},
-    {0x51, (uint8_t []){0xFF}, 1, 0},
+    {0x51, (uint8_t []){0x00}, 1, 0},// 亮度先置 0（全黑启动，避免 RAM 未初始化时闪白屏）
     {0x63, (uint8_t []){0xFF}, 1, 0},
     {0x64, (uint8_t []){0x10}, 1, 0},
     {0x67, (uint8_t []){0x01}, 1, 0},
@@ -88,7 +88,7 @@ static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
       {0x35, (uint8_t []){0x00}, 1, 0},
       {0x3A, (uint8_t []){0x55}, 1, 0},
       {0x53, (uint8_t []){0x20}, 1, 0},
-      {0x51, (uint8_t []){0xFF}, 1, 0},
+      {0x51, (uint8_t []){0x00}, 1, 0},// 亮度先置 0（全黑启动，避免 RAM 未初始化时闪白屏）
       {0x63, (uint8_t []){0xFF}, 1, 0},
       {0x2A, (uint8_t []){0x00,0x00,0x00,0xEF}, 4, 0},
       {0x2B, (uint8_t []){0x00,0x00,0x01,0x27}, 4, 0},
@@ -98,18 +98,18 @@ static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
 #elif CURRENT_SCREEN_SIZE == AM200Q460460LK_200_460x460
   static const qspi_amoled_lcd_init_cmd_t lcd_init_cmds[] = {
     {0xFE, (uint8_t []){0x00}, 1, 0},
-    {0x11, (uint8_t []){0x00}, 0, 120},// 退出睡眠模式
+    {0x11, (uint8_t []){0x00}, 0, 120},// 退出睡眠模式（规格书要求的恢复时间，不可省）
     {0x35, (uint8_t []){0x00}, 1, 0},// 开启撕裂效果
     {0xFE, (uint8_t []){0x00}, 1, 0},
     {0xC4, (uint8_t []){0x80}, 1, 0},// SPI 模式控制
-    // {0x36, (uint8_t []){0x00}, 1, 0},// 设置内存数据访问控制
-    {0x3A, (uint8_t []){0x55}, 1, 0},//// 设置像素格式 16位
+    // 0x36/0x3A 无需重复发送：组件内部已发 MADCTL(0x36) 与 COLMOD(0x3A=0x55)，
+    // 再发只会触发 "3Ah command overwritten" 警告
     {0x53, (uint8_t []){0x20}, 1, 0},// 设置 CTRL 显示1
     {0x63, (uint8_t []){0xFF}, 1, 0},// 设置 HBM 模式下的亮度值
     {0x2A, (uint8_t []){0x00, 0x00, 0x01, 0xBF}, 4, 0},
     {0x2B, (uint8_t []){0x00, 0x00, 0x01, 0x6F}, 4, 0},
-    {0x29, (uint8_t []){0x00}, 0, 60},// 打开显示器
-    {0x51, (uint8_t []){0xFF}, 1, 0},// 设置正常模式下的亮度值
+    {0x51, (uint8_t []){0x00}, 1, 0},// 打开显示器前先置亮度 0（全黑启动，避免 RAM 未初始化时闪白屏）
+    {0x29, (uint8_t []){0x00}, 0, 0},// 打开显示器（DISPON 本身无等待要求，加快开机）
     {0x58, (uint8_t []){0x07}, 1, 10},// 设置正常模式下的亮度值
   };
 #else
@@ -157,11 +157,13 @@ esp_lcd_panel_handle_t display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, EXAMPLE_LCD_X_GAP, EXAMPLE_LCD_Y_GAP));
-    // 在打开屏幕或背光之前，用户可以将预定义的图案刷新到屏幕上
+    // 打开显示器：初始化序列已将亮度置 0（全黑），此时面板 RAM 尚未被 LVGL
+    // 绘制，若以默认亮度点亮会先闪出未初始化内容（白屏）。UI 创建完成后由
+    // app_main 调用 display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT) 恢复亮度。
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-    // 设置屏幕亮度
+    // 记录面板句柄，并同步亮度状态为 0（全黑启动）
     s_panel_handle = panel_handle;
-    ESP_ERROR_CHECK(display_set_brightness(0xFF)); // 默认最亮
+    ESP_ERROR_CHECK(display_set_brightness(0));
 
     return panel_handle;
 }
@@ -185,8 +187,11 @@ void display_power_off(void)
     if (s_panel_handle == NULL) {
         return;
     }
-    /* 0x28 关显示：AMOLED 像素熄灭，功耗大幅下降。
-       （qspi_amoled 驱动未实现 0x10 sleep in，disp_on_off 已是最低档） */
+    /* 先 0x28 关显示（像素熄灭），再 0x10 SLEEP IN（驱动 IC 停止 DC/DC、
+       振荡器与扫描，内存保留）——SLEEP IN 才是 AMOLED 真正的低功耗态，
+       仅 DISPOFF 时驱动 IC 仍满负荷运行（实测深睡电流大头之一）。
+       唤醒后 display_init() 会重新走 0x11 + 120ms 完整初始化。 */
     esp_lcd_panel_disp_on_off(s_panel_handle, false);
-    ESP_LOGI(TAG, "display powered off");
+    esp_lcd_panel_disp_sleep(s_panel_handle, true);
+    ESP_LOGI(TAG, "display powered off (DISPOFF + SLEEP IN)");
 }

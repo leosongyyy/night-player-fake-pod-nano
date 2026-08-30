@@ -35,6 +35,7 @@ static esp_err_t panel_qspi_amoled_mirror(esp_lcd_panel_t *panel, bool mirror_x,
 static esp_err_t panel_qspi_amoled_swap_xy(esp_lcd_panel_t *panel, bool swap_axes);
 static esp_err_t panel_qspi_amoled_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_gap);
 static esp_err_t panel_qspi_amoled_disp_on_off(esp_lcd_panel_t *panel, bool off);
+static esp_err_t panel_qspi_amoled_disp_sleep(esp_lcd_panel_t *panel, bool sleep);
 
 typedef struct {
     esp_lcd_panel_t base;
@@ -121,6 +122,7 @@ esp_err_t esp_lcd_new_panel_qspi_amoled(const esp_lcd_panel_io_handle_t io, cons
     qspi_amoled->base.mirror = panel_qspi_amoled_mirror;
     qspi_amoled->base.swap_xy = panel_qspi_amoled_swap_xy;
     qspi_amoled->base.disp_on_off = panel_qspi_amoled_disp_on_off;
+    qspi_amoled->base.disp_sleep = panel_qspi_amoled_disp_sleep;
     *ret_panel = &(qspi_amoled->base);
     ESP_LOGD(TAG, "new qspi_amoled panel @%p", qspi_amoled);
 
@@ -181,7 +183,10 @@ static esp_err_t panel_qspi_amoled_reset(esp_lcd_panel_t *panel)
         gpio_set_level(qspi_amoled->reset_gpio_num, qspi_amoled->flags.reset_level);
         vTaskDelay(pdMS_TO_TICKS(10));
         gpio_set_level(qspi_amoled->reset_gpio_num, !qspi_amoled->flags.reset_level);
-        vTaskDelay(pdMS_TO_TICKS(150));
+        // RST 释放后等待 30ms 即可响应命令（驱动 IC 复位释放一般需数 ms 稳定）。
+        // 后续 Sleep Out（0x11）还有 120ms 恢复等待，总恢复时间充足；
+        // 原模板 150ms 过于保守，会拖慢开机（本项目开机时间敏感）。
+        vTaskDelay(pdMS_TO_TICKS(30));
     } else { // Perform software reset
         ESP_RETURN_ON_ERROR(tx_param(qspi_amoled, io, LCD_CMD_SWRESET, NULL, 0), TAG, "send command failed");
         vTaskDelay(pdMS_TO_TICKS(80));
@@ -352,6 +357,19 @@ static esp_err_t panel_qspi_amoled_disp_on_off(esp_lcd_panel_t *panel, bool on_o
     } else {
         command = LCD_CMD_DISPOFF;
     }
+    ESP_RETURN_ON_ERROR(tx_param(qspi_amoled, io, command, NULL, 0), TAG, "send command failed");
+    return ESP_OK;
+}
+
+/* 进入/退出睡眠模式（0x10 SLEEP IN / 0x11 SLEEP OUT）。
+   SLEEP IN 会停止 DC/DC、振荡器与扫描（内存内容保留），功耗大幅下降，
+   是 AMOLED 真正的低功耗态（仅 DISPOFF 只关像素显示，驱动 IC 仍满负荷）。
+   退出睡眠后需重新初始化（esp_lcd_panel_init / display_init 的 0x11 + 120ms）。 */
+static esp_err_t panel_qspi_amoled_disp_sleep(esp_lcd_panel_t *panel, bool sleep)
+{
+    qspi_amoled_panel_t *qspi_amoled = __containerof(panel, qspi_amoled_panel_t, base);
+    esp_lcd_panel_io_handle_t io = qspi_amoled->io;
+    int command = sleep ? LCD_CMD_SLPIN : LCD_CMD_SLPOUT;
     ESP_RETURN_ON_ERROR(tx_param(qspi_amoled, io, command, NULL, 0), TAG, "send command failed");
     return ESP_OK;
 }

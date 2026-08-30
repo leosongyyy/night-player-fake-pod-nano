@@ -249,7 +249,9 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
-    /* 亮度调节：标签 + 滑块（0~255，初始为当前屏幕亮度） */
+    /* 亮度调节：标签 + 滑块（0~255，初始为开机默认亮度）。
+       注意：UI 创建时硬件亮度仍为 0（全黑启动），故此处直接用
+       DISPLAY_BRIGHTNESS_DEFAULT，与 app_main 点亮后恢复的亮度一致。 */
     lv_obj_t *brightness_label = lv_label_create(notif_bar);
     lv_label_set_text(brightness_label, LV_SYMBOL_SETTINGS " Brightness");
     lv_obj_set_style_text_font(brightness_label, &lv_font_montserrat_28, 0);
@@ -259,7 +261,7 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_t *brightness_slider = lv_slider_create(notif_bar);
     lv_obj_set_size(brightness_slider, 320, 20);
     lv_slider_set_range(brightness_slider, 0, 255);
-    lv_slider_set_value(brightness_slider, display_get_brightness(), LV_ANIM_OFF);
+    lv_slider_set_value(brightness_slider, DISPLAY_BRIGHTNESS_DEFAULT, LV_ANIM_OFF);
     lv_obj_align(brightness_slider, LV_ALIGN_BOTTOM_MID, 0, -120);
     lv_obj_add_event_cb(brightness_slider, brightness_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
