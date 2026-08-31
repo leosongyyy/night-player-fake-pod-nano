@@ -9,11 +9,12 @@ menu "FakePodNanoNightPlayer 应用配置"
 
     config UI_SYSTEM_FONT_FULL
         bool "系统默认字体使用完整版（体积大、烧录慢）"
-        default y
+        default n
         help
             开启：字体引用 UI_SYSTEM_FONT 指向完整版 system_global_font
                   （覆盖字全，但固件约 3.3MB，烧录慢）。
             关闭：改为指向精简版 system_global_font_lite
-                  （仅含系统 UI 所需文字 + ASCII，固件小、烧录快，适合调试）。
+                  （仅含系统 UI 所需文字 + ASCII，固件小、烧录快，适合调试；
+                   注意音乐文件名等用户数据的汉字不在精简字体内）。
 
 endmenu

@@ -16,14 +16,21 @@ set(MAIN_SRCS
     "core/player/player_controller.c"
     "core/ui/lvgl_port.c"
     "core/ui/touch_test.c"
+    "core/ui/virtual_list.c"
     "core/utils/fake_shutdown.c"
     "core/utils/performance_monitor.c"
     "core/fonts/system_smaller_font.c"
     "core/fonts/system_global_font_lite.c"
+    "core/image/default_cover.c"
     "ui/app.c"
     "ui/boot_flow.c"
+    "ui/dir_list.c"
+    "ui/list_common.c"
     "ui/main_ui.c"
-    "ui/notification_panel.c")
+    "ui/now_playing.c"
+    "ui/notification_panel.c"
+    "ui/playlist_page.c"
+    "ui/settings_page.c")
 
 # 完整版系统字体体积很大（固件约 3.3MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
 # 开启时才编译；关闭时改用精简版 system_global_font_lite，便于调试快速烧录。

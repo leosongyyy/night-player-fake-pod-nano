@@ -1,4 +1,5 @@
 #include "ui/notification_panel.h"
+#include "ui/list_common.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/fonts/system_font.h"
@@ -12,7 +13,7 @@
 static const char *TAG = "notification_panel";
 
 #define NOTIF_BAR_HEIGHT   EXAMPLE_LCD_V_RES  /* 全屏下拉面板 */
-#define NOTIF_TRIGGER_H    46                 /* 顶部触发区域高度（状态栏） */
+#define NOTIF_TRIGGER_H    UI_STATUS_BAR_H    /* 顶部触发区域高度（= 状态栏高度） */
 #define PANEL_OPEN_Y       0                  /* 面板展开时顶部 y（全屏） */
 #define PANEL_CLOSED_Y     (-NOTIF_BAR_HEIGHT) /* 收起时完全隐藏于屏幕上方 */
 

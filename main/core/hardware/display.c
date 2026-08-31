@@ -159,9 +159,10 @@ esp_lcd_panel_handle_t display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, EXAMPLE_LCD_X_GAP, EXAMPLE_LCD_Y_GAP));
     // 打开显示器：初始化序列已将亮度置 0（全黑），此时面板 RAM 尚未被 LVGL
     // 绘制，若以默认亮度点亮会先闪出未初始化内容（白屏）。UI 创建完成后由
-    // app_main 调用 display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT) 恢复亮度。
+    // app_main 在持有 LVGL 锁时调用 display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT)
+    // 恢复亮度（亮度命令与 LVGL 刷屏共用 SPI 总线，锁外并发会冲突，见 display.h）。
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-    // 记录面板句柄，并同步亮度状态为 0（全黑启动）
+    // 记录面板句柄，并同步亮度状态为 0（全黑启动，防白屏）
     s_panel_handle = panel_handle;
     ESP_ERROR_CHECK(display_set_brightness(0));
 

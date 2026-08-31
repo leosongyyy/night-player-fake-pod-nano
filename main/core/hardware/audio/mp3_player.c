@@ -8,9 +8,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mp3common.h"
@@ -18,21 +20,43 @@
 
 static const char *TAG = "mp3_player";
 
-/* 解码输入缓冲（流式 fread，小块平滑读，够实时播放即可） */
+/* 解码输入缓冲（内部 RAM 静态数组）：fread 一次补满，块读摊薄 SD 寻道。
+   真正的抗碎片抖动由下面的 PCM ringbuf（PSRAM）承担，这里无需过大 */
 #define MP3_READBUF_SIZE   (16 * 1024)
 
 /* 输出缓冲：一帧解码的最大 PCM 样本数 = MAX_NCHAN(2) × MAX_NGRAN(2) × MAX_NSAMP(576) */
 #define MP3_OUTBUF_SAMPLES (MAX_NCHAN * MAX_NGRAN * MAX_NSAMP)
 
-/* 播放任务参数（Core1，避免与 LVGL/Core0 抢时间） */
+/* 播放（producer）任务参数：读文件 + 解码 + 写 ringbuf */
 #define MP3_PLAY_TASK_STACK 8192
 #define MP3_PLAY_TASK_PRIO  8
 #define MP3_PLAY_TASK_CORE  1
 
-/* 缓冲放静态区（BSS），不占播放任务栈 */
+/* 输出（consumer）任务参数：从 ringbuf 取 PCM 写 I2S，优先级高于 producer
+   保证音频不卡顿 */
+#define MP3_OUT_TASK_STACK 4096
+#define MP3_OUT_TASK_PRIO  9
+#define MP3_OUT_TASK_CORE  1
+
+/* PCM ringbuf（PSRAM，存 int16 交织 stereo，每帧 4 字节）：
+   producer 解码抢跑写入、consumer 独立取出写 I2S，解耦读取/解码与输出。
+   75KB ≈ 48kHz 下约 400ms，足以吸收碎片文件的 fread 延迟，又不至于让
+   seek / 切歌时的排空等待过长 */
+#define MP3_RINGBUF_SIZE   (75 * 1024)
+
+/* 静态缓冲（BSS，不占任务栈）：
+   read_buf 放内部 RAM（fread 目标，PSRAM 写入偏慢会加剧卡顿）；
+   out_buf/stereo_buf 为解码输出与单声道→双声道转换缓冲 */
 static unsigned char read_buf[MP3_READBUF_SIZE];
 static short out_buf[MP3_OUTBUF_SAMPLES];
 static short stereo_buf[MP3_OUTBUF_SAMPLES];   /* 单声道 → 双声道转换缓冲 */
+
+/* producer/consumer 共享的 PCM ringbuf 与同步原语（首次播放时懒初始化） */
+static RingbufHandle_t s_rb = NULL;
+static TaskHandle_t s_out_task_handle = NULL;
+static SemaphoreHandle_t s_clear_mutex = NULL;     /* 保护 ringbuf 清空与读的互斥 */
+static SemaphoreHandle_t s_out_stopped_sem = NULL; /* consumer 停止确认（初始为空） */
+static volatile bool s_out_running = false;        /* consumer 是否应运行 */
 
 /* 播放路径（由 mp3_player_play 传入，须为静态字符串字面量） */
 static const char *s_path = NULL;
@@ -202,6 +226,116 @@ static void mp3_player_finish(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* PCM ringbuf 与输出任务（producer/consumer 解耦）                      */
+/* ------------------------------------------------------------------ */
+
+/* 清空 ringbuf（丢弃所有待播 PCM）。与 consumer 的读经 clear_mutex 互斥，
+   seek / 播放开始前调用 */
+static void ringbuf_clear(void)
+{
+    if (s_rb == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_clear_mutex, portMAX_DELAY);
+    size_t item_size = 0;
+    void *item = NULL;
+    while ((item = xRingbufferReceive(s_rb, &item_size, 0)) != NULL) {
+        vRingbufferReturnItem(s_rb, item);
+    }
+    xSemaphoreGive(s_clear_mutex);
+}
+
+/* ringbuf 是否已排空（无待读字节）。BYTEBUF 无 item 头开销 */
+static bool ringbuf_is_empty(void)
+{
+    UBaseType_t waiting = 0;
+    vRingbufferGetInfo(s_rb, NULL, NULL, NULL, NULL, &waiting);
+    return (waiting == 0);
+}
+
+/* 启动 consumer（置运行标志 + 唤醒等待中的输出任务） */
+static void out_task_start(void)
+{
+    s_out_running = true;
+    xTaskNotifyGive(s_out_task_handle);
+}
+
+/* 停止 consumer 并等待其确认（consumer 退出后停 I2S + 静音并 give 信号量）。
+   consumer 最多在一个 I2S 写块（~30ms）+ 5ms 轮询内退出，200ms 超时足够 */
+static void out_task_stop(void)
+{
+    if (!s_out_running) {
+        return;
+    }
+    s_out_running = false;
+    xSemaphoreTake(s_out_stopped_sem, pdMS_TO_TICKS(200));
+}
+
+/* 输出任务：独立从 ringbuf 取 PCM → 16bit 转 32bit slot → 写 I2S。
+   与 producer 解耦，靠 ringbuf 吸收解码/读取的延迟抖动 */
+static void out_task(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        /* 等待 producer 的启动通知 */
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        while (s_out_running) {
+            xSemaphoreTake(s_clear_mutex, portMAX_DELAY);
+            size_t item_size = 0;
+            void *item = xRingbufferReceive(s_rb, &item_size, 0);   /* 非阻塞 */
+            if (item != NULL) {
+                /* item 为 int16 交织 stereo，帧数 = 字节 / 4 */
+                size_t frames = item_size / (2 * sizeof(int16_t));
+                audio_pcm_write((const int16_t *)item, frames);
+                vRingbufferReturnItem(s_rb, item);
+                xSemaphoreGive(s_clear_mutex);
+            } else {
+                xSemaphoreGive(s_clear_mutex);
+                vTaskDelay(pdMS_TO_TICKS(5));   /* 空则小睡，避免忙等 */
+            }
+        }
+
+        /* 停止：停 I2S + 静音，并通知 producer 已停 */
+        audio_pcm_stop();
+        xSemaphoreGive(s_out_stopped_sem);
+    }
+}
+
+/* 懒初始化 producer/consumer 基础设施（首次播放时调用一次） */
+static esp_err_t ensure_output_init(void)
+{
+    if (s_rb == NULL) {
+        s_rb = xRingbufferCreateWithCaps(MP3_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_rb == NULL) {
+            ESP_LOGE(TAG, "create pcm ringbuf failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (s_clear_mutex == NULL) {
+        s_clear_mutex = xSemaphoreCreateBinary();
+        xSemaphoreGive(s_clear_mutex);
+    }
+    if (s_out_stopped_sem == NULL) {
+        s_out_stopped_sem = xSemaphoreCreateBinary();   /* 初始为空，等 consumer 停止时 give */
+    }
+    if (s_out_task_handle == NULL) {
+        BaseType_t r = xTaskCreatePinnedToCore(out_task, "mp3_out",
+                                               MP3_OUT_TASK_STACK, NULL,
+                                               MP3_OUT_TASK_PRIO,
+                                               &s_out_task_handle,
+                                               MP3_OUT_TASK_CORE);
+        if (r != pdPASS) {
+            ESP_LOGE(TAG, "create out task failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /* 播放任务                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -254,7 +388,7 @@ static void play_task(void *arg)
             s_pause_requested = false;
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             s_played_ms += now_ms - s_seg_start_ms;
-            audio_pcm_stop();
+            out_task_stop();               /* 停 consumer（停 I2S + 静音） */
             s_state = MP3_STATE_PAUSED;
             ESP_LOGI(TAG, "paused @ %u ms", (unsigned)s_played_ms);
             xSemaphoreTake(s_resume_sem, portMAX_DELAY);
@@ -263,9 +397,9 @@ static void play_task(void *arg)
                 break;
             }
             s_seg_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            audio_pcm_start(s_fs);
             s_state = MP3_STATE_PLAYING;
             ESP_LOGI(TAG, "resumed");
+            /* 输出在 seek 检查后的统一逻辑里启动 */
         }
 
         /* ---- seek ---- */
@@ -285,8 +419,18 @@ static void play_task(void *arg)
             eof = false;
             s_played_ms = target * 1000;
             s_seg_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            audio_pcm_start(s_fs);
+            ringbuf_clear();   /* 丢弃跳转前尚未播出的旧 PCM */
             ESP_LOGI(TAG, "seek to %u s (byte %u)", (unsigned)target, (unsigned)byte_off);
+        }
+
+        /* ---- 统一确保输出在跑（pause 恢复 / 暂停中 seek 后） ---- */
+        if (s_state == MP3_STATE_PLAYING && !s_out_running) {
+            esp_err_t r = audio_pcm_start(s_fs);
+            if (r != ESP_OK) {
+                ESP_LOGE(TAG, "audio_pcm_start failed: %s", esp_err_to_name(r));
+                break;
+            }
+            out_task_start();
         }
 
         /* ---- 补充数据 ---- */
@@ -334,31 +478,27 @@ static void play_task(void *arg)
 
                 s_played_ms = 0;
                 s_seg_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
-                esp_err_t r = audio_pcm_start(s_fs);
-                if (r != ESP_OK) {
-                    ESP_LOGE(TAG, "audio_pcm_start failed: %s", esp_err_to_name(r));
-                    break;
-                }
                 s_state = MP3_STATE_PLAYING;
                 started = true;
                 ESP_LOGI(TAG, "mp3: %d Hz, %d ch, %d kbps, dur %u s",
                          fi.samprate, fi.nChans, fi.bitrate / 1000, (unsigned)s_duration_s);
+                /* I2S 与 consumer 由循环顶部的统一逻辑在下一轮启动 */
             }
 
-            esp_err_t wret;
+            /* 解码结果写 ringbuf（int16 交织 stereo；满则阻塞，形成背压） */
             if (fi.nChans == 2) {
-                wret = audio_pcm_write(out_buf, (size_t)(fi.outputSamps / 2));
+                xRingbufferSend(s_rb, out_buf, (size_t)fi.outputSamps * sizeof(int16_t),
+                                portMAX_DELAY);
             } else if (fi.nChans == 1) {
                 for (int i = 0; i < fi.outputSamps; i++) {
                     stereo_buf[2 * i]     = out_buf[i];
                     stereo_buf[2 * i + 1] = out_buf[i];
                 }
-                wret = audio_pcm_write(stereo_buf, (size_t)fi.outputSamps);
+                xRingbufferSend(s_rb, stereo_buf,
+                                (size_t)fi.outputSamps * 2 * sizeof(int16_t),
+                                portMAX_DELAY);
             } else {
                 continue;
-            }
-            if (wret != ESP_OK) {
-                break;
             }
         } else if (err == ERR_MP3_INDATA_UNDERFLOW) {
             break;
@@ -380,9 +520,17 @@ static void play_task(void *arg)
         }
     }
 
+    /* 自然播完（非用户停止）时，先等 consumer 把 ringbuf 播空，避免截断结尾
+       （ringbuf 里可能还攒着最多 ~400ms 的已解码 PCM）；用户主动停止则立即中断 */
+    if (!s_stopped_by_user && s_out_running) {
+        while (!ringbuf_is_empty() && !s_stop_requested) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    out_task_stop();      /* 停 consumer 并等待其停 I2S，避免与下一曲启动竞争 */
     MP3FreeDecoder(dec);
     fclose(f);
-    audio_pcm_stop();
+    ringbuf_clear();      /* 丢弃残留 PCM */
     ESP_LOGI(TAG, "play finished");
     mp3_player_finish();
     vTaskDelete(NULL);
@@ -396,6 +544,12 @@ esp_err_t mp3_player_play(const char *path)
 {
     if (path == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* 懒初始化 producer/consumer 基础设施（首次播放时创建一次） */
+    esp_err_t init = ensure_output_init();
+    if (init != ESP_OK) {
+        return init;
     }
 
     /* 若正在播放/暂停，先停止旧曲并等待播放任务退出、释放资源
@@ -414,6 +568,9 @@ esp_err_t mp3_player_play(const char *path)
         }
         ESP_LOGI(TAG, "previous track stopped, resources released");
     }
+
+    /* 清空 ringbuf（丢弃上一曲可能残留的 PCM；此时 consumer 已停） */
+    ringbuf_clear();
 
     /* 重建暂停信号量：mp3_player_stop() 会 give 一次以唤醒暂停中的任务，
        播放中停止时该信号量会残留，删除重建避免新任务暂停时被立即误唤醒 */

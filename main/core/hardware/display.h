@@ -103,7 +103,10 @@ extern "C" {
 
 /* 开机默认亮度（最亮）。
    开机流程：display_init() 以亮度 0（全黑）初始化，避免面板 RAM 未初始化时
-   闪白屏；LVGL 首帧渲染完成后由 app_main 调用 display_set_brightness() 恢复该值。 */
+   闪白屏（init 序列中 0x51 在 DISPON 前为 0x00）；LVGL 首帧渲染完成后由
+   app_main 调用 display_set_brightness() 恢复该值。
+   ⚠ display_set_brightness() 必须在持有 lvgl_port_lock() 时调用：亮度命令
+   与 LVGL 刷屏共用 SPI 总线，锁外并发执行会冲突（曾致画面定格/花屏）。 */
 #define DISPLAY_BRIGHTNESS_DEFAULT (0xFF)
 
 /**

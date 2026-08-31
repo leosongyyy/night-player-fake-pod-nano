@@ -264,15 +264,16 @@ static void boot_enter_normal(void)
         s_count_label = NULL;
         s_status_label = NULL;
     }
-    app_ui_create();
-
-    /* 进入常规界面后启动播放控制器（独立 Core0 任务）：内部会加载播放列表
-       并默认自动播放第一个目录的第一首音乐。若初始化失败（理论上不会走到这里，
-       因为能进入常规界面说明已有有效音乐数据），仅记录日志不阻塞。 */
+    /* 先加载播放列表并启动播放控制器，再创建应用 UI：这样主界面的虚拟列表
+       在创建时即可直接读取真实目录数据（playlist_dir_count 等）。播放控制
+       命令走队列异步执行（player_controller_init 仅投递"播放第一首"命令），
+       不会阻塞 UI 创建。 */
     esp_err_t r = player_controller_init();
     if (r != ESP_OK) {
         ESP_LOGW(TAG, "player controller init failed: %s", esp_err_to_name(r));
     }
+
+    app_ui_create();
 
     ESP_LOGI(TAG, "enter normal UI");
 }

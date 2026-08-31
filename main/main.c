@@ -113,13 +113,14 @@ void app_main(void)
         // 强制同步渲染首帧（此时屏幕仍为全黑亮度 0），确保点亮前首帧已
         // 提交到屏幕，避免出现"点亮后空白/半帧刷新"的窗口
         lv_refr_now(NULL);
+
+        // 完整点亮（亮度 255）：与首帧渲染在同一个 LVGL 锁内连续执行。
+        // ⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须在持锁时调用；锁外执行
+        // 会被更高优先级的 LVGL 任务抢占并发刷屏，导致画面定格/花屏。
+        ESP_LOGI(TAG, "Turn on display (restore brightness %d)", DISPLAY_BRIGHTNESS_DEFAULT);
+        display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
         lvgl_port_unlock();
     }
-
-    // 点亮屏幕：display_init() 以亮度 0（全黑）初始化避免开机白屏闪烁，
-    // LVGL 首帧渲染完成后再恢复默认亮度
-    ESP_LOGI(TAG, "Turn on display (restore brightness %d)", DISPLAY_BRIGHTNESS_DEFAULT);
-    display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
 
     ESP_LOGI(TAG, "App started");
 
