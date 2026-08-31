@@ -5,6 +5,7 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/battery.h"
+#include "core/player/player_controller.h"
 #include "core/hardware/display.h"
 #include "core/hardware/sd_card.h"
 #include "core/storage/playlist_builder.h"
@@ -143,7 +144,7 @@ static void boot_show_low_battery(void)
     s_state = BOOT_ST_LOW_BAT;
     lv_obj_t *root = boot_root_create();
 
-    lv_obj_t *title = boot_make_title(root, "电池电压过低");
+    lv_obj_t *title = boot_make_title(root, LV_SYMBOL_WARNING " 电池电压过低");
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -120);
 
     lv_obj_t *warn = boot_make_hint(root, "请充电");
@@ -173,7 +174,7 @@ static void boot_show_no_sd(void)
     s_state = BOOT_ST_NO_SD;
     lv_obj_t *root = boot_root_create();
 
-    lv_obj_t *title = boot_make_title(root, "未插入 SD 卡");
+    lv_obj_t *title = boot_make_title(root, LV_SYMBOL_SD_CARD " 未插入 SD 卡");
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -100);
 
     s_status_label = boot_make_hint(root, "请插入 SD 卡后重启设备");
@@ -264,6 +265,15 @@ static void boot_enter_normal(void)
         s_status_label = NULL;
     }
     app_ui_create();
+
+    /* 进入常规界面后启动播放控制器（独立 Core0 任务）：内部会加载播放列表
+       并默认自动播放第一个目录的第一首音乐。若初始化失败（理论上不会走到这里，
+       因为能进入常规界面说明已有有效音乐数据），仅记录日志不阻塞。 */
+    esp_err_t r = player_controller_init();
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "player controller init failed: %s", esp_err_to_name(r));
+    }
+
     ESP_LOGI(TAG, "enter normal UI");
 }
 

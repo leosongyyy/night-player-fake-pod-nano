@@ -13,6 +13,7 @@ set(MAIN_SRCS
     "core/storage/playlist.c"
     "core/hardware/audio/cs43131.c"
     "core/hardware/audio/mp3_player.c"
+    "core/player/player_controller.c"
     "core/ui/lvgl_port.c"
     "core/ui/touch_test.c"
     "core/utils/fake_shutdown.c"
