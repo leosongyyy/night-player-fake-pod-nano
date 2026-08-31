@@ -3,3 +3,6 @@
 nvs,      data, nvs,     ,         0x6000,
 phy_init, data, phy,     ,         0x1000,
 factory,  app,  factory, ,         6M,
+# pldata: 播放列表数据结构分区（4MB）。偏移留空由工具自动分配（紧跟 factory），
+# 大小 4MB 是 SPI_FLASH_MMU_PAGE_SIZE(64KB) 的整数倍，可整体内存映射只读访问。
+pldata,   data, 0x40,    ,         4M,

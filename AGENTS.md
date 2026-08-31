@@ -38,8 +38,8 @@
 - **执行命令**（客户端，在 `workspace-write` 权限下运行）：
   ```powershell
   .\idfc.exe build              # 构建
-  .\idfc.exe -p COM5 flash      # 烧录（设备当前固定连接 COM5）
-  .\idfc.exe -p COM5 monitor    # 串口监视
+  .\idfc.exe -p COMx flash      # 烧录（端口仅为示例，不同电脑上的配置不同）
+  .\idfc.exe -p COMx monitor    # 串口监视
   ```
 - **⚠ 若提示 `IDF server is not running at http://localhost:19781/idf.`**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.vbs` 或上述 `--server` 命令），不要自行尝试在受限权限下重建服务器。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
 - 服务器由 `idfc.exe` 内部派生的 `--server-child` 进程承载，用 `pwsh` 前台启动更稳定。
@@ -47,8 +47,8 @@
 **5. 常用命令**
 
 - `idfc build`：构建项目（初次/配置变更后较久，建议放宽超时）。
-- `idfc -p COM5 flash`：烧录到设备。**通常烧录前先征得用户确认。COM口不一定固定，（除非用户已明确要求烧录，并指定COM口）**。
-- `idfc -p COM5 monitor`：查看串口日志（退出 Ctrl+C或者直接结束任务）。
+- `idfc -p COMx flash`：烧录到设备。**通常烧录前先征得用户确认。COM口不一定固定，（除非用户已明确要求烧录，并指定COM口）**。
+- `idfc -p COMx monitor`：查看串口日志（退出 Ctrl+C或者直接结束任务）。
 - 已开放 `C:\esp\` 与 `C:\Espressif\` 的读取权限，可查阅 IDF 源码。
 
 **6. 构建配置**
@@ -195,7 +195,7 @@ components/
 - **CS43131 时钟策略**：全程固定 24.576MHz 直通（`0x010006=0x00`，MCLK_SRC_SEL=00 + MCLK_INT=0），**禁止**在播放时动态切换 PLL/MCLK 源——手册 §4.6 明确：切换 MCLK 源时若目标时钟未就绪，芯片会进入**不可恢复的失响应状态**（卡死，只能复位）。切换采样率只写 `0x01000B`（ASP_SPRATE）。
 - **MP3 采样率限制**：CS43131 的 `ASP_SPRATE` 只支持 32k/44.1k/48k/88.2k/96k/176.4k/192k/352.8k/384k 档位，当前 MP3 播放（`mp3_player.c`）仅支持 32k/44.1k/48k 三档；22.05k/24k 等其它采样率需软件重采样（尚未实现），遇到会报 `unsupported sample rate` 停播。
 - **代码注释一律中文**；函数/变量使用 snake_case 命名，模块前缀（display_/touch_/lvgl_port_/notif_ 等）。
-- **改完即烧录**：用户偏好修改完成后直接构建并烧录到 COM5 验证（除非用户另有指示）。
+- **改完即烧录**：首次烧录时，若未指定串口号，则列出串口并询问用户，后续修改完成后直接构建并烧录到对应串口并验证。
 
 ## 用户背景介绍
 
@@ -216,5 +216,4 @@ components/
 ### 回复/行动说明
 
 - 推理/思考及回复均使用中文。
-- 修改代码后默认构建并烧录到 COM5（用户已明确"后续一律改完后烧录"），烧录前无需重复确认。
 - 若 IDF 服务器未运行（`idfc` 报连接错误），请提示用户手动启动 `StartIDFCServer.vbs`，不要自行尝试在受限权限下启动服务器。

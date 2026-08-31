@@ -1,19 +1,37 @@
+# 组件源码（固定部分）
+set(MAIN_SRCS
+    "main.c"
+    "core/hardware/display.c"
+    "core/hardware/touch.c"
+    "core/hardware/battery.c"
+    "core/hardware/button_service.c"
+    "core/hardware/sd_card.c"
+    "core/hardware/pldata.c"
+    "core/hardware/audio/audio.c"
+    "core/storage/playlist_store.c"
+    "core/storage/playlist_builder.c"
+    "core/storage/playlist.c"
+    "core/hardware/audio/cs43131.c"
+    "core/hardware/audio/mp3_player.c"
+    "core/ui/lvgl_port.c"
+    "core/ui/touch_test.c"
+    "core/utils/fake_shutdown.c"
+    "core/utils/performance_monitor.c"
+    "core/fonts/system_smaller_font.c"
+    "core/fonts/system_global_font_lite.c"
+    "ui/app.c"
+    "ui/boot_flow.c"
+    "ui/main_ui.c"
+    "ui/notification_panel.c")
+
+# 完整版系统字体体积很大（固件约 3.3MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
+# 开启时才编译；关闭时改用精简版 system_global_font_lite，便于调试快速烧录。
+if(CONFIG_UI_SYSTEM_FONT_FULL)
+    list(APPEND MAIN_SRCS "core/fonts/system_global_font.c")
+endif()
+
 idf_component_register(
-    SRCS "main.c"
-         "core/hardware/display.c"
-         "core/hardware/touch.c"
-         "core/hardware/battery.c"
-         "core/hardware/button_service.c"
-         "core/hardware/sd_card.c"
-         "core/hardware/audio/audio.c"
-         "core/hardware/audio/cs43131.c"
-         "core/hardware/audio/mp3_player.c"
-         "core/ui/lvgl_port.c"
-         "core/ui/touch_test.c"
-         "core/utils/performance_monitor.c"
-         "ui/app.c"
-         "ui/main_ui.c"
-         "ui/notification_panel.c"
+    SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "." "core" "ui")
 
 set_source_files_properties(

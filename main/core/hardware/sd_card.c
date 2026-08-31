@@ -95,6 +95,11 @@ esp_err_t sd_card_init(void)
     return ESP_OK;
 }
 
+bool sd_card_is_mounted(void)
+{
+    return s_mounted;
+}
+
 esp_err_t sd_card_deinit(void)
 {
     if (!s_mounted) {

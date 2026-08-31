@@ -3,11 +3,12 @@
 #include "ui/notification_panel.h"
 
 #include "core/hardware/display.h"
+#include "core/fonts/system_font.h"
 
 #include <stdio.h>
+#include <time.h>
 
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "lvgl.h"
 
 static const char *TAG = "app";
@@ -16,18 +17,17 @@ static const char *TAG = "app";
 
 static lv_obj_t *time_label = NULL;
 
-/* 周期刷新顶部状态栏时间（基于运行时长） */
+/* 周期刷新顶部状态栏时间（显示系统当前时间，需外部设置系统时间，
+   否则未校时前显示 1970 年，见 time_timer_cb 注释） */
 static void time_timer_cb(lv_timer_t *timer)
 {
     if (time_label == NULL) return;
 
     char buf[24];
-    uint64_t us = esp_timer_get_time();
-    uint32_t s = (uint32_t)(us / 1000000ULL);
-    int hh = (s / 3600) % 24;
-    int mm = (s / 60) % 60;
-    int ss = s % 60;
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hh, mm, ss);
+    time_t now = time(NULL);          /* 获取系统时间（POSIX 时间戳） */
+    struct tm t;
+    localtime_r(&now, &t);            /* 转本地时间（含时区/夏令时，配置在 IDF 的 tz） */
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
     lv_label_set_text(time_label, buf);
 }
 
@@ -49,7 +49,7 @@ static lv_obj_t *create_status_bar(void)
 
     time_label = lv_label_create(status);
     lv_label_set_text(time_label, "--:--:--");
-    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(time_label, UI_SYSTEM_FONT, 0);
     lv_obj_set_style_text_color(time_label, lv_color_white(), 0);
     lv_obj_align(time_label, LV_ALIGN_CENTER, 0, 0);
 

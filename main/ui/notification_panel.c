@@ -1,6 +1,8 @@
 #include "ui/notification_panel.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/display.h"
+#include "core/fonts/system_font.h"
+#include "core/fonts/system_smaller_font.h"
 
 #include <stdio.h>
 
@@ -200,13 +202,13 @@ void notification_panel_create(lv_obj_t *status_bar)
     /* 通知栏内容：电池电压（全屏居中布局） */
     lv_obj_t *title = lv_label_create(notif_bar);
     lv_label_set_text(title, LV_SYMBOL_BATTERY_FULL " Battery");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(title, &system_smaller_font, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 90);
 
     bat_value_label = lv_label_create(notif_bar);
     lv_label_set_text(bat_value_label, "--.- V");
-    lv_obj_set_style_text_font(bat_value_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(bat_value_label, UI_SYSTEM_FONT, 0);
     lv_obj_set_style_text_color(bat_value_label, lv_color_white(), 0);
     lv_obj_align(bat_value_label, LV_ALIGN_CENTER, 0, -60);
 
@@ -218,7 +220,7 @@ void notification_panel_create(lv_obj_t *status_bar)
 
     bat_pct_label = lv_label_create(notif_bar);
     lv_label_set_text(bat_pct_label, "0%");
-    lv_obj_set_style_text_font(bat_pct_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(bat_pct_label, UI_SYSTEM_FONT, 0);
     lv_obj_set_style_text_color(bat_pct_label, lv_color_white(), 0);
     lv_obj_align(bat_pct_label, LV_ALIGN_CENTER, 0, 70);
 
@@ -245,7 +247,7 @@ void notification_panel_create(lv_obj_t *status_bar)
 
     lv_obj_t *grab_label = lv_label_create(grab_bar);
     lv_label_set_text(grab_label, LV_SYMBOL_UP " Swipe up to close");
-    lv_obj_set_style_text_font(grab_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(grab_label, UI_SYSTEM_FONT, 0);
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
@@ -254,7 +256,7 @@ void notification_panel_create(lv_obj_t *status_bar)
        DISPLAY_BRIGHTNESS_DEFAULT，与 app_main 点亮后恢复的亮度一致。 */
     lv_obj_t *brightness_label = lv_label_create(notif_bar);
     lv_label_set_text(brightness_label, LV_SYMBOL_SETTINGS " Brightness");
-    lv_obj_set_style_text_font(brightness_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(brightness_label, &system_smaller_font, 0);
     lv_obj_set_style_text_color(brightness_label, lv_color_white(), 0);
     lv_obj_align(brightness_label, LV_ALIGN_BOTTOM_MID, 0, -160);
 

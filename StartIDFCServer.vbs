@@ -56,6 +56,9 @@ Else
 	Dim exePath
 	exePath = fso.GetParentFolderName(WScript.ScriptFullName) & "\idfc.exe"
 
+	' 给启动的进程设置 PYTHONIOENCODING=utf-8，使 Python 子进程以 UTF-8 编码输出
+	shell.Environment("Process")("PYTHONIOENCODING") = "utf-8"
+
 	Dim exitCode
 	exitCode = shell.Run("""" & exePath & """ --server --idfenv """ & bestFile & """", 1, True)
 	WScript.Quit exitCode
