@@ -166,11 +166,25 @@ static void scan_pl_file(build_ctx_t *ctx, const char *dir_full, const char *pl_
     playlist_dir_entry_t *dirs = (playlist_dir_entry_t *)(ctx->buf + PLS_DIR_OFFSET);
 
     char line[PLS_PATH_MAX + 64];
-    char prev_path[PLS_PATH_MAX] = "";
+    /* pathpart/prev_path 与 line 同尺寸：line 是 fgets 能读入的最大行长，
+       拆分路径时 memcpy 的字节数可达 strlen(line)，小缓冲会栈溢出 */
+    char pathpart[sizeof(line)];
+    char prev_path[sizeof(line)] = "";
     uint32_t prev_path_idx = UINT32_MAX;
     uint32_t pl_songs = 0;
 
     while (fgets(line, sizeof(line), f) != NULL) {
+        /* 超长行检测：fgets 读满缓冲区却未见 '\n'，说明该行被截断成多段，
+           若继续解析会把同一条路径拆成多条歌曲条目；这里丢弃本行剩余内容并跳过 */
+        if (strlen(line) == sizeof(line) - 1 && strchr(line, '\n') == NULL) {
+            int c;
+            while ((c = fgetc(f)) != EOF && c != '\n') {
+                /* 丢弃本行剩余字符 */
+            }
+            ESP_LOGW(TAG, "playlist '%s': 丢弃超长行（>%u 字节）", pl_name,
+                     (unsigned)(sizeof(line) - 1));
+            continue;
+        }
         strip_line(line);
         if (line[0] == '\0') {
             continue;   /* 跳过空行/空白行 */
@@ -178,7 +192,6 @@ static void scan_pl_file(build_ctx_t *ctx, const char *dir_full, const char *pl_
         /* 拆分为 文件名 + 路径前缀 */
         char *slash = strrchr(line, '/');
         const char *fname = slash ? slash + 1 : line;
-        char pathpart[PLS_PATH_MAX];
         if (slash) {
             size_t plen = (size_t)(slash - line);
             memcpy(pathpart, line, plen);
