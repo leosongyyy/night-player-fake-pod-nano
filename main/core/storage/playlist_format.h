@@ -18,7 +18,12 @@ extern "C" {
  *    0x00       头部（0x30 字节，PLST magic）
  *    0x30       目录区（到 0x10000，约 65488 字节 ≈ 5457 个目录条目）
  *    0x10000    歌曲索引区（到 0x40000，约 192KB ≈ 24576 首）
- *    0x40000    字符串常量池（到 0x3f0000，约 3.7MB，null-terminated 串依次排列）
+ *    0x40000    字符串常量池（到 0x2cc000，约 2.8MB，null-terminated 串依次排列）
+ *
+ * ⚠ 字符串池上限（PLS_STR_MAX_OFFSET）即开机扫描构建播放列表时分配的
+ *    PSRAM 缓冲大小：曾用 0x3f0000（~3.7MB），完整版固件（完整字体 +
+ *    RGB565 封面经 SPIRAM_RODATA 复制进 PSRAM）下扫描会内存不足。降到
+ *    2.8MB 后池容量 ~2.67MB（实际 100 首曲目仅用 ~3KB，绰绰有余）。
  *
  * 目录条目（12 字节）：{ 目录名池偏移(4) + 歌曲起始下标(4) + 歌曲数(4) }
  * 歌曲条目（8 字节）： { 文件名池偏移(4) + 父目录路径池偏移(4) }
@@ -38,7 +43,10 @@ extern "C" {
 #define PLS_SONG_OFFSET      0x10000u     /* 歌曲索引区起点 */
 #define PLS_SONG_AREA_SIZE   (0x40000u - PLS_SONG_OFFSET)  /* 192KB */
 #define PLS_STR_OFFSET       0x40000u     /* 字符串池起点 */
-#define PLS_STR_MAX_OFFSET   0x3f0000u    /* 字符串池写入上限（绝对偏移，留余量） */
+/* 字符串池写入上限（绝对偏移，留余量）：= 构建缓冲大小。
+   ⚠ 完整版固件下开机扫描内存有限，从 0x3f0000（~3.7MB）降到 0x2cc000
+   （~2.8MB），池容量 ~2.67MB 足够（100 首曲目仅用 ~3KB）。 */
+#define PLS_STR_MAX_OFFSET   0x2cc000u
 
 /* 目录/歌曲最大条数（按条目大小估算） */
 #define PLS_DIR_MAX_COUNT    (PLS_DIR_AREA_SIZE / sizeof(playlist_dir_entry_t))

@@ -184,8 +184,9 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
    视口的 cell 被回收（隐藏置空闲），重新定位到另一端新进入视口的条目上并重绑。
 4. **复用粒度**：每跨一个条目高度，只有 1 个 cell 被重绑（滚出的那个回收复用给
    进入的条目），其余 cell 的位置/文本/颜色/跑马灯全部保留——不是全量重绑。
-5. **选中高亮**：选中背景色由组件维护（`vlist_apply_selected_style`），与回调设置
-   的文字颜色相互独立，可叠加。
+5. **按下反馈（无常驻选中背景）**：点击反馈是按下瞬间的黄色背景
+   （`LV_STATE_PRESSED`，0x7f7f00），松开自动恢复透明。不再有点击后常驻的选中
+   背景；"当前播放中"的条目由绑定回调以文字黄色标注。
 6. **跑马灯**：cell 默认 `LV_LABEL_LONG_SCROLL_CIRCULAR`。因常驻 cell 滚动时不被
    重绑（不 `set_text` / `set_pos`），跑马灯动画在滚动前后连续不断；只有新进入
    视口的 cell 会从头开始滚动（属正常表现）。
@@ -197,9 +198,9 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
 | 项 | 值 | 说明 |
 |---|---|---|
 | 字体 | `UI_SYSTEM_FONT` | 跟随 `CONFIG_UI_SYSTEM_FONT_FULL` 切换完整/精简 |
-| 选中背景色 | `lv_palette_darken(LV_PALETTE_BLUE, 3)` | 深蓝灰，不覆盖文字颜色 |
+| 按下背景色 | `0x7f7f00`（50% 黄 + 50% 黑） | 仅按下瞬间显示（`LV_STATE_PRESSED`），松开透明 |
 | 条目左右内边距 | `VLIST_PAD_H = 16` | 右侧留白避免压住滚动条 |
-| 条目上下内边距 | `VLIST_PAD_V = 6` | 用于文字垂直居中 |
+| 条目上下内边距 | 顶部 `(item_height − 行高)/2`，底部 0 | 顶部留白使文本视觉居中；底部 0 保证内容区 ≥ 行高不裁切 |
 | 列表背景 | 黑底、无边框、无 padding | — |
 
 两处使用（目录/歌曲）如需不同样式，改这里或改成参数即可。
@@ -228,10 +229,11 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
    `LV_OBJ_FLAG_EVENT_BUBBLE` 才能让 `LV_EVENT_CLICKED` 冒泡上来。
 
 5. **字体行高不能超过 cell 内容区**：完整字体 `system_global_font` 的
-   `line_height = 33`，精简字体是 26。cell 内容区高度 = `item_height - 上下内边距`。
+   `line_height = 33`，精简字体是 26。cell 内容区高度 = `item_height - 顶部内边距`
+   （底部内边距为 0），顶部内边距 = `(item_height - 行高)/2`。
    若 `line_height > 内容区高度`，`LV_LABEL_LONG_SCROLL_CIRCULAR` 会误判纵向超长、
-   变成**上下滚动**。当前歌曲列表用 56px（内容区 44px），目录列表 44px（配合精简
-   字体 26 行高足够；用完整字体请 ≥ 52px）。
+   变成**上下滚动**。当前歌曲列表用 56px（内容区 45px），目录列表 52px（内容区
+   43px，配合精简字体 26 行高足够；用完整字体请 ≥ 52px）。
 
 6. **数据必须静态**：见第 1 节。数据变动后必须手动 `virtual_list_refresh()`。
 

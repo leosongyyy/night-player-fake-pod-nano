@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/hardware/audio/audio.h"
+#include "core/music/song_meta.h"
 #include "core/player/shuffle_player.h"
 #include "core/storage/config_store.h"
 #include "core/storage/playlist.h"
@@ -68,6 +70,11 @@ static volatile uint32_t s_dir_song_count = 0;  /* 当前目录歌曲总数 */
 static char s_dir_name[128];
 static char s_song_name[256];
 static char s_path_buf[PLAYER_PATH_MAX];
+
+/* 当前曲目的元数据（来自 .npd 文件：标题/副标题，仅控制器任务写入；
+   JPEG 封面不在此保留——解码放 UI 侧，需要时重新读文件） */
+static char s_meta_title[128];
+static char s_meta_subtitle[128];
 
 /* 随机播放状态（s_shuffle 由 NVS 恢复；s_shuffle_pos 为随机序列的逻辑位置，
    仅控制器任务写入；shuffle_player 缓存懒加载。
@@ -310,6 +317,29 @@ static void player_update_meta(uint32_t global)
     snprintf(s_dir_name, sizeof(s_dir_name), "%s", dn ? dn : "");
     snprintf(s_song_name, sizeof(s_song_name), "%s", sn ? sn : "");
     playlist_build_path(global, s_path_buf, sizeof(s_path_buf));
+
+    /* 解析歌曲元数据（.npd）：标题/副标题入静态缓冲，回放增益暂存到
+       mp3_player（play 时在旧曲停止 + ringbuf 清空后才应用到 audio，
+       避免切歌过渡期旧歌残留 PCM 用新歌增益播放的音量突变）。
+       ⚠ 在控制器任务里同步读 SD 文件（几十 KB，约几十 ms），切歌本身有
+       停止旧曲的等待，这里不会卡 UI；JPEG 封面数据解析后立即释放，
+       封面解码放 UI 侧（now_playing 需要时重新读文件）。
+       无元数据时回退显示文件名/目录名，增益回默认 0dB。 */
+    s_meta_title[0] = '\0';
+    s_meta_subtitle[0] = '\0';
+    song_meta_t meta;
+    if (song_meta_load(s_path_buf, &meta) == ESP_OK) {
+        if (meta.title != NULL) {
+            snprintf(s_meta_title, sizeof(s_meta_title), "%s", meta.title);
+        }
+        if (meta.subtitle != NULL) {
+            snprintf(s_meta_subtitle, sizeof(s_meta_subtitle), "%s", meta.subtitle);
+        }
+        mp3_player_set_gain(meta.gain_q16);
+        song_meta_free(&meta);
+    } else {
+        mp3_player_set_gain(AUDIO_REPLAY_GAIN_UNITY);
+    }
 }
 
 /* 播放指定全局下标歌曲（更新元信息并调用播放引擎） */
@@ -652,6 +682,52 @@ bool player_controller_is_ready(void)
     return s_ready;
 }
 
+/* 释放播放控制器（见 player_controller.h 注释）。
+   顺序（不可颠倒）：
+   1. 停止播放并等待解码任务退出（释放文件句柄/I2S）；
+   2. 取消"自然播完"回调（防止播放任务向已删队列投递自动续播命令）；
+   3. 挂起控制器任务：此后不会再处理命令、不会再访问 playlist 指针
+      （⚠ player_update_meta 等对 playlist 指针无判空，deinit 后任务
+      若继续跑会在 playlist_deinit 后的空指针上崩溃）；
+   4. 删除命令队列（player_post_cmd 对空队列已判空返回，安全）；
+   5. 卸载播放列表（munmap + 清空指针）——必须在任务挂起之后，
+      否则正在跑的任务会访问失效映射。 */
+void player_controller_deinit(void)
+{
+    /* 1. 停止播放：若当前有曲目，先停并等解码任务退出（最多 1s） */
+    if (mp3_player_get_state() != MP3_STATE_IDLE) {
+        mp3_player_stop();
+        uint32_t wait = 0;
+        while (mp3_player_get_state() != MP3_STATE_IDLE && wait < 1000) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            wait += 10;
+        }
+    }
+
+    /* 2. 取消自然播完回调（避免播放任务向已删队列投递 CMD_FINISHED） */
+    mp3_player_set_stopped_callback(NULL);
+
+    /* 3. 挂起控制器任务（Core0，可能阻塞在 xQueueReceive） */
+    if (s_task != NULL) {
+        vTaskSuspend(s_task);
+    }
+
+    /* 4. 删除命令队列 */
+    if (s_queue != NULL) {
+        vQueueDelete(s_queue);
+        s_queue = NULL;
+    }
+
+    /* 5. 卸载播放列表（munmap + 清空指针）。
+       ⚠ 必须最后执行：此前所有对 playlist 指针的访问都已停止
+       （播放已停、任务已挂起），此后再调用 playlist_* 返回空/0 安全。 */
+    playlist_deinit();
+
+    s_ready = false;
+    ESP_LOGI(TAG, "player controller released (playback stopped, task suspended, "
+                  "queue deleted, playlist unmapped)");
+}
+
 void player_controller_play(void)
 {
     player_post_cmd(CMD_PLAY, 0);
@@ -760,4 +836,14 @@ void player_controller_get_status(player_controller_status_t *out)
 
     snprintf(out->dir_name, sizeof(out->dir_name), "%s", s_dir_name);
     snprintf(out->song_name, sizeof(out->song_name), "%s", s_song_name);
+    /* 标题/副标题：有元数据用元数据，否则回退文件名/目录名 */
+    snprintf(out->title, sizeof(out->title), "%s",
+             s_meta_title[0] ? s_meta_title : s_song_name);
+    snprintf(out->subtitle, sizeof(out->subtitle), "%s",
+             s_meta_subtitle[0] ? s_meta_subtitle : s_dir_name);
+}
+
+const char *player_controller_get_current_path(void)
+{
+    return s_path_buf;
 }

@@ -1,6 +1,7 @@
 #include "core/utils/sleep_timer.h"
 
 #include "core/hardware/audio/audio.h"
+#include "core/storage/config_store.h"
 #include "core/utils/fake_shutdown.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -23,6 +24,18 @@ static const char *TAG = "sleep_timer";
 /* 音量渐降窗口（ms）：剩余时间 <= 该值时从当前音量线性降到 0 档
    （NightPlayer 原版机制；只写 audio 硬件、不写 config_store，不持久化） */
 #define VOL_FADE_MS      30000
+
+/* 清醒感知（NightPlayer 原版机制）：
+   - 睡眠定时开启期间，用户动作（切歌/调音量/播放控制等，见 sleep_timer_note_activity
+     的调用点）触发"加时"；
+   - 追加量 = (总时长 - 当前剩余时间) × 0.382（0.382 = 1 - 0.618，黄金分割
+     互补系数）：即每次把剩余时间向总时长"拉回"38.2%——剩余越少追加越多
+     （快到时切歌回血明显），刚设置时追加很少；无需记录定时开始时刻，
+     完全由"当前剩余"决定，连续触发逐次趋近总时长；
+   - ⚠ 原版无冷却：连续按键说明用户必然清醒，每次动作都立即折算加时
+     （原版实现如此，经长期使用验证）。 */
+#define AWARE_ADD_NUM    382        /* 追加系数分子（0.382 = 382/1000） */
+#define AWARE_ADD_DEN    1000       /* 追加系数分母 */
 
 /* 当前定时状态：s_minutes=0 表示关闭；s_deadline_us 为绝对到期时刻。
    仅设置页（LVGL 任务）写入、本任务读取，volatile 保证可见性。 */
@@ -176,5 +189,55 @@ void sleep_timer_fade_cancel(void)
     if (s_fade_active) {
         s_fade_active = false;
         ESP_LOGI(TAG, "volume fade cancelled (user override)");
+    }
+}
+
+/* 清醒感知：用户动作（切歌/调音量等）触发睡眠定时加时。
+   NightPlayer 原版算法：追加量 = (总时长 - 当前剩余) × 0.382，即把剩余
+   时间向总时长拉回 38.2%。示例：15 分钟定时当前剩余 12:30（已耗 2:30）时
+   切歌 → 追加 = (15min - 12.5min)×0.382 ≈ 0.955min ≈ 57s，剩余变 13:27。
+   原版无冷却——连续按键说明用户必然清醒，每次动作都立即追加。
+   由 UI 层在用户主动操作点调用（按键切歌/调音量、通知栏音量滑块、播放页
+   控制、列表选歌等）；本函数只改到期时刻，不落 NVS（睡眠定时本身不持久化）。 */
+void sleep_timer_note_activity(void)
+{
+    if (s_minutes == 0) {
+        return;                              /* 未开启定时 */
+    }
+    if (!config_store_get_sleep_awake()) {
+        return;                              /* 清醒感知关闭 */
+    }
+    int64_t now = esp_timer_get_time();
+
+    /* 触发前的剩余时间（旧的到期时刻 - 现在），用于计算追加量与日志对比 */
+    int64_t old_remain_us = s_deadline_us - now;
+    if (old_remain_us < 0) {
+        old_remain_us = 0;                   /* 兜底：不为负 */
+    }
+
+    /* 追加量 = (总时长 - 当前剩余) × 0.382（整数运算，避免浮点）。
+       剩余越少追加越多（趋近总时长）；连续触发逐次拉回，永不超总时长 */
+    int64_t total_us = (int64_t)s_minutes * 60 * 1000000LL;
+    int64_t add_us   = (total_us - old_remain_us)
+                       * AWARE_ADD_NUM / AWARE_ADD_DEN;
+    if (add_us < 0) {
+        add_us = 0;
+    }
+    int64_t remain_us = old_remain_us + add_us;
+
+    s_deadline_us = now + remain_us;
+    /* 保留 1 位小数：整数秒取整会把 <1s 的增量显示成 0，误导排查。
+       例：remaining 750.0 s -> 807.3 s (adds 57.3 s, total 15 min) */
+    ESP_LOGI(TAG, "sleep aware: remaining %.1f s -> %.1f s (adds %.1f s, "
+                  "total %u min)",
+             (double)(old_remain_us / 100000) / 10.0,
+             (double)(remain_us / 100000) / 10.0,
+             (double)(add_us / 100000) / 10.0,
+             (unsigned)s_minutes);
+
+    /* 加时后剩余回到渐降窗口之外：若正在渐降，请求任务恢复渐降前音量 */
+    if (remain_us > (int64_t)VOL_FADE_MS * 1000 && s_fade_active) {
+        s_restore_requested = true;
+        ESP_LOGI(TAG, "sleep aware: remain > fade window, restore volume");
     }
 }

@@ -199,9 +199,31 @@
 - 唤醒防循环（开机 1.2 秒忽略按键）与按键服务"开机初始按压不触发长按"
   机制保留，随按键逻辑一并移入 key_handler。
 
-## 7. 添加ID3读取标题、艺术家和专辑信息，以及封面
+## 7. 添加ID3读取标题、艺术家和专辑信息，以及封面 ✅ 已完成
 
 考虑到封面大小不一，为了方便，改成一个电脑程序扫描后，重新编码调整大小后放在 .ecov 文件夹中，读取它当封面。没有或者失败就默认，下位机干不了的事情就交给上位机去干
+
+实现要点（2026-09-01 完成）：
+- 上位机（桌面 TestMP3PictureInfo 工程，NightPlayerNanoInfoScanner.exe）扫描
+  SD 卡每首 MP3，把标题 / 艺术家-专辑副标题 / 回放增益 / 封面（重编码为
+  460x460 JPEG，黑底居中）按固定二进制格式写入 `/sdcard/.ecov/<相对路径>.npd`。
+- `core/music/song_meta.{c,h}`：.npd 二进制解析（小端：int32 标题长度+UTF-8
+  标题、int32 副标题长度+UTF-8 副标题、uint32 增益 16.16 定点、int32 JPEG
+  长度+数据）。路径换算：`/sdcard/x.mp3` → `/sdcard/.ecov/x.mp3.npd`。
+- `core/image/cover_jpeg.{c,h}`：esp_jpeg（tjpgd 软件解码）把 JPEG 解码为
+  RGB565（swap_color_bytes=1 高字节在前，匹配 LV_COLOR_16_SWAP），封装成
+  lv_img_dsc_t 直接 lv_img_set_src；像素缓冲 PSRAM 优先（460x460 = 423KB）。
+- **回放增益应用在 audio_pcm_write 的 int16→int32 转换处**：int16→int32
+  左对齐本身就是 ×65536，增益 g（16.16 定点）与合成后一步完成
+  `样本 × g`（int64 中间量防溢出），**不钳位**——增益<1 时低 16 位小数
+  精度完整保留，增益>1 时按 32bit 自然溢出（元数据增益以 ≤0dB 为主）。
+- `player_controller`：切歌时同步解析 .npd，标题/副标题入状态快照
+  （无元数据回退文件名/目录名），增益立即 `audio_set_replay_gain`；
+  新增 `player_controller_get_current_path()` 供封面加载用。
+- `now_playing`：歌曲变化时由独立后台任务（Core1，优先级 1，8KB 栈）
+  重新读 .npd + JPEG 解码（100~300ms），完成后持 LVGL 锁换封面；
+  解码完成校验"当前歌曲未变"才应用（防快速切歌显示错封面）；
+  无封面/失败回退默认封面；标题/副标题改用元数据字段。
 
 ## 8. 优化通知栏里的控件，添加类似IOS的亮度/音量滑块 ✅ 已完成
 
@@ -251,6 +273,8 @@ NightPlayer 原版的**音量渐降机制**（2026-09-01 完成）：
   修复：到点分支加 `continue` 跳过渐降段。
   
 未实现的机制：当睡眠定时器开启时有动作时，是否应该增加时长？需要有一个配置项目（默认会增加）
+
+## 10. 适配 NightPlayer的EQ文件（BiQuadFilter）
 
 ## 其它
 

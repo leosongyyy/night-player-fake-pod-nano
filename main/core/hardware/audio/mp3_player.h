@@ -85,6 +85,19 @@ uint32_t mp3_player_get_duration_s(void);
  */
 void mp3_player_set_stopped_callback(mp3_player_stopped_cb_t cb);
 
+/**
+ * @brief 设置"下一首"歌曲的回放增益（16.16 定点线性系数，65536 = 0dB）
+ *
+ * ⚠ 本接口只暂存增益，**在 mp3_player_play() 内部完成"旧曲停止 + ringbuf
+ * 清空"之后才应用到 audio**：若在 play 前直接调 audio_set_replay_gain，
+ * 旧曲停止是异步的（旧任务可能阻塞在 ringbuf 背压上百 ms），期间旧曲残留
+ * PCM 仍会被 consumer 送进 I2S，导致"旧歌内容用新歌增益播放"的音量突变。
+ * 延迟应用后旧曲全程保持旧增益，新歌从第一帧起用新增益。
+ *
+ * @param gain_q16 线性增益 × 65536（与 audio_set_replay_gain 同语义）
+ */
+void mp3_player_set_gain(uint32_t gain_q16);
+
 #ifdef __cplusplus
 }
 #endif

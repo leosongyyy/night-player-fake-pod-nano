@@ -266,3 +266,12 @@ void screen_sleep_note_activity(void)
 {
     s_last_activity_us = esp_timer_get_time();
 }
+
+uint32_t screen_sleep_get_idle_sec(void)
+{
+    int64_t idle_us = esp_timer_get_time() - s_last_activity_us;
+    if (idle_us < 0) {
+        idle_us = 0;
+    }
+    return (uint32_t)(idle_us / 1000000);
+}

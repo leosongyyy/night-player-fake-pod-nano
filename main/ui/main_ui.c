@@ -70,6 +70,22 @@ uint8_t main_ui_get_current_tab(void)
     return (uint8_t)lv_tabview_get_tab_act(s_tv);
 }
 
+/* 显示/隐藏整个主界面（供全屏覆盖层如设置菜单使用）。
+   仅切换 HIDDEN 标志，页面状态全部保留；隐藏期间底层页面（尤其播放页
+   460x460 封面大图）不参与重绘，消除菜单滚动时被底层大图拖慢的卡顿。 */
+void main_ui_set_visible(bool visible)
+{
+    if (s_tv == NULL) {
+        return;
+    }
+    if (visible) {
+        lv_obj_clear_flag(s_tv, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_tv, LV_OBJ_FLAG_HIDDEN);
+    }
+    ESP_LOGI(TAG, "main UI %s", visible ? "shown" : "hidden");
+}
+
 /* tabview 切换页后回调（手势滑动触发）：同步状态栏页面名与跑马灯 */
 static void main_tabs_changed_cb(lv_event_t *e)
 {

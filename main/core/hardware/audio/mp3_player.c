@@ -81,6 +81,11 @@ static volatile uint32_t s_duration_s = 0;
 /* 当前采样率（暂停恢复 / seek 后重新配置 I2S 用） */
 static audio_fs_t s_fs = AUDIO_FS_44100;
 
+/* 待应用的"下一首"回放增益（由 mp3_player_set_gain 暂存，mp3_player_play
+   在旧曲完全停止 + ringbuf 清空后才应用到 audio，避免旧曲残留 PCM 用
+   新歌增益播放的音量突变） */
+static uint32_t s_pending_gain = AUDIO_REPLAY_GAIN_UNITY;
+
 /* ------------------------------------------------------------------ */
 /* ID3v2 标签跳过（FILE 版本）                                          */
 /* ------------------------------------------------------------------ */
@@ -572,6 +577,12 @@ esp_err_t mp3_player_play(const char *path)
     /* 清空 ringbuf（丢弃上一曲可能残留的 PCM；此时 consumer 已停） */
     ringbuf_clear();
 
+    /* ⚠ 旧曲已完全停止（consumer 停 I2S、ringbuf 已清空），此刻才把
+       "下一首"的回放增益应用到 audio：此前若提前应用（如 play 前直接调
+       audio_set_replay_gain），旧曲停止是异步的，停止等待期间旧曲残留
+       PCM 仍会被送进 I2S，造成"旧歌内容用新歌增益播放"的音量突变 */
+    audio_set_replay_gain(s_pending_gain);
+
     /* 重建暂停信号量：mp3_player_stop() 会 give 一次以唤醒暂停中的任务，
        播放中停止时该信号量会残留，删除重建避免新任务暂停时被立即误唤醒 */
     if (s_resume_sem != NULL) {
@@ -663,4 +674,10 @@ uint32_t mp3_player_get_duration_s(void)
 void mp3_player_set_stopped_callback(mp3_player_stopped_cb_t cb)
 {
     s_stopped_cb = cb;
+}
+
+void mp3_player_set_gain(uint32_t gain_q16)
+{
+    /* 只暂存，下次 mp3_player_play 时（旧曲停止 + ringbuf 清空后）才应用 */
+    s_pending_gain = gain_q16;
 }

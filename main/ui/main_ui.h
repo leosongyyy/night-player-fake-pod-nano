@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -36,6 +37,15 @@ void main_ui_switch_tab(uint8_t tab);
  * @return 当前 tab 下标（0~3；主界面未创建时返回 0）
  */
 uint8_t main_ui_get_current_tab(void);
+
+/**
+ * @brief 显示/隐藏整个主界面（lv_tabview 容器）
+ *
+ * 供全屏覆盖层（如设置菜单）使用：进入时隐藏主界面，可避免底层页面
+ * （含播放页大封面图）参与重绘造成菜单滚动卡顿；退出时重新显示。
+ * 仅切换 LV_OBJ_FLAG_HIDDEN，页面状态（当前 tab、滚动位置）全部保留。
+ */
+void main_ui_set_visible(bool visible);
 
 #ifdef __cplusplus
 }

@@ -13,7 +13,8 @@ extern "C" {
  * 供目录列表页（dir_list）与播放列表页（playlist_page）复用：
  *   - ui_page_style()：tab 页通用样式（黑底、无边框、无内边距、不可滚动）
  *   - ui_title_bar_create() / ui_title_bar_set_text()：顶部标题栏（高 44，
- *     左标题 + 右侧可选灰色计数文字，底部细分隔线），文字可动态更新
+ *     左标题 + 右侧可选灰色计数文字，按 3:1 宽度划分互不覆盖，
+ *     标题超长自动裁剪，底部细分隔线），文字可动态更新
  */
 
 /** 标题栏高度（像素）：列表内容从它下方开始 */
@@ -33,8 +34,8 @@ void ui_page_style(lv_obj_t *page);
 /**
  * @brief 创建顶部标题栏（高 UI_TITLE_BAR_H，底部 1px 灰线分隔）
  * @param parent 父容器（tab 页）
- * @param title  标题文字（白色，左侧 16px 边距）
- * @param sub    右侧计数/说明文字（灰色，可为 NULL 表示不显示）
+ * @param title  标题文字（白色，占标题栏左侧 3/4 宽，超长自动裁剪）
+ * @param sub    右侧计数/说明文字（灰色，占右侧 1/4 宽右对齐，可为 NULL）
  * @return 标题栏对象（后续用 ui_title_bar_set_text 更新文字）
  */
 lv_obj_t *ui_title_bar_create(lv_obj_t *parent, const char *title,

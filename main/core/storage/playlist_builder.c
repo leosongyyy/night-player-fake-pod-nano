@@ -14,7 +14,10 @@
 
 static const char *TAG = "playlist_builder";
 
-/* 构建缓冲总大小（字符串池起点到池上限，约 3.7MB，放 PSRAM） */
+/* 构建缓冲总大小（字符串池起点到池上限 ≈ 2.8MB，放 PSRAM）。
+   ⚠ 与 playlist_format.h 的 PLS_STR_MAX_OFFSET 联动：完整版固件（字体/封面
+   进 PSRAM）下可用内存有限，2.8MB 缓冲足以覆盖实际扫描（100 首曲目
+   字符串池仅用 ~3KB），同时避免内存不足 */
 #define PLS_BUILD_BUF_SIZE PLS_STR_MAX_OFFSET
 
 /* 单目录内文件/子目录数量上限 */

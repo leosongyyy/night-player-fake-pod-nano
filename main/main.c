@@ -116,6 +116,17 @@ void app_main(void)
     // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
     sleep_timer_init();
 
+    // 开机默认开启睡眠定时（config_store 的 sleep_def_on，默认关）：
+    // 开启时用默认时长（sleep_default_min，默认 45 分钟）自动启动定时
+    if (config_store_get_sleep_def_on()) {
+        uint32_t def_min = config_store_get_sleep_default_min();
+        if (def_min > 0) {
+            sleep_timer_set(def_min);
+            ESP_LOGI(TAG, "boot: sleep timer auto started (%u min)",
+                     (unsigned)def_min);
+        }
+    }
+
     // 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）。
     // 放在 LVGL 初始化之后，注册 button_service 事件回调。
     key_handler_init();

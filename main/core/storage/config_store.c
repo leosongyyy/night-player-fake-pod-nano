@@ -16,6 +16,8 @@ static const char *TAG = "config_store";
 #define KEY_SHUFFLE_POS_LO   "shuf_pos_lo"
 #define KEY_SHUFFLE_POS_VAL  "shuf_pos_val"
 #define KEY_SLEEP_DEFAULT    "sleepdef"
+#define KEY_SLEEP_DEF_ON     "sleepdefon"
+#define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
 #define KEY_WAS_PLAYING      "was_play"
 #define KEY_LAST_GLOBAL      "last_glob"
@@ -39,6 +41,8 @@ static uint32_t s_shuf_pos_hi = 0;
 static uint32_t s_shuf_pos_lo = 0;
 static bool     s_shuf_pos_valid = false;
 static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
+static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
+static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
 /* 关机前播放状态：默认 true（无记录时开机自动播放，保持旧行为） */
 static bool     s_was_playing = true;
@@ -185,6 +189,18 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_sleep_def) != ESP_OK) {
         s_sleep_def = CONFIG_STORE_SLEEP_DEFAULT_MIN;
     }
+    uint8_t sleep_def_on = 0;
+    if (nvs_get_u8(s_nvs, KEY_SLEEP_DEF_ON, &sleep_def_on) != ESP_OK) {
+        s_sleep_def_on = (CONFIG_STORE_SLEEP_DEF_ON_DEFAULT != 0);
+    } else {
+        s_sleep_def_on = (sleep_def_on != 0);
+    }
+    uint8_t sleep_awake = 1;
+    if (nvs_get_u8(s_nvs, KEY_SLEEP_AWAKE, &sleep_awake) != ESP_OK) {
+        s_sleep_awake = (CONFIG_STORE_SLEEP_AWAKE_DEFAULT != 0);
+    } else {
+        s_sleep_awake = (sleep_awake != 0);
+    }
     if (nvs_get_u32(s_nvs, KEY_SCREEN_OFF, &s_screen_off) != ESP_OK) {
         s_screen_off = CONFIG_STORE_SCREEN_OFF_DEFAULT;
     }
@@ -210,9 +226,10 @@ void config_store_init(void)
 
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
-                  "sleep_def=%u min screen_off=%u s was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s",
+                  "sleep_def=%u min def_on=%d awake=%d screen_off=%u s was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
-             (int)s_shuffle, (unsigned)s_sleep_def, (unsigned)s_screen_off,
+             (int)s_shuffle, (unsigned)s_sleep_def, (int)s_sleep_def_on,
+             (int)s_sleep_awake, (unsigned)s_screen_off,
              (int)s_was_playing,
              s_last_valid ? "yes" : "no",
              (unsigned)s_last_global, (unsigned)s_last_pos,
@@ -253,6 +270,16 @@ bool config_store_get_shuffle_pos(uint64_t *pos)
 uint32_t config_store_get_sleep_default_min(void)
 {
     return s_sleep_def;
+}
+
+bool config_store_get_sleep_def_on(void)
+{
+    return s_sleep_def_on;
+}
+
+bool config_store_get_sleep_awake(void)
+{
+    return s_sleep_awake;
 }
 
 uint32_t config_store_get_screen_off_s(void)
@@ -344,6 +371,26 @@ void config_store_set_sleep_default_min(uint32_t minutes)
     }
     s_sleep_def = minutes;
     cfg_write_u32(KEY_SLEEP_DEFAULT, minutes);
+    config_notify();
+}
+
+void config_store_set_sleep_def_on(bool on)
+{
+    if (on == s_sleep_def_on) {
+        return;
+    }
+    s_sleep_def_on = on;
+    cfg_write_u8(KEY_SLEEP_DEF_ON, on ? 1 : 0);
+    config_notify();
+}
+
+void config_store_set_sleep_awake(bool on)
+{
+    if (on == s_sleep_awake) {
+        return;
+    }
+    s_sleep_awake = on;
+    cfg_write_u8(KEY_SLEEP_AWAKE, on ? 1 : 0);
     config_notify();
 }
 

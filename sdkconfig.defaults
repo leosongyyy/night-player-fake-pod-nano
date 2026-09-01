@@ -18,6 +18,12 @@ CONFIG_PM_ENABLE=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+# ⚠ SPIRAM_RODATA 必须保持开启（=y）：关闭后 .rodata（字符串常量等）留在
+#   Flash，而扫描保存播放列表要写/擦除 Flash——Flash 写操作期间访问 Flash
+#   中的 rodata 会出问题（实测乱码 + BREAK instr 复位，分区保存失败）。
+#   开启后 rodata 复制进 PSRAM，Flash 写期间正常。代价是完整版字体/封面
+#   占 PSRAM（~3MB），开机扫描构建播放列表（需分配 ~3.7MB PSRAM 缓冲）
+#   可能内存不足，用精简版字体即可避免。
 CONFIG_SPIRAM_RODATA=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_MEMTEST=n

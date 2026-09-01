@@ -6,8 +6,13 @@
 #include "core/fonts/system_font.h"
 #include "core/fonts/system_smaller_font.h"
 #include "core/hardware/display.h"
+#include "core/image/cover_jpeg.h"
 #include "core/image/default_cover.h"
+#include "core/music/song_meta.h"
 #include "core/player/player_controller.h"
+#include "core/ui/lvgl_port.h"
+#include "core/utils/screen_sleep.h"
+#include "core/utils/sleep_timer.h"
 #include "ui/app.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
@@ -15,6 +20,8 @@
 #include "ui/player_ticker.h"
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 
 static const char *TAG = "now_playing";
@@ -47,6 +54,10 @@ static const char *TAG = "now_playing";
 /* 播放页底色：深灰色（非纯黑），封面图渐隐时露出，与其它页面形成层次 */
 #define NP_PAGE_BG_COLOR  0x1e1e1e
 
+/* 标题栏/控制栏半透明黑背景透明度（75% ≈ 191/255）：封面隐约透出。
+   LVGL 预定义透明度无 75% 档（70/80），直接用数值 */
+#define NP_BARS_OPA       ((lv_opa_t)191)
+
 /* 状态 */
 static lv_obj_t *s_page         = NULL;  /* tab 页容器 */
 static lv_obj_t *s_cover        = NULL;  /* 全屏封面图（本页子对象，滚动时隐藏、停止后渐显） */
@@ -67,6 +78,94 @@ static bool     s_cover_visible = false;  /* 封面图当前可见状态（避�
 #endif
 static bool     s_bars_opaque   = false;  /* 栏当前是否处于不透明纯黑状态（滚动中） */
 static bool     s_scroll_anim_running = false; /* 松手后的吸附/惯性滚动动画是否在进行中 */
+
+/* ------------------------------------------------------------------ */
+/* 封面加载（后台任务，歌曲变化时异步读取 .npd + JPEG 解码）              */
+/* ------------------------------------------------------------------ */
+
+#define COVER_TASK_STACK 8192   /* 解码调用链较深（tjpgd），与关机任务同规格 */
+#define COVER_TASK_PRIO  1      /* 低优先级：不抢音频解码（mp3 播放任务 8/9） */
+#define COVER_TASK_CORE  1      /* 与音频同核但优先级低，空闲时才解码 */
+
+static lv_img_dsc_t s_cover_img   = { 0 }; /* 当前显示的封面图（data 为分配内存） */
+static bool         s_cover_owned = false; /* 当前封面是否由本模块分配（需释放） */
+static volatile uint32_t s_pending_global = 0xFFFFFFFFu; /* 待加载封面的歌曲下标 */
+static TaskHandle_t s_cover_task = NULL;   /* 封面加载任务句柄 */
+
+/* 请求加载指定歌曲的封面（LVGL 任务上下文调用；仅置标志 + 通知，不阻塞） */
+static void cover_load_request(uint32_t global)
+{
+    s_pending_global = global;
+    if (s_cover_task != NULL) {
+        xTaskNotifyGive(s_cover_task);
+    }
+}
+
+/* 无封面/加载失败：切回默认封面（持锁，可在任务上下文调用） */
+static void cover_show_default(void)
+{
+    lvgl_port_lock(-1);
+    if (s_cover_owned) {
+        cover_jpeg_free(&s_cover_img);
+        s_cover_owned = false;
+    }
+    if (s_cover != NULL) {
+        lv_img_set_src(s_cover, DEFAULT_COVER_IMG);
+    }
+    lvgl_port_unlock();
+}
+
+/* 封面加载任务：等待通知 → 读取 .npd → JPEG 解码 → 持锁更新封面。
+   路径在任务开头快照（player_controller 的路径缓冲会被后续切歌覆盖）；
+   解码完成后校验"当前歌曲未变"才应用，避免快速切歌显示错封面。 */
+static void cover_load_task(void *arg)
+{
+    (void)arg;
+    char path[512];
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t target = s_pending_global;
+
+        const char *cur = player_controller_get_current_path();
+        if (cur == NULL || cur[0] == '\0') {
+            continue;
+        }
+        snprintf(path, sizeof(path), "%s", cur);
+
+        song_meta_t meta;
+        if (song_meta_load(path, &meta) != ESP_OK ||
+            meta.jpeg_data == NULL || meta.jpeg_len == 0) {
+            song_meta_free(&meta);
+            cover_show_default();
+            continue;
+        }
+
+        lv_img_dsc_t img;
+        esp_err_t r = cover_jpeg_decode(meta.jpeg_data, meta.jpeg_len, &img);
+        song_meta_free(&meta);
+        if (r != ESP_OK) {
+            cover_show_default();
+            continue;
+        }
+
+        /* 解码完成：确认还是这首歌才应用 */
+        player_controller_status_t st;
+        player_controller_get_status(&st);
+        if (st.cur_global != target) {
+            cover_jpeg_free(&img);
+            continue;
+        }
+
+        lvgl_port_lock(-1);
+        if (s_cover_owned) {
+            cover_jpeg_free(&s_cover_img);
+        }
+        s_cover_img = img;
+        s_cover_owned = true;
+        lv_img_set_src(s_cover, &s_cover_img);
+        lvgl_port_unlock();
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* 内部工具                                                             */
@@ -139,6 +238,35 @@ void now_playing_force_show_ui(void)
     }
 }
 
+/* 播放页挂机自动隐藏标题栏/控制栏（秒）：用户无操作（按键/触摸）超过该
+   时长，自动执行"点击封面隐藏"的同样效果。复用 screen_sleep 的空闲计时
+   （与自动息屏同一计时源），由本页自己的 lv_timer 每 1s 检查一次；
+   LVGL 挂起（息屏）时 timer 不运行，恢复后继续，无副作用。 */
+#define NP_AUTO_HIDE_IDLE_S  10
+
+/* 挂机自动隐藏检查（LVGL 任务上下文，每 1s）：
+   - 仅正在播放页（tab 2）且标题栏/控制栏当前可见时执行；
+   - 拖动进度条中不算"挂机"（用户在操作），跳过；
+   - 空闲达到 NP_AUTO_HIDE_IDLE_S 秒 → 隐藏（与点击封面效果一致）。 */
+static void np_auto_hide_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_ui_visible) {
+        return;                    /* 已隐藏（用户点击隐藏过），不重复处理 */
+    }
+    if (s_slider_dragging) {
+        return;                    /* 正在拖进度条：不算挂机 */
+    }
+    if (main_ui_get_current_tab() != 2) {
+        return;                    /* 不在正在播放页 */
+    }
+    if (screen_sleep_get_idle_sec() >= NP_AUTO_HIDE_IDLE_S) {
+        ESP_LOGI(TAG, "idle %d s on now playing, auto hide bars",
+                 NP_AUTO_HIDE_IDLE_S);
+        np_set_ui_visible(false);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 交互回调                                                             */
 /* ------------------------------------------------------------------ */
@@ -164,18 +292,21 @@ static void prev_btn_cb(lv_event_t *e)
 {
     (void)e;
     player_controller_prev();
+    sleep_timer_note_activity();   /* 切歌属于"用户动作"：清醒感知加时 */
 }
 
 static void play_btn_cb(lv_event_t *e)
 {
     (void)e;
     player_controller_toggle();
+    sleep_timer_note_activity();   /* 播放/暂停属于"用户动作"：清醒感知加时 */
 }
 
 static void next_btn_cb(lv_event_t *e)
 {
     (void)e;
     player_controller_next();
+    sleep_timer_note_activity();   /* 切歌属于"用户动作"：清醒感知加时 */
 }
 
 /* 进度条：按下标记拖动中（暂停自动跟随），松手时 seek 到拖动位置 */
@@ -190,6 +321,7 @@ static void slider_event_cb(lv_event_t *e)
         s_slider_dragging = false;
         player_controller_seek((uint32_t)lv_slider_get_value(slider));
         ESP_LOGI(TAG, "seek to %u s", (unsigned)lv_slider_get_value(slider));
+        sleep_timer_note_activity();   /* seek 属于"用户动作"：清醒感知加时 */
     }
 }
 
@@ -209,12 +341,14 @@ static void np_refresh_cb(const player_controller_status_t *st, void *ctx)
 {
     (void)ctx;
 
-    /* 歌曲变化时更新标题/副标题（跑马灯随 set_text 重新开始） */
+    /* 歌曲变化时更新标题/副标题（跑马灯随 set_text 重新开始），
+       并异步加载新歌曲的封面（后台任务读 .npd + JPEG 解码） */
     if (st->cur_global != s_last_global) {
         s_last_global = st->cur_global;
-        lv_label_set_text(s_title_label, st->song_name);
-        lv_label_set_text(s_sub_label, st->dir_name);
-        ESP_LOGI(TAG, "now playing: %s [%s]", st->song_name, st->dir_name);
+        lv_label_set_text(s_title_label, st->title);
+        lv_label_set_text(s_sub_label, st->subtitle);
+        ESP_LOGI(TAG, "now playing: %s [%s]", st->title, st->subtitle);
+        cover_load_request(st->cur_global);
     }
 
     /* 时长 */
@@ -329,7 +463,7 @@ static void np_on_scroll_end(void)
 #endif
     if (s_bars_opaque) {
         s_bars_opaque = false;
-        lv_opa_t bar_opa = s_ui_visible ? LV_OPA_50 : LV_OPA_TRANSP;
+        lv_opa_t bar_opa = s_ui_visible ? NP_BARS_OPA : LV_OPA_TRANSP;
         np_set_bars_bg_opa(bar_opa, true);
         app_status_set_bg_opa(bar_opa, true);
     }
@@ -390,7 +524,7 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
        NP_HIDE_COVER_ON_SCROLL=1 时初始透明度 0（隐藏），首次停在播放页时
        渐显、滑动时立即隐藏；=0 时始终显示 */
     s_cover = lv_img_create(s_page);
-    lv_img_set_src(s_cover, &default_cover);
+    lv_img_set_src(s_cover, DEFAULT_COVER_IMG);
     lv_obj_set_size(s_cover, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     lv_obj_set_pos(s_cover, 0, 0);
 #if NP_HIDE_COVER_ON_SCROLL
@@ -404,12 +538,12 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
     lv_obj_add_event_cb(cont, np_scroll_event_cb, LV_EVENT_SCROLL_BEGIN, NULL);
     lv_obj_add_event_cb(cont, np_scroll_event_cb, LV_EVENT_SCROLL_END, NULL);
 
-    /* 顶部标题栏：50% 半透明黑，位于状态栏下方；点击跳转到播放列表 */
+    /* 顶部标题栏：25% 半透明黑，位于状态栏下方；点击跳转到播放列表 */
     s_title_bar = lv_obj_create(s_page);
     lv_obj_set_size(s_title_bar, EXAMPLE_LCD_H_RES, NP_TITLE_BAR_H);
     lv_obj_set_pos(s_title_bar, 0, UI_STATUS_BAR_H);
     lv_obj_set_style_bg_color(s_title_bar, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_title_bar, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(s_title_bar, NP_BARS_OPA, 0);
     lv_obj_set_style_border_width(s_title_bar, 0, 0);
     lv_obj_set_style_radius(s_title_bar, 0, 0);   /* 无圆角 */
     lv_obj_set_style_pad_left(s_title_bar, 16, 0);
@@ -435,13 +569,13 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
                                         lv_palette_main(LV_PALETTE_GREY));
     lv_obj_set_pos(s_sub_label, 0, 40);
 
-    /* 底部控制栏：50% 半透明黑 */
+    /* 底部控制栏：25% 半透明黑 */
     s_control_bar = lv_obj_create(s_page);
     lv_obj_set_size(s_control_bar, EXAMPLE_LCD_H_RES, NP_CONTROL_BAR_H);
     lv_obj_set_pos(s_control_bar, 0,
                    EXAMPLE_LCD_V_RES - NP_CONTROL_BAR_H);
     lv_obj_set_style_bg_color(s_control_bar, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_control_bar, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(s_control_bar, NP_BARS_OPA, 0);
     lv_obj_set_style_border_width(s_control_bar, 0, 0);
     lv_obj_set_style_radius(s_control_bar, 0, 0);   /* 无圆角 */
     lv_obj_set_style_pad_all(s_control_bar, 0, 0);
@@ -504,6 +638,26 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
         np_refresh_cb(&st_now, NULL);
     }
     player_ticker_subscribe(np_refresh_cb, NULL);
+
+    /* 创建封面加载任务（歌曲变化时后台读 .npd + 解码 JPEG，完成后持锁换图）。
+       首次 np_refresh_cb 发生在任务创建前，当时的加载请求因句柄为空被丢弃，
+       创建成功后需主动补发一次，加载当前歌曲封面 */
+    BaseType_t created = xTaskCreatePinnedToCore(cover_load_task, "cover_load",
+                                                 COVER_TASK_STACK, NULL,
+                                                 COVER_TASK_PRIO, &s_cover_task,
+                                                 COVER_TASK_CORE);
+    if (created == pdPASS) {
+        player_controller_status_t st_init;
+        player_controller_get_status(&st_init);
+        cover_load_request(st_init.cur_global);
+    } else {
+        s_cover_task = NULL;
+        ESP_LOGE(TAG, "create cover load task failed");
+    }
+
+    /* 挂机自动隐藏标题栏/控制栏：每 1s 检查空闲时长（复用自动息屏的空闲
+       计时），达到 NP_AUTO_HIDE_IDLE_S 秒且停在播放页时自动隐藏 */
+    lv_timer_create(np_auto_hide_timer_cb, 1000, NULL);
 
     ESP_LOGI(TAG, "now playing page created");
     return s_page;

@@ -8,6 +8,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/playlist.h"
 #include "core/ui/virtual_list.h"
+#include "core/utils/sleep_timer.h"
 #include "ui/list_common.h"
 #include "ui/player_ticker.h"
 
@@ -64,6 +65,7 @@ static void song_selected_cb(uint32_t index, void *user_data)
     ESP_LOGI(TAG, "play song: index=%u global=%u",
              (unsigned)index, (unsigned)global);
     player_controller_play_song(global);
+    sleep_timer_note_activity();   /* 选歌切歌属于"用户动作"：清醒感知加时 */
 }
 
 /* ------------------------------------------------------------------ */
@@ -158,7 +160,8 @@ void playlist_page_show_dir(uint32_t dir_index)
     lv_obj_set_pos(s_list, 0, PLIST_STATUS_Y + UI_TITLE_BAR_H);
     virtual_list_set_selected_cb(s_list, song_selected_cb);
 
-    /* 若展示的正是正在播放的目录：定位并高亮当前歌曲 */
+    /* 若展示的正是正在播放的目录：定位到当前歌曲（"正在播放"由绑定回调
+       以文字黄色标注，选中状态仅内部记录） */
     player_controller_status_t st;
     player_controller_get_status(&st);
     if (st.has_song && st.cur_dir == dir_index) {

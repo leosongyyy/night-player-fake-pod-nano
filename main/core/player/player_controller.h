@@ -64,6 +64,8 @@ typedef struct {
     uint32_t duration_s;          /* 当前歌曲总时长（秒，0=未知） */
     char dir_name[128];           /* 当前目录/歌单名 */
     char song_name[256];          /* 当前歌曲文件名（含扩展名） */
+    char title[128];              /* 歌曲标题（来自 .npd 元数据，无则同 song_name） */
+    char subtitle[128];           /* 副标题 = 艺术家 - 专辑（来自 .npd，无则同 dir_name） */
 } player_controller_status_t;
 
 /**
@@ -79,6 +81,20 @@ esp_err_t player_controller_init(void);
 
 /** @brief 控制器是否已就绪（初始化成功且已加载播放列表） */
 bool player_controller_is_ready(void);
+
+/**
+ * @brief 释放播放控制器（重新扫描等"数据失效后重启"流程使用）
+ *
+ * 停止播放并等待解码任务退出 → 挂起控制器任务（不再处理命令队列）→
+ * 删除命令队列 → 卸载播放列表（munmap + 清空 playlist 指针）。
+ *
+ * ⚠ 调用后播放列表数据不可再访问（playlist_* 返回空/0），控制器任务已
+ * 挂起不会再触碰 playlist 指针；调用方须确保不再投递控制命令
+ * （player_post_cmd 对空队列已判空返回）。
+ *
+ * 可重复调用（幂等）。重新初始化请走 player_controller_init（重启后）。
+ */
+void player_controller_deinit(void);
 
 /* ---------- 控制方法（供前端界面 / 按键调用，线程安全，非阻塞） ---------- */
 
@@ -134,6 +150,14 @@ bool player_controller_get_shuffle(void);
 
 /** @brief 读取播放器状态快照（供前端界面刷新） */
 void player_controller_get_status(player_controller_status_t *out);
+
+/**
+ * @brief 获取当前歌曲的完整播放路径（"/sdcard/..."）
+ *
+ * 返回控制器内部静态缓冲（只读，勿修改/释放）；无当前歌曲时返回空串。
+ * 供元数据/封面加载等需要文件路径的模块使用。
+ */
+const char *player_controller_get_current_path(void);
 
 #ifdef __cplusplus
 }

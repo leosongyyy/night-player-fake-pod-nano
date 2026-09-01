@@ -108,7 +108,8 @@ static void dir_list_build(void)
     lv_obj_set_pos(s_list, 0, DIR_LIST_Y);
     virtual_list_set_selected_cb(s_list, dir_selected_cb);
 
-    /* 定位到当前播放目录并高亮（进入界面即能看到正在播放的列表） */
+    /* 定位到当前播放目录（进入界面即能看到正在播放的列表；
+       "正在播放"由绑定回调以文字黄色标注，选中状态仅内部记录） */
     player_controller_status_t st;
     player_controller_get_status(&st);
     if (st.has_song) {

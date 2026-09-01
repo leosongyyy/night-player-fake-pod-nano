@@ -1,6 +1,6 @@
 /*******************************************************************************
  * system_global_font.h
- * 系统全局默认字体（MiSans-Normal 18px，bpp 2，含常用中文/符号）。
+ * 系统全局默认字体（MiSans-Normal 24px，bpp 2，含常用中文/符号）。
  * 由 lv_font_conv 生成在 system_global_font.c，此处仅导出字体描述符声明。
  *
  * 注意：本字体不包含 LVGL 内置的 PUA 区图标字形（LV_SYMBOL_*，U+F001~F8FF），

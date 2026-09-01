@@ -63,6 +63,14 @@ bool screen_sleep_is_sleeping(void);
  */
 void screen_sleep_note_activity(void);
 
+/**
+ * @brief 距最近一次用户活动的空闲秒数（无操作已持续多久）
+ *
+ * 供 UI 复用"空闲计时"实现挂机行为（如正在播放页挂机 10 秒自动隐藏
+ * 标题栏/控制栏）。任意线程可调用。
+ */
+uint32_t screen_sleep_get_idle_sec(void);
+
 #ifdef __cplusplus
 }
 #endif

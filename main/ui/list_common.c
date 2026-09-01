@@ -54,14 +54,24 @@ lv_obj_t *ui_title_bar_create(lv_obj_t *parent, const char *title,
     lv_label_set_text(t->title_lbl, title);
     lv_obj_set_style_text_font(t->title_lbl, UI_SYSTEM_FONT, 0);
     lv_obj_set_style_text_color(t->title_lbl, lv_color_white(), 0);
-    lv_obj_align(t->title_lbl, LV_ALIGN_LEFT_MID, 16, 0);
+    /* 标题占标题栏左侧 3/4 宽（与右侧计数 1/4 按 3:1 划分，互不覆盖）：
+       超长文本直接裁剪（不换行、不跑马灯），保证永远不盖住计数显示 */
+    lv_obj_set_width(t->title_lbl, LV_PCT(75));
+    lv_obj_set_style_pad_left(t->title_lbl, 16, 0);
+    lv_label_set_long_mode(t->title_lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_align(t->title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
 
     if (sub != NULL) {
         t->sub_lbl = lv_label_create(bar);
         lv_label_set_text(t->sub_lbl, sub);
         lv_obj_set_style_text_font(t->sub_lbl, UI_SYSTEM_FONT, 0);
         lv_obj_set_style_text_color(t->sub_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_align(t->sub_lbl, LV_ALIGN_RIGHT_MID, -16, 0);
+        /* 计数占标题栏右侧 1/4 宽：文本右对齐，超长同样裁剪 */
+        lv_obj_set_width(t->sub_lbl, LV_PCT(25));
+        lv_obj_set_style_pad_right(t->sub_lbl, 16, 0);
+        lv_obj_set_style_text_align(t->sub_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_long_mode(t->sub_lbl, LV_LABEL_LONG_CLIP);
+        lv_obj_align(t->sub_lbl, LV_ALIGN_RIGHT_MID, 0, 0);
     }
 
     lv_obj_set_user_data(bar, t);
@@ -85,12 +95,16 @@ void ui_title_bar_set_text(lv_obj_t *bar, const char *title, const char *sub)
 
     if (sub != NULL) {
         if (t->sub_lbl == NULL) {
-            /* 首次出现计数文字时动态创建（右对齐灰色小字） */
+            /* 首次出现计数文字时动态创建（占右侧 1/4 宽、右对齐灰色小字） */
             t->sub_lbl = lv_label_create(bar);
             lv_obj_set_style_text_font(t->sub_lbl, UI_SYSTEM_FONT, 0);
             lv_obj_set_style_text_color(t->sub_lbl,
                                         lv_palette_main(LV_PALETTE_GREY), 0);
-            lv_obj_align(t->sub_lbl, LV_ALIGN_RIGHT_MID, -16, 0);
+            lv_obj_set_width(t->sub_lbl, LV_PCT(25));
+            lv_obj_set_style_pad_right(t->sub_lbl, 16, 0);
+            lv_obj_set_style_text_align(t->sub_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+            lv_label_set_long_mode(t->sub_lbl, LV_LABEL_LONG_CLIP);
+            lv_obj_align(t->sub_lbl, LV_ALIGN_RIGHT_MID, 0, 0);
         }
         lv_label_set_text(t->sub_lbl, sub);
         lv_obj_clear_flag(t->sub_lbl, LV_OBJ_FLAG_HIDDEN);

@@ -19,7 +19,7 @@ extern "C" {
  *   - 字符串/颜色由外部绑定回调动态解析（数据源不依赖具体格式）
  *   - cell 锚定在内容坐标（index × item_height），滚动时只有滚出/滚入视口的
  *     cell 被回收重绑，常驻 cell 的位置/文本/颜色/跑马灯全程不被触碰
- *   - 支持滚动到指定下标、刷新重渲染、点击选中与高亮
+ *   - 支持滚动到指定下标、刷新重渲染、点击选中与按下反馈
  *   - 样式写死在本组件内（整个项目仅目录/歌曲两处列表复用）
  *
  * ⚠ 依赖 `CONFIG_LV_USE_LARGE_COORD=y`（lv_coord_t 升级为 int32_t）：
@@ -90,7 +90,9 @@ void virtual_list_refresh(lv_obj_t *list);
 /**
  * @brief 设置选中条目（-1 表示取消选中）
  *
- * 选中条目会叠加背景高亮（不覆盖绑定回调设置的文字颜色）。
+ * 仅记录选中状态（供 virtual_list_get_selected 查询），不渲染背景：
+ * 点击反馈为按下瞬间的黄色背景（LV_STATE_PRESSED），松开即消失，
+ * 无常驻高亮；"当前播放中"的条目由绑定回调以文字黄色标注。
  */
 void virtual_list_set_selected(lv_obj_t *list, int32_t index);
 

@@ -71,11 +71,28 @@ esp_err_t audio_pcm_start(audio_fs_t fs);
 /**
  * @brief 写入交织的 16bit PCM 样本（[L0,R0,L1,R1,...]），阻塞直到送入 I2S DMA
  *
+ * 内部做 int16 → int32 左对齐转换时应用回放增益（audio_set_replay_gain
+ * 设置的系数），增益后样本钳位在 int16 范围，防止增益 >1 时溢出环绕爆音。
+ *
  * @param samples 交织样本数组
  * @param frames  帧数（每帧 = 左右各 1 个样本）
  * @return ESP_OK 成功
  */
 esp_err_t audio_pcm_write(const int16_t *samples, size_t frames);
+
+/** 默认回放增益：1.0（0dB），16.16 定点 */
+#define AUDIO_REPLAY_GAIN_UNITY 65536u
+
+/**
+ * @brief 设置回放增益（16.16 定点线性系数，65536 = 1.0 = 0dB）
+ *
+ * 切歌时由上层（player_controller）按歌曲元数据的 replaygain 调用，
+ * 应用于 audio_pcm_write 的 int16→int32 转换（每样本乘增益再截断）。
+ * 0 或无效值会被钳位到默认 1.0。
+ *
+ * @param gain_q16 线性增益 × 65536（如 -6dB ≈ 0.5012 → 32854）
+ */
+void audio_set_replay_gain(uint32_t gain_q16);
 
 /**
  * @brief 停止 PCM 播放（停 I2S + 静音 DAC）

@@ -2,6 +2,7 @@
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/notification_panel.h"
+#include "ui/settings_menu.h"
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/audio.h"
@@ -36,12 +37,12 @@ static lv_obj_t *page_title_label = NULL;   /* 状态栏中央：当前页面名
 static lv_obj_t *vol_label        = NULL;   /* 状态栏左侧：音量图标+数值（单 label） */
 static lv_obj_t *bat_label        = NULL;   /* 状态栏右侧：电池图标+电压（单 label） */
 
-/* 状态栏图标与数值字体：统一用 LVGL 内置 Montserrat 16。
+/* 状态栏图标与数值字体：统一用 LVGL 内置 Montserrat 20。
    - 图标：LVGL 内置字体含 LV_SYMBOL 图标字形（系统精简字体不含 PUA 区图标）；
    - 数值：音量/电压只有数字、字母、小数点（非中文），无需系统字体，
-     用内置字体即可（比 24px 系统字体更小、更紧凑）。
+     用内置字体即可（比系统字体更小、更紧凑，字号比 16px 更清晰）。
    状态栏中央的页面名称（中文）仍用 UI_SYSTEM_FONT。 */
-#define STATUS_SMALL_FONT  (&lv_font_montserrat_16)
+#define STATUS_SMALL_FONT  (&lv_font_montserrat_20)
 
 /* 状态栏背景不透明度渐变时长（ms）：与播放页封面渐显/栏恢复同步 */
 #define STATUS_BAR_FADE_MS  300
@@ -127,11 +128,13 @@ static lv_obj_t *create_status_bar(void)
     lv_obj_set_size(status, EXAMPLE_LCD_H_RES, STATUS_BAR_H);
     lv_obj_set_pos(status, 0, 0);
     s_status_bar = status;
-    /* 半透明黑背景（50%）：下面主界面内容隐约透出，为沉浸式封面做准备；
-       无底部边框线 */
+    /* 半透明黑背景（75% ≈ 191/255；LVGL 无 75% 预定义档，用数值）：
+       下面主界面内容隐约透出，为沉浸式封面做准备；无底部边框线。
+       显式去圆角：默认主题的 lv_obj 带圆角，全宽条两端会显示圆角 */
     lv_obj_set_style_bg_color(status, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(status, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(status, (lv_opa_t)191, 0);
     lv_obj_set_style_border_width(status, 0, 0);
+    lv_obj_set_style_radius(status, 0, 0);
     lv_obj_set_style_pad_all(status, 0, 0);
 
     /* 左侧：音量（固定图标 + 空格 + 数值，单 label） */
@@ -180,6 +183,11 @@ void app_ui_create(void)
 
     ESP_LOGI(TAG, "Create notification panel");
     notification_panel_create(status_bar);
+
+    ESP_LOGI(TAG, "Create settings menu");
+    /* 全屏设置菜单（lv_menu，暗色主题）：最后创建 → 覆盖在所有界面之上，
+       由通知栏的设置按钮打开，初始隐藏 */
+    settings_menu_create();
 }
 
 void app_status_set_page(uint8_t tab_index)
@@ -203,8 +211,8 @@ void app_status_set_ui_visible(bool visible)
     /* 立即设置前先删除进行中的背景渐变动画，避免动画回调覆盖新值 */
     lv_anim_del(s_status_bar, status_bg_opa_anim_cb);
     if (visible) {
-        /* 恢复：半透明黑背景 + 显示三个内容 label */
-        lv_obj_set_style_bg_opa(s_status_bar, LV_OPA_50, 0);
+        /* 恢复：半透明黑背景（75%）+ 显示三个内容 label */
+        lv_obj_set_style_bg_opa(s_status_bar, (lv_opa_t)191, 0);
         lv_obj_clear_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(bat_label, LV_OBJ_FLAG_HIDDEN);

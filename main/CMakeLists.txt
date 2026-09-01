@@ -26,6 +26,8 @@ set(MAIN_SRCS
     "core/fonts/system_smaller_font.c"
     "core/fonts/system_global_font_lite.c"
     "core/image/default_cover.c"
+    "core/image/cover_jpeg.c"
+    "core/music/song_meta.c"
     "ui/app.c"
     "ui/boot_flow.c"
     "ui/dir_list.c"
@@ -36,17 +38,28 @@ set(MAIN_SRCS
     "ui/notification_panel.c"
     "ui/player_ticker.c"
     "ui/playlist_page.c"
+    "ui/settings_menu.c"
     "ui/settings_page.c")
 
-# 完整版系统字体体积很大（固件约 3.3MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
+# 完整版系统字体体积很大（固件约 4.1MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
 # 开启时才编译；关闭时改用精简版 system_global_font_lite，便于调试快速烧录。
+# ⚠ 曾尝试 SPIFFS 运行时加载（font_store），实测解析 ~8 秒开机太慢已回退。
 if(CONFIG_UI_SYSTEM_FONT_FULL)
     list(APPEND MAIN_SRCS "core/fonts/system_global_font.c")
+endif()
+
+# 极速版默认封面（RGB565 真彩色，423KB）仅当 CONFIG_UI_COVER_FLASH 开启时编译；
+# 关闭时用 2bit 索引色版 default_cover.c（52KB，省空间、渲染略慢）。
+if(CONFIG_UI_COVER_FLASH)
+    list(APPEND MAIN_SRCS "core/image/default_cover_flash.c")
 endif()
 
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "." "core" "ui")
+# ⚠ spiffs 组件依赖通过 main/idf_component.yml 声明（"spiffs: \"*\"")，
+#    不用 PRIV_REQUIRES：显式 REQUIRES 会覆盖 IDF 默认的"自动依赖全部组件"，
+#    导致本地/系统组件逐一缺失。
 
 set_source_files_properties(
     ${LV_DEMOS_SOURCES}

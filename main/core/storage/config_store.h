@@ -21,6 +21,10 @@ extern "C" {
  *   - 随机播放位置 shuffle_pos（uint64，无限确定性随机序列的逻辑位置），
  *     由 player_controller 在切歌/暂停/关机时保存，开机恢复随机序列现场
  *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）
+ *   - 开机默认开启睡眠定时 sleep_def_on（bool，默认关）：开机自动用默认时长
+ *     开启睡眠定时器（在 main.c 的 sleep_timer_init 之后应用）
+ *   - 睡眠定时清醒感知 sleep_awake（bool，默认开）：睡眠定时开启期间，切歌/
+ *     调音量等用户动作按 NightPlayer 算法折算加时（见 core/utils/sleep_timer）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/screen_sleep），设置页可调
  *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
@@ -49,6 +53,8 @@ extern "C" {
 #define CONFIG_STORE_BRIGHTNESS_MIN     16u  /* 亮度下限（0~255 总量程）：防止屏幕完全看不清 */
 #define CONFIG_STORE_LOOP_DEFAULT       2u   /* PLAYER_LOOP_LIST */
 #define CONFIG_STORE_SLEEP_DEFAULT_MIN  45u
+#define CONFIG_STORE_SLEEP_DEF_ON_DEFAULT 0u  /* 开机默认不自动开启睡眠定时 */
+#define CONFIG_STORE_SLEEP_AWAKE_DEFAULT 1u   /* 睡眠清醒感知默认开启（NightPlayer 行为） */
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
 
 /** 配置变更回调（在调用 set_xxx 的线程上下文中同步执行） */
@@ -87,6 +93,12 @@ bool config_store_get_shuffle_pos(uint64_t *pos);
 /** @brief 睡眠定时的默认时长（分钟，0=无默认） */
 uint32_t config_store_get_sleep_default_min(void);
 
+/** @brief 开机默认是否开启睡眠定时器（true=开机自动用默认时长开启） */
+bool config_store_get_sleep_def_on(void);
+
+/** @brief 睡眠定时清醒感知开关（true=切歌/调音量等动作按 NightPlayer 算法加时） */
+bool config_store_get_sleep_awake(void);
+
 /** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
 uint32_t config_store_get_screen_off_s(void);
 
@@ -121,6 +133,12 @@ void config_store_set_shuffle_pos(uint64_t pos);
 
 /** @brief 设置睡眠定时的默认时长并持久化（分钟，0=关闭） */
 void config_store_set_sleep_default_min(uint32_t minutes);
+
+/** @brief 设置开机默认开启睡眠定时器并持久化 */
+void config_store_set_sleep_def_on(bool on);
+
+/** @brief 设置睡眠清醒感知开关并持久化 */
+void config_store_set_sleep_awake(bool on);
 
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);

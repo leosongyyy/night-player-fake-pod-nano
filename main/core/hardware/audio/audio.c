@@ -51,6 +51,10 @@ static audio_fs_t cur_fs = AUDIO_FS_48000;
 static uint16_t cur_freq = 0;
 static uint8_t volume_level = AUDIO_VOL_LEVEL_DEFAULT;
 
+/* 回放增益（16.16 定点线性系数，65536 = 0dB）：由上层按歌曲元数据设置，
+   应用于 audio_pcm_write 的 int16→int32 转换 */
+static uint32_t replay_gain = AUDIO_REPLAY_GAIN_UNITY;
+
 static int16_t sine_table[SINE_TABLE_SIZE];
 
 /* 静音冲刷缓冲：覆盖整条 I2S DMA 链（6×240×2 个 32bit 样本 = 11520 字节），
@@ -307,10 +311,18 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames)
     size_t remain = frames;
     while (remain > 0) {
         size_t chunk = remain > AUDIO_BUF_FRAMES ? AUDIO_BUF_FRAMES : remain;
-        /* 16bit 交织 → 32bit slot 左对齐（MSB 对齐，匹配 CS43131 32bit slot） */
+        /* 16bit 交织 → 32bit slot 左对齐（MSB 对齐，匹配 CS43131 32bit slot）。
+           ⚠ 回放增益直接在 32bit 域一步完成：int16 → int32 左对齐本身就是
+           ×65536（<<16），增益 g（16.16 定点）与之合成后等于样本 ×g，
+           无需（也不允许）先截回 int16 再左移——截回会丢失增益<1 时低
+           16 位的小数精度，且增益>1 时截回会削成方波。int64 中间量防
+           int32 乘法溢出 UB；增益>1 导致的 32bit 饱和/回绕不做钳位
+           （元数据增益以 ≤0dB 为主，正常音量不会溢出） */
         for (size_t i = 0; i < chunk; i++) {
-            pcm_buf[2 * i]     = ((int32_t)src[2 * i]) << 16;
-            pcm_buf[2 * i + 1] = ((int32_t)src[2 * i + 1]) << 16;
+            int32_t l = (int32_t)((int64_t)src[2 * i] * (int64_t)replay_gain);
+            int32_t r = (int32_t)((int64_t)src[2 * i + 1] * (int64_t)replay_gain);
+            pcm_buf[2 * i]     = l;
+            pcm_buf[2 * i + 1] = r;
         }
         size_t bytes = chunk * 2 * sizeof(int32_t);
         size_t written = 0;
@@ -333,6 +345,21 @@ esp_err_t audio_pcm_stop(void)
     }
     cs43131_set_mute(true);   /* 停止后静音 DAC */
     return ESP_OK;
+}
+
+void audio_set_replay_gain(uint32_t gain_q16)
+{
+    /* 增益钳位到 [0.25x, 4x]（16.16 定点 16384 ~ 262144）：过小的值几近
+       无声（异常数据），过大必然严重削波，两端都无实际意义 */
+    if (gain_q16 == 0 || gain_q16 > 262144u) {
+        gain_q16 = AUDIO_REPLAY_GAIN_UNITY;
+    } else if (gain_q16 < 16384u) {
+        gain_q16 = 16384u;
+    }
+    replay_gain = gain_q16;
+    ESP_LOGI(TAG, "replay gain set: %u.%04u (x%.3f)",
+             gain_q16 >> 16, (unsigned)(gain_q16 & 0xFFFF),
+             (double)gain_q16 / 65536.0);
 }
 
 /* 音量档位 → 百分比：1~30 线性映射 20%~80%（整数运算，端点到点：

@@ -7,15 +7,12 @@
 
 static const char *TAG = "vlist";
 
-/* 选中条目的背景色（深蓝灰）：叠加在绑定回调设置的文字颜色之上，
-   只作为选中高亮，不覆盖文字颜色，便于与"当前播放中"的文字变色区分 */
-#define VLIST_SELECTED_BG   lv_palette_darken(LV_PALETTE_BLUE, 3)
-
 /* 条目文字左右内边距（右侧留白避免被原生滚动条压住） */
 #define VLIST_PAD_H         16
 
-/* 条目文字上下内边距（用于在固定高度的 cell 里视觉上垂直居中） */
-#define VLIST_PAD_V         6
+/* 按下反馈背景色：50% 黄 + 50% 黑（0x7f7f00）。
+   仅按下瞬间显示（LV_STATE_PRESSED），松开自动恢复透明，无常驻选中背景 */
+#define VLIST_PRESSED_BG    0x7f7f00
 
 /* 未绑定条目的哨兵值（cell 当前无对应数据时） */
 #define VLIST_NO_INDEX      0xFFFFFFFFu
@@ -55,18 +52,6 @@ static void vlist_hit_test_cb(lv_event_t *e)
     info->res = false;
 }
 
-/* 仅更新某个 cell 的选中背景（不碰文本/动画，供选中变化时单独刷新） */
-static void vlist_apply_selected_style(virtual_list_state_t *st,
-                                       lv_obj_t *cell, uint32_t index)
-{
-    if ((int32_t)index == st->selected) {
-        lv_obj_set_style_bg_color(cell, VLIST_SELECTED_BG, 0);
-        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
-    } else {
-        lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
-    }
-}
-
 /* 把跑马灯开关应用到所有 cell 的长文本模式：
    开启 → 循环滚动；关闭 → 裁剪。
    （不再随滚动临时切换：常驻 cell 滚动时不被重绑，跑马灯保持连续，
@@ -80,14 +65,14 @@ static void vlist_apply_marquee(virtual_list_state_t *st)
     }
 }
 
-/* 把某个 cell 绑定到指定条目：先让用户回调填文本/颜色，再叠加选中高亮 */
+/* 把某个 cell 绑定到指定条目：让用户回调填文本/颜色（cell 无选中背景，
+   "当前播放中"的标注由绑定回调用文字颜色实现） */
 static void vlist_bind_cell(virtual_list_state_t *st, lv_obj_t *cell,
                             uint32_t index)
 {
     const uint8_t *item = (const uint8_t *)st->data +
                           (size_t)index * st->item_size;
     st->bind_cb(cell, index, item, st->user_data);
-    vlist_apply_selected_style(st, cell, index);
 }
 
 /* 视口槽位式重绑（虚拟滚动核心）：
@@ -278,6 +263,16 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         return NULL;
     }
 
+    /* 文本垂直居中所需的顶部内边距：label 高度被强制固定为 item_height
+       （虚拟列表定位要求，不能自适应高度），而文本从内容区顶部绘制，
+       故顶部留白 = (item_height - 行高)/2 使文本视觉居中；
+       底部不留边距，保证内容区高度 ≥ 行高，避免超行高文本被裁切 */
+    lv_coord_t line_h = lv_font_get_line_height(UI_SYSTEM_FONT);
+    lv_coord_t pad_top = (item_height - line_h) / 2;
+    if (pad_top < 0) {
+        pad_top = 0;   /* 行高超过条目高度时的防御：不设上边距 */
+    }
+
     for (uint32_t i = 0; i < st->cell_count; i++) {
         lv_obj_t *cell = lv_label_create(list);
         lv_obj_set_size(cell, LV_PCT(100), item_height);
@@ -285,10 +280,14 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         lv_obj_set_style_text_color(cell, lv_color_white(), 0);
         lv_obj_set_style_pad_left(cell, VLIST_PAD_H, 0);
         lv_obj_set_style_pad_right(cell, VLIST_PAD_H, 0);
-        lv_obj_set_style_pad_top(cell, VLIST_PAD_V, 0);
-        lv_obj_set_style_pad_bottom(cell, VLIST_PAD_V, 0);
+        lv_obj_set_style_pad_top(cell, pad_top, 0);
+        lv_obj_set_style_pad_bottom(cell, 0, 0);
         lv_obj_set_style_radius(cell, 0, 0);
         lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+        /* 按下反馈：仅按压瞬间显示黄色背景（50% 黄 + 50% 黑），
+           松开后 LVGL 自动清除 PRESSED 状态、恢复透明背景（无颜色） */
+        lv_obj_set_style_bg_color(cell, lv_color_hex(VLIST_PRESSED_BG), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, LV_STATE_PRESSED);
         lv_label_set_long_mode(cell, LV_LABEL_LONG_SCROLL_CIRCULAR); /* 超长文本跑马灯循环滚动 */
         lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);    /* 作为点击目标 */
         lv_obj_add_flag(cell, LV_OBJ_FLAG_EVENT_BUBBLE); /* 让 CLICKED 冒泡到 list（LVGL 8 默认不冒泡） */
@@ -345,16 +344,12 @@ void virtual_list_set_selected(lv_obj_t *list, int32_t index)
         index = -1;   /* 越界当作取消选中 */
     }
     if (st->selected == index) {
-        return;   /* 未变化，无需重渲染 */
+        return;   /* 未变化，无需处理 */
     }
     st->selected = index;
-    /* 只刷新可见 cell 的选中背景，不重新赋值文本（避免跑马灯动画被重置） */
-    for (uint32_t i = 0; i < st->cell_count; i++) {
-        uint32_t idx = st->cell_indices[i];
-        if (idx != VLIST_NO_INDEX) {
-            vlist_apply_selected_style(st, st->cells[i], idx);
-        }
-    }
+    /* 选中状态仅内部记录（供 get_selected 查询），不再渲染背景：
+       常驻选中背景已移除，点击反馈改为按下瞬间的黄色高亮（松开即消失）；
+       "当前播放中"的条目由绑定回调以文字黄色标注 */
 }
 
 int32_t virtual_list_get_selected(lv_obj_t *list)

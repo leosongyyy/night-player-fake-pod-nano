@@ -1,5 +1,6 @@
 #include "ui/notification_panel.h"
 #include "ui/list_common.h"
+#include "ui/settings_menu.h"
 
 #include "core/fonts/system_font.h"
 #include "core/fonts/system_smaller_font.h"
@@ -18,6 +19,7 @@ static const char *TAG = "notification_panel";
 
 #define NOTIF_BAR_HEIGHT   EXAMPLE_LCD_V_RES  /* 全屏下拉面板 */
 #define NOTIF_TRIGGER_H    UI_STATUS_BAR_H    /* 顶部触发区域高度（= 状态栏高度） */
+#define GRAB_BAR_H         69                 /* 底部上拉把手/判定区高度（视觉与手势区域一致） */
 #define PANEL_OPEN_Y       0                  /* 面板展开时顶部 y（全屏） */
 #define PANEL_CLOSED_Y     (-NOTIF_BAR_HEIGHT) /* 收起时完全隐藏于屏幕上方 */
 
@@ -29,8 +31,9 @@ static const char *TAG = "notification_panel";
 /* 控制中心布局参数                                                     */
 /* ------------------------------------------------------------------ */
 
-/* 顶部状态信息区高度（与主状态栏等高，左音量右电量） */
-#define NOTIF_HEADER_H   UI_STATUS_BAR_H
+/* 顶部状态信息区高度：与底部把手区等高（69px，对称），
+   使中间控件组在屏幕上垂直居中。内部为 23px 顶边距 + 28px 字号 + 18px 底部留白 */
+#define NOTIF_HEADER_H   69
 
 /* 中间内容区：四周填充与列间距 */
 #define CONTENT_PAD      20
@@ -147,7 +150,7 @@ static void notif_panel_event_cb(lv_event_t *e)
     switch (code) {
     case LV_EVENT_PRESSED: {
         bool in_top_grab    = (ty < NOTIF_TRIGGER_H);
-        bool in_bottom_grab = (ty >= EXAMPLE_LCD_V_RES - NOTIF_TRIGGER_H);
+        bool in_bottom_grab = (ty >= EXAMPLE_LCD_V_RES - GRAB_BAR_H);
         if (!dragging && (in_top_grab || in_bottom_grab)) {
             dragging = true;
             drag_press_y = ty;
@@ -240,6 +243,8 @@ static void notif_apply_volume(uint8_t level)
     sleep_timer_fade_cancel();
     audio_set_volume_level(level);          /* 先写硬件（回调读到的即新值） */
     config_store_set_volume(level);         /* 后持久化 + 通知回调（持锁安全） */
+    /* 音量调节属于"用户动作"：睡眠定时清醒感知加时 */
+    sleep_timer_note_activity();
 }
 
 /* ------------------------------------------------------------------ */
@@ -312,6 +317,17 @@ static void battery_timer_cb(lv_timer_t *timer)
 /* ------------------------------------------------------------------ */
 /* 竖条滑动交互（亮度 / 音量，iOS 控制中心风格）                        */
 /* ------------------------------------------------------------------ */
+
+/* 左列第二个按钮（设置）：收起通知栏后打开全屏设置菜单（lv_menu）。
+   点击设置按钮时通知栏保持展开状态，由菜单覆盖其上（菜单创建晚于
+   通知栏，位于更上层），视觉上直接"进入设置"。 */
+static void settings_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "open settings menu");
+    notif_animate_to(PANEL_CLOSED_Y);   /* 收起通知栏（菜单覆盖其上） */
+    settings_menu_show();
+}
 
 /* 亮度竖条滑动：上滑变亮、下滑变暗，每滑动 5px 调整 1%（0~255 无上限限制，
    可直接滑到最大；下限钳制到 BRIGHT_SLIDE_MIN，防止屏幕完全看不清）。
@@ -468,10 +484,10 @@ static lv_obj_t *vertical_bar_create(lv_obj_t *parent, lv_obj_t **fill_out,
     lv_obj_clear_flag(fill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(fill, LV_SCROLLBAR_MODE_OFF);
 
-    /* 底部彩色图标（加大号，后创建叠加在填充条上方，容器内底部居中） */
+    /* 底部彩色图标（28px 加大号，后创建叠加在填充条上方，容器内底部居中） */
     lv_obj_t *icon_lbl = lv_label_create(track);
     lv_label_set_text(icon_lbl, icon);
-    lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(icon_lbl, icon_color, 0);
     lv_obj_align(icon_lbl, LV_ALIGN_BOTTOM_MID, 0, -TRACK_ICON_PAD_BOTTOM);
 
@@ -481,9 +497,9 @@ static lv_obj_t *vertical_bar_create(lv_obj_t *parent, lv_obj_t **fill_out,
     return track;
 }
 
-/* 圆形占位按钮：默认深灰底（与竖条容器同色），按下时黄色高亮。
-   功能暂未定义（仅外观占位，图标后续按功能替换）。 */
-static void round_btn_create(lv_obj_t *parent, const char *icon)
+/* 圆形按钮：默认深灰底（与竖条容器同色），按下时黄色高亮。
+   返回按钮句柄（供调用方挂点击事件）。 */
+static lv_obj_t *round_btn_create(lv_obj_t *parent, const char *icon)
 {
     lv_obj_t *btn = lv_obj_create(parent);
     lv_obj_set_size(btn, ROUND_BTN_DIAM, ROUND_BTN_DIAM);
@@ -498,9 +514,10 @@ static void round_btn_create(lv_obj_t *parent, const char *icon)
 
     lv_obj_t *icon_lbl = lv_label_create(btn);
     lv_label_set_text(icon_lbl, icon);
-    lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(icon_lbl, lv_color_white(), 0);
     lv_obj_center(icon_lbl);
+    return btn;
 }
 
 /* 创建三列之一的容器：flex 纵向排列、水平/垂直居中。
@@ -523,8 +540,10 @@ static lv_obj_t *content_col_create(lv_obj_t *content)
     return col;
 }
 
-/* 顶部状态信息区：46px 高，左=音量（图标+档位）、右=电量（图标+电压），
+/* 顶部状态信息区：69px 高（与底部把手区等高，中间控件组垂直居中），
+   左=音量（图标+档位）、右=电量（图标+电压），
    与主状态栏（app.c）数据同步（音量走 config_store 回调、电量走周期刷新）。
+   文字状态顶边距 23px、左右边距 46px。
    不含主状态栏中央的当前页面名称。整个区域事件穿透，不干扰面板拖拽。 */
 static void header_create(void)
 {
@@ -539,19 +558,21 @@ static void header_create(void)
     lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_event_cb(header, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
 
-    /* 左：音量（固定图标 + 档位数字） */
+    /* 左：音量（固定图标 + 档位数字）。下拉后控制中心专用大字号（28px），
+       顶边距 23px、左边缘边距 46px（左右边距保持原值；
+       主状态栏保持原样 16px/12px，不跟随加大） */
     header_vol_label = lv_label_create(header);
     lv_label_set_text(header_vol_label, NOTIF_VOL_ICON " --");
-    lv_obj_set_style_text_font(header_vol_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(header_vol_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(header_vol_label, lv_color_white(), 0);
-    lv_obj_align(header_vol_label, LV_ALIGN_LEFT_MID, 12, 0);
+    lv_obj_align(header_vol_label, LV_ALIGN_TOP_LEFT, 46, 23);
 
-    /* 右：电量（电池图标 + 电压） */
+    /* 右：电量（电池图标 + 电压），顶边距 23px、右边缘边距 46px */
     header_bat_label = lv_label_create(header);
     lv_label_set_text(header_bat_label, LV_SYMBOL_BATTERY_FULL " --.-- V");
-    lv_obj_set_style_text_font(header_bat_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(header_bat_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(header_bat_label, lv_color_white(), 0);
-    lv_obj_align(header_bat_label, LV_ALIGN_RIGHT_MID, -12, 0);
+    lv_obj_align(header_bat_label, LV_ALIGN_TOP_RIGHT, -46, 23);
 }
 
 /* 中间内容区：左中右三列（flex row，等宽均分）。
@@ -563,7 +584,7 @@ static void content_create(void)
 {
     lv_obj_t *content = lv_obj_create(notif_bar);
     lv_obj_set_size(content, EXAMPLE_LCD_H_RES,
-                    EXAMPLE_LCD_V_RES - NOTIF_HEADER_H - NOTIF_TRIGGER_H);
+                    EXAMPLE_LCD_V_RES - NOTIF_HEADER_H - GRAB_BAR_H);
     lv_obj_set_pos(content, 0, NOTIF_HEADER_H);
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
@@ -576,11 +597,12 @@ static void content_create(void)
                           LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_column(content, COL_GAP, 0);
 
-    /* ---- 左列：两个圆形占位按钮（上下各一，功能暂时保持不动） ---- */
+    /* ---- 左列：WiFi 占位按钮（上）+ 设置按钮（下，打开设置菜单） ---- */
     lv_obj_t *left_col = content_col_create(content);
     lv_obj_set_style_pad_row(left_col, ROUND_BTN_GAP, 0);
     round_btn_create(left_col, LV_SYMBOL_WIFI);
-    round_btn_create(left_col, LV_SYMBOL_BLUETOOTH);
+    lv_obj_t *settings_btn = round_btn_create(left_col, LV_SYMBOL_SETTINGS);
+    lv_obj_add_event_cb(settings_btn, settings_btn_cb, LV_EVENT_CLICKED, NULL);
 
     /* ---- 中列：亮度竖条（贴边浅灰填充条 + 橙色图标叠于条上） ---- */
     lv_obj_t *mid_col = content_col_create(content);
@@ -623,18 +645,16 @@ void notification_panel_create(lv_obj_t *status_bar)
     /* 中间控制中心内容（左中右三列） */
     content_create();
 
-    /* 底部上拉把手：全宽、与顶部触发区同高，接收上拉收起手势。
+    /* 底部上拉把手：全宽、GRAB_BAR_H 高，接收上拉收起手势（判定区同高）。
        作为 notif_bar 的子对象，随面板一起移动/隐藏。
        宽度自适应父容器内容区，不参与命中测试，只作为手势区与视觉提示。 */
     lv_obj_t *grab_bar = lv_obj_create(notif_bar);
     lv_obj_set_width(grab_bar, lv_pct(100));
-    lv_obj_set_height(grab_bar, NOTIF_TRIGGER_H);
+    lv_obj_set_height(grab_bar, GRAB_BAR_H);
     lv_obj_align(grab_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(grab_bar, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(grab_bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(grab_bar, 1, 0);
-    lv_obj_set_style_border_side(grab_bar, LV_BORDER_SIDE_TOP, 0);
-    lv_obj_set_style_border_color(grab_bar, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_border_width(grab_bar, 0, 0);   /* 无边框（曾有一条蓝色顶边线，已移除） */
     lv_obj_set_style_radius(grab_bar, 0, 0);
     lv_obj_clear_flag(grab_bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(grab_bar, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
