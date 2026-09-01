@@ -42,6 +42,15 @@ static lv_obj_t *bat_label        = NULL;   /* 状态栏右侧：电池图标+�
    状态栏中央的页面名称（中文）仍用 UI_SYSTEM_FONT。 */
 #define STATUS_SMALL_FONT  (&lv_font_montserrat_16)
 
+/* 状态栏背景不透明度渐变时长（ms）：与播放页封面渐显/栏恢复同步 */
+#define STATUS_BAR_FADE_MS  300
+
+/* 状态栏背景不透明度动画回调 */
+static void status_bg_opa_anim_cb(void *var, int32_t value)
+{
+    lv_obj_set_style_bg_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+
 /* 电量图标按百分比分级（对应 LV_SYMBOL_BATTERY_* 五档） */
 static const char *status_battery_icon(float pct)
 {
@@ -169,6 +178,8 @@ void app_status_set_ui_visible(bool visible)
     if (s_status_bar == NULL) {
         return;
     }
+    /* 立即设置前先删除进行中的背景渐变动画，避免动画回调覆盖新值 */
+    lv_anim_del(s_status_bar, status_bg_opa_anim_cb);
     if (visible) {
         /* 恢复：半透明黑背景 + 显示三个内容 label */
         lv_obj_set_style_bg_opa(s_status_bar, LV_OPA_50, 0);
@@ -184,4 +195,26 @@ void app_status_set_ui_visible(bool visible)
         lv_obj_add_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(bat_label, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+void app_status_set_bg_opa(lv_opa_t opa, bool animated)
+{
+    if (s_status_bar == NULL) {
+        return;
+    }
+    if (!animated) {
+        /* 立即设置（滚动开始时直接不透明纯黑，滚动期间省去 alpha 混合） */
+        lv_anim_del(s_status_bar, status_bg_opa_anim_cb);
+        lv_obj_set_style_bg_opa(s_status_bar, opa, 0);
+        return;
+    }
+    /* 渐变设置（滚动停止后与播放页封面渐显同步恢复半透明） */
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_status_bar);
+    lv_anim_set_exec_cb(&a, status_bg_opa_anim_cb);
+    lv_anim_set_values(&a, (int32_t)lv_obj_get_style_bg_opa(s_status_bar, 0), opa);
+    lv_anim_set_time(&a, STATUS_BAR_FADE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
 }

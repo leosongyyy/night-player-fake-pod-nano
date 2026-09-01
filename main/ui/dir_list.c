@@ -11,6 +11,7 @@
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/playlist_page.h"
+#include "ui/player_ticker.h"
 
 #include "esp_log.h"
 #include "lvgl.h"
@@ -33,6 +34,7 @@ static lv_obj_t   *s_page        = NULL;  /* tab 页容器 */
 static lv_obj_t   *s_list        = NULL;  /* 虚拟列表句柄 */
 static lv_obj_t   *s_loading     = NULL;  /* 加载中提示 label */
 static lv_timer_t *s_ready_timer = NULL;  /* 就绪轮询 timer */
+static uint32_t   s_last_dir     = 0xFFFFFFFFu; /* 上次刷新时的当前播放目录下标 */
 
 /* 前向声明 */
 static void dir_list_build(void);
@@ -63,6 +65,21 @@ static void dir_selected_cb(uint32_t index, void *user_data)
     ESP_LOGI(TAG, "dir selected: %u", (unsigned)index);
     playlist_page_show_dir(index);
     main_ui_switch_tab(1);   /* 切到播放列表页（tab 1） */
+}
+
+/* 目录变化刷新（共享 player_ticker 周期调用）：正在播放的目录切换后，把
+   可见 cell 全部重绑一次（notifyDataSetChanged 语义），让 dir_bind_cb 重新
+   判定"正在播放"的黄色高亮。不重建列表、不滚动位置。 */
+static void dir_track_cb(const player_controller_status_t *st, void *ctx)
+{
+    (void)ctx;
+    if (s_list == NULL || !st->has_song) {
+        return;   /* 无列表或无播放：无需刷新 */
+    }
+    if (st->cur_dir != s_last_dir) {
+        s_last_dir = st->cur_dir;
+        virtual_list_refresh(s_list);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -98,6 +115,9 @@ static void dir_list_build(void)
         virtual_list_scroll_to_index(s_list, st.cur_dir, LV_ANIM_OFF);
         virtual_list_set_selected(s_list, (int32_t)st.cur_dir);
     }
+
+    /* 记录当前播放目录：目录变化轮询以此对比（构建时同步，避免首轮误刷新） */
+    s_last_dir = st.has_song ? st.cur_dir : 0xFFFFFFFFu;
 
     ESP_LOGI(TAG, "dir list built: %u dirs", (unsigned)count);
 }
@@ -137,6 +157,9 @@ lv_obj_t *dir_list_create(lv_obj_t *tv)
     } else {
         dir_list_build();
     }
+
+    /* 订阅共享 player_ticker：目录变化时重绑可见 cell 更新"正在播放"高亮 */
+    player_ticker_subscribe(dir_track_cb, NULL);
 
     ESP_LOGI(TAG, "dir list page created");
     return s_page;

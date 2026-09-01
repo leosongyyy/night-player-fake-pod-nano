@@ -37,9 +37,9 @@ typedef struct {
     lv_obj_t **cells;           /* 复用的 cell 数组（lv_label） */
     uint32_t  *cell_indices;    /* 每个 cell 当前绑定的条目下标 */
     uint32_t   cell_count;      /* cell 数量 = 可见数 + 2 缓冲 */
+    lv_coord_t viewport_h;      /* 列表可视区高度（计算视口覆盖的条目范围用） */
     int32_t    selected;        /* 选中条目下标（-1 = 无选中） */
     bool       marquee_enable;  /* 是否允许超长文本跑马灯（默认开启） */
-    bool       scrolling;       /* 当前是否正在滚动（滚动中临时禁用跑马灯） */
 } virtual_list_state_t;
 
 /* 从列表对象取状态结构体（创建时挂到 user_data 上） */
@@ -68,10 +68,12 @@ static void vlist_apply_selected_style(virtual_list_state_t *st,
 }
 
 /* 把跑马灯开关应用到所有 cell 的长文本模式：
-   开启且非滚动中 → 循环滚动；否则（滚动中/被关闭）→ 裁剪 */
+   开启 → 循环滚动；关闭 → 裁剪。
+   （不再随滚动临时切换：常驻 cell 滚动时不被重绑，跑马灯保持连续，
+    只有新进入视口的 cell 会从头开始，属正常表现） */
 static void vlist_apply_marquee(virtual_list_state_t *st)
 {
-    lv_label_long_mode_t mode = (st->marquee_enable && !st->scrolling)
+    lv_label_long_mode_t mode = st->marquee_enable
         ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_CLIP;
     for (uint32_t i = 0; i < st->cell_count; i++) {
         lv_label_set_long_mode(st->cells[i], mode);
@@ -88,12 +90,13 @@ static void vlist_bind_cell(virtual_list_state_t *st, lv_obj_t *cell,
     vlist_apply_selected_style(st, cell, index);
 }
 
-/* 根据当前滚动位置重新绑定 cell（虚拟滚动核心）：
-   第一个可见条目 = scroll_y / item_height，随后每个 cell 顺延绑定下一个条目。
-   cell 的位置放在**内容坐标系**中该条目的真实位置（index * item_height），
-   这样列表滚动时 LVGL 会整体平移内容，cell 自然随动，视口连续无空白。
-   force=true 强制全量重绑（数据刷新用）；false 跳过下标未变的 cell（滚动用，
-   避免重复赋值导致 label 跑马灯动画被重置）。 */
+/* 视口槽位式重绑（虚拟滚动核心）：
+   cell 锚定在**内容坐标系**中该条目的真实位置（index * item_height），滚动时
+   LVGL 整体平移内容，仍留在视口内的 cell 完全不动——位置、文本、颜色、跑马灯
+   动画全部保留，一个都不重绑；
+   只有滚出视口的 cell 被回收（隐藏置空闲），重新绑定到另一端新进入视口的条目
+   上。每跨一个条目高度只重绑 1 个 cell，复用是"逐个进出"的，不是全量重绑。
+   force=true 强制重绑所有视口内 cell（数据刷新用）。 */
 static void vlist_rebind(virtual_list_state_t *st, lv_obj_t *list, bool force)
 {
     lv_coord_t scroll_y = lv_obj_get_scroll_y(list);
@@ -103,47 +106,71 @@ static void vlist_rebind(virtual_list_state_t *st, lv_obj_t *list, bool force)
 
     uint32_t first = (uint32_t)scroll_y / (uint32_t)st->item_height;
 
-    for (uint32_t i = 0; i < st->cell_count; i++) {
-        uint32_t  index = first + i;
-        lv_obj_t *cell  = st->cells[i];
-
-        if (index >= st->item_count) {
-            /* 已超出数据范围：隐藏该 cell */
-            lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
+    /* 防御：视口已完全越过数据末尾（理论不会发生），隐藏全部 cell */
+    if (first >= st->item_count) {
+        for (uint32_t i = 0; i < st->cell_count; i++) {
+            lv_obj_add_flag(st->cells[i], LV_OBJ_FLAG_HIDDEN);
             st->cell_indices[i] = VLIST_NO_INDEX;
-            continue;
         }
-
-        lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
-
-        /* ID 判断：下标未变且非强制刷新时跳过（数据静态，ID 相同内容不变） */
-        if (!force && st->cell_indices[i] == index) {
-            continue;
-        }
-
-        lv_obj_set_pos(cell, 0, (lv_coord_t)((size_t)index * st->item_height));
-        st->cell_indices[i] = index;
-        vlist_bind_cell(st, cell, index);
+        return;
     }
-}
 
-/* 滚动开始：临时禁用跑马灯（滚动中 cell 会复用，跑马灯从头滚是必然的，
-   滚动期间先裁剪，停止后再恢复，避免视觉跳动） */
-static void vlist_scroll_begin_event_cb(lv_event_t *e)
-{
-    lv_obj_t *list = lv_event_get_current_target(e);
-    virtual_list_state_t *st = vlist_get_state(list);
-    st->scrolling = true;
-    vlist_apply_marquee(st);
-}
+    /* 当前视口覆盖的条目范围 [first, last]（含两端部分可见的条目） */
+    uint32_t last = ((uint32_t)scroll_y + (uint32_t)st->viewport_h - 1) /
+                    (uint32_t)st->item_height;
+    if (last >= st->item_count) {
+        last = st->item_count - 1;
+    }
 
-/* 滚动结束（含惯性停止）：恢复跑马灯 */
-static void vlist_scroll_end_event_cb(lv_event_t *e)
-{
-    lv_obj_t *list = lv_event_get_current_target(e);
-    virtual_list_state_t *st = vlist_get_state(list);
-    st->scrolling = false;
-    vlist_apply_marquee(st);
+    /* 第一步：回收滚出视口的 cell（隐藏并置为空闲）。
+       仍在视口内的 cell 下标不变，位置/文本/颜色/跑马灯全部保留。 */
+    for (uint32_t i = 0; i < st->cell_count; i++) {
+        uint32_t idx = st->cell_indices[i];
+        if (idx != VLIST_NO_INDEX && (idx < first || idx > last)) {
+            lv_obj_add_flag(st->cells[i], LV_OBJ_FLAG_HIDDEN);
+            st->cell_indices[i] = VLIST_NO_INDEX;
+        }
+    }
+
+    /* 第二步：确保 [first, last] 内每个条目都有 cell 覆盖。
+       已有覆盖的 cell 不动（force 时重绑内容）；缺的条目从空闲 cell 中取一个，
+       定位到该条目的内容坐标并绑定（cell_count 很小，线性查找即可）。 */
+    for (uint32_t index = first; index <= last; index++) {
+        lv_obj_t *cell = NULL;
+        for (uint32_t i = 0; i < st->cell_count; i++) {
+            if (st->cell_indices[i] == index) {
+                cell = st->cells[i];
+                break;
+            }
+        }
+
+        if (cell != NULL) {
+            if (force) {
+                /* 强制刷新：数据可能已变化，重绑内容（位置本就正确，无需 set_pos） */
+                vlist_bind_cell(st, cell, index);
+            }
+            continue;
+        }
+
+        /* 无覆盖：从空闲（已回收/未使用）cell 中取一个 */
+        for (uint32_t i = 0; i < st->cell_count; i++) {
+            if (st->cell_indices[i] == VLIST_NO_INDEX) {
+                cell = st->cells[i];
+                lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_pos(cell, 0, (lv_coord_t)((size_t)index * st->item_height));
+                st->cell_indices[i] = index;
+                vlist_bind_cell(st, cell, index);
+                break;
+            }
+        }
+
+        if (cell == NULL) {
+            /* 池子耗尽：理论不会发生（池 = 可见数 + 2 ≥ 视口条目数） */
+            ESP_LOGW(TAG, "vlist: cell pool exhausted first=%u last=%u",
+                     (unsigned)first, (unsigned)last);
+            break;
+        }
+    }
 }
 
 /* 滚动事件：滚动/惯性/scroll_to 动画过程中持续触发，实时重绑定 */
@@ -216,12 +243,12 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
     st->item_size   = item_size;
     st->item_count  = item_count;
     st->item_height = item_height;
+    st->viewport_h  = h;
     st->bind_cb     = bind_cb;
     st->selected_cb = NULL;
     st->user_data   = user_data;
     st->selected       = -1;
     st->marquee_enable = true;   /* 默认开启跑马灯 */
-    st->scrolling      = false;
     lv_obj_set_user_data(list, st);
 
     /* 透明占位对象：高度 = 真实内容高度，撑开 scroll 范围以驱动原生滚动条。
@@ -265,14 +292,15 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         lv_label_set_long_mode(cell, LV_LABEL_LONG_SCROLL_CIRCULAR); /* 超长文本跑马灯循环滚动 */
         lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);    /* 作为点击目标 */
         lv_obj_add_flag(cell, LV_OBJ_FLAG_EVENT_BUBBLE); /* 让 CLICKED 冒泡到 list（LVGL 8 默认不冒泡） */
+        /* 初始隐藏：cell 只有被绑定到某个条目时才显示。否则池中未被首屏
+           覆盖的缓冲 cell 会以默认文本 "Text" 停在 (0,0)，叠在第一项上 */
+        lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
         st->cells[i]        = cell;
         st->cell_indices[i] = VLIST_NO_INDEX;
     }
 
-    /* 事件：滚动开始/中/结束 + 点击选中 */
-    lv_obj_add_event_cb(list, vlist_scroll_begin_event_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    /* 事件：滚动重绑 + 点击选中 */
     lv_obj_add_event_cb(list, vlist_scroll_event_cb, LV_EVENT_SCROLL, NULL);
-    lv_obj_add_event_cb(list, vlist_scroll_end_event_cb, LV_EVENT_SCROLL_END, NULL);
     lv_obj_add_event_cb(list, vlist_click_event_cb, LV_EVENT_CLICKED, NULL);
 
     /* 初始绑定（渲染首屏可见条目） */

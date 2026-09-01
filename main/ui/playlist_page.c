@@ -9,6 +9,7 @@
 #include "core/storage/playlist.h"
 #include "core/ui/virtual_list.h"
 #include "ui/list_common.h"
+#include "ui/player_ticker.h"
 
 #include "esp_log.h"
 #include "lvgl.h"
@@ -33,6 +34,7 @@ static lv_obj_t   *s_title_bar   = NULL;  /* 标题栏（目录名 + 歌曲数�
 static lv_obj_t   *s_loading     = NULL;  /* 加载中/空状态提示 label */
 static lv_timer_t *s_ready_timer = NULL;  /* 就绪轮询 timer */
 static uint32_t   s_cur_dir      = 0xFFFFFFFFu; /* 当前展示的目录下标 */
+static uint32_t   s_last_global  = 0xFFFFFFFFu; /* 上次刷新时的歌曲全局下标 */
 
 /* ------------------------------------------------------------------ */
 /* 虚拟列表回调                                                          */
@@ -99,6 +101,21 @@ static void playlist_page_show_hint(const char *text)
 /* 对外接口                                                             */
 /* ------------------------------------------------------------------ */
 
+/* 曲目变化刷新（共享 player_ticker 周期调用）：曲目切换后把可见 cell 全部
+   重绑一次（类似 Android ListAdapter.notifyDataSetChanged），让 song_bind_cb
+   重新判定"正在播放"的黄色高亮。不重建列表、不切换目录、不滚动位置。 */
+static void plist_track_cb(const player_controller_status_t *st, void *ctx)
+{
+    (void)ctx;
+    if (s_list == NULL || !st->has_song) {
+        return;   /* 无列表（未展示/空目录）或无播放：无需刷新 */
+    }
+    if (st->cur_global != s_last_global) {
+        s_last_global = st->cur_global;
+        virtual_list_refresh(s_list);
+    }
+}
+
 void playlist_page_show_dir(uint32_t dir_index)
 {
     if (s_page == NULL) {
@@ -149,6 +166,9 @@ void playlist_page_show_dir(uint32_t dir_index)
         virtual_list_set_selected(s_list, (int32_t)st.cur_song_in_dir);
     }
 
+    /* 记录当前曲目：曲目变化轮询以此对比（展示时同步，避免首轮误刷新） */
+    s_last_global = st.has_song ? st.cur_global : 0xFFFFFFFFu;
+
     ESP_LOGI(TAG, "playlist page show dir=%u (%u songs)",
              (unsigned)dir_index, (unsigned)dir->song_count);
 }
@@ -198,6 +218,9 @@ lv_obj_t *playlist_page_create(lv_obj_t *tv)
     } else {
         playlist_page_show_current();
     }
+
+    /* 订阅共享 player_ticker：曲目变化时重绑可见 cell 更新"正在播放"高亮 */
+    player_ticker_subscribe(plist_track_cb, NULL);
 
     ESP_LOGI(TAG, "playlist page created");
     return s_page;

@@ -15,9 +15,9 @@ LVGL 原生滚动条、惯性滑动与点击选中。
 列表数据是一个**连续内存块**，每条 `item_size` 字节、共 `item_count` 条。组件不
 解析数据内容，只按 `data + index * item_size` 算出条目指针交给绑定回调。
 
-- 数据**必须静态**（同一 index 内容不变）。滚动时组件按下标判断，下标未变则
-  不重复赋值（见"工作原理"）。若数据会变化，改完后调用 `virtual_list_refresh()`
-  强制重绑。
+- 数据**必须静态**（同一 index 内容不变）。滚动时组件只重绑滚出/滚入视口的
+  cell，常驻 cell 不会被重复赋值（见"工作原理"）。若数据会变化，改完后调用
+  `virtual_list_refresh()` 强制重绑。
 - 数据首地址：用 `playlist_dir_at(0)` / `playlist_song_at(start)` 之类取第 0 条
   即可；条目数为 0 时传 `NULL` / `0`，列表显示为空。
 
@@ -178,15 +178,17 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
 1. **透明占位对象**：列表内放一个高度 = `item_count × item_height` 的透明对象，
    撑开真实内容高度，从而驱动 LVGL 原生滚动条（这也是必须开大坐标的原因）。
 2. **固定数量 cell**：只创建 `可见数 + 2` 个 `lv_label` 作为复用 cell。
-3. **滚动重绑定**：监听 `LV_EVENT_SCROLL`，按 `scroll_y / item_height` 算出第一个
-   可见下标，把每个 cell 定位到 `index * item_height` 并绑定对应条目。
-4. **ID 判断**：绑定前比较 cell 当前下标，**下标未变则跳过赋值**（数据静态），
-   避免重复 `set_text` 重置跑马灯动画。
+3. **滚动重绑定（逐个进出）**：监听 `LV_EVENT_SCROLL`，按 `scroll_y / item_height`
+   算出视口覆盖的条目范围 `[first, last]`。cell 锚定在内容坐标
+   （`index * item_height`），滚动时仍留在视口内的 cell **完全不动**；只有滚出
+   视口的 cell 被回收（隐藏置空闲），重新定位到另一端新进入视口的条目上并重绑。
+4. **复用粒度**：每跨一个条目高度，只有 1 个 cell 被重绑（滚出的那个回收复用给
+   进入的条目），其余 cell 的位置/文本/颜色/跑马灯全部保留——不是全量重绑。
 5. **选中高亮**：选中背景色由组件维护（`vlist_apply_selected_style`），与回调设置
    的文字颜色相互独立，可叠加。
-6. **跑马灯**：cell 默认 `LV_LABEL_LONG_SCROLL_CIRCULAR`；滚动过程中（
-   `LV_EVENT_SCROLL_BEGIN` → `LV_EVENT_SCROLL_END`）临时切回 `LV_LABEL_LONG_CLIP`，
-   停止后再恢复，避免滚动时跑马灯从头跳。
+6. **跑马灯**：cell 默认 `LV_LABEL_LONG_SCROLL_CIRCULAR`。因常驻 cell 滚动时不被
+   重绑（不 `set_text` / `set_pos`），跑马灯动画在滚动前后连续不断；只有新进入
+   视口的 cell 会从头开始滚动（属正常表现）。
 
 ---
 
@@ -217,7 +219,8 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
 
 3. **`set_pos` 会重置跑马灯**：`lv_obj_set_pos` → `lv_obj_set_style_x/y` → 触发
    `LV_EVENT_STYLE_CHANGED` → `lv_label_refr_text` → 删除跑马灯动画、offset 归零。
-   因此组件内部用"ID 判断（下标未变跳过 set_pos）+ 滚动中禁用跑马灯"来规避。
+   因此组件只对**回收进入视口**的 cell 调用 `set_pos`，常驻 cell 从不触碰，
+   跑马灯得以连续（旧实现因滚动时全量重绑，被迫在滚动期间临时禁用跑马灯）。
    **不要**在外部对 cell 反复 `set_pos` / `set_style_x`。
 
 4. **事件冒泡需 `LV_OBJ_FLAG_EVENT_BUBBLE`**：LVGL 8 的事件默认不冒泡到父对象

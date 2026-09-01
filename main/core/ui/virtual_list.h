@@ -17,6 +17,8 @@ extern "C" {
  * 特性：
  *   - 虚拟滚动 + LVGL 原生滚动条（靠透明占位对象撑开真实内容高度）
  *   - 字符串/颜色由外部绑定回调动态解析（数据源不依赖具体格式）
+ *   - cell 锚定在内容坐标（index × item_height），滚动时只有滚出/滚入视口的
+ *     cell 被回收重绑，常驻 cell 的位置/文本/颜色/跑马灯全程不被触碰
  *   - 支持滚动到指定下标、刷新重渲染、点击选中与高亮
  *   - 样式写死在本组件内（整个项目仅目录/歌曲两处列表复用）
  *
@@ -103,8 +105,9 @@ void virtual_list_set_selected_cb(lv_obj_t *list,
  * @brief 设置是否允许超长文本跑马灯（默认开启）
  *
  * 开启时超长文本循环滚动（LV_LABEL_LONG_SCROLL_CIRCULAR）；
- * 关闭时改为裁剪（LV_LABEL_LONG_CLIP）。滚动过程中已按下标判断
- * 避免重复赋值，因此开启后跑马灯不会因滚动而重置。
+ * 关闭时改为裁剪（LV_LABEL_LONG_CLIP）。常驻 cell 在滚动时不被重绑
+ * （不 set_text / set_pos），因此跑马灯动画不会因滚动而重置，
+ * 仅新进入视口的 cell 会从头开始（属正常表现）。
  */
 void virtual_list_set_marquee(lv_obj_t *list, bool enable);
 

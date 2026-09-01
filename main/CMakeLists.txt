@@ -29,6 +29,7 @@ set(MAIN_SRCS
     "ui/main_ui.c"
     "ui/now_playing.c"
     "ui/notification_panel.c"
+    "ui/player_ticker.c"
     "ui/playlist_page.c"
     "ui/settings_page.c")
 

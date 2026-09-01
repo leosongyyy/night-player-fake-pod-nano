@@ -12,6 +12,7 @@
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/playlist_page.h"
+#include "ui/player_ticker.h"
 
 #include "esp_log.h"
 #include "lvgl.h"
@@ -38,11 +39,17 @@ static const char *TAG = "now_playing";
 /* 播放按钮图标字体（稍大一号，突出播放键） */
 #define NP_PLAY_ICON_FONT (&lv_font_montserrat_32)
 
-/* 页面数据刷新周期（ms） */
-#define NP_REFRESH_MS     500
+/* 页面数据刷新周期由共享 player_ticker 统一提供（见 player_ticker.h） */
+
+/* 封面图渐显时长（ms）：滑动时立即隐藏，停在播放页时渐变显示 */
+#define NP_COVER_FADE_MS  300
+
+/* 播放页底色：深灰色（非纯黑），封面图渐隐时露出，与其它页面形成层次 */
+#define NP_PAGE_BG_COLOR  0x1e1e1e
 
 /* 状态 */
 static lv_obj_t *s_page         = NULL;  /* tab 页容器 */
+static lv_obj_t *s_cover        = NULL;  /* 全屏封面图（本页子对象，滚动时隐藏、停止后渐显） */
 static lv_obj_t *s_title_bar    = NULL;  /* 顶部标题栏 */
 static lv_obj_t *s_control_bar  = NULL;  /* 底部控制栏 */
 static lv_obj_t *s_title_label  = NULL;  /* 歌曲标题（大字体，滚动） */
@@ -55,6 +62,11 @@ static lv_obj_t *s_slider       = NULL;  /* 进度条 */
 static uint32_t s_last_global   = 0xFFFFFFFFu; /* 上次显示的歌曲全局下标 */
 static bool     s_ui_visible    = true;   /* 标题栏/控制栏可见性 */
 static bool     s_slider_dragging = false; /* 进度条是否正在拖动 */
+#if NP_HIDE_COVER_ON_SCROLL
+static bool     s_cover_visible = false;  /* 封面图当前可见状态（避免重复触发渐变） */
+#endif
+static bool     s_bars_opaque   = false;  /* 栏当前是否处于不透明纯黑状态（滚动中） */
+static bool     s_scroll_anim_running = false; /* 松手后的吸附/惯性滚动动画是否在进行中 */
 
 /* ------------------------------------------------------------------ */
 /* 内部工具                                                             */
@@ -191,43 +203,175 @@ static void np_format_time(char *buf, size_t size, uint32_t sec)
     snprintf(buf, size, "%u:%02u", (unsigned)(sec / 60), (unsigned)(sec % 60));
 }
 
-/* 周期刷新：歌曲/时长/进度/播放状态 */
-static void np_refresh_timer_cb(lv_timer_t *timer)
+/* 周期刷新：歌曲/时长/进度/播放状态（由共享 player_ticker 周期调用，
+   进度/时长属连续变化每 tick 直接刷新；标题等离散变化对比旧值再刷） */
+static void np_refresh_cb(const player_controller_status_t *st, void *ctx)
 {
-    (void)timer;
-    player_controller_status_t st;
-    player_controller_get_status(&st);
+    (void)ctx;
 
     /* 歌曲变化时更新标题/副标题（跑马灯随 set_text 重新开始） */
-    if (st.cur_global != s_last_global) {
-        s_last_global = st.cur_global;
-        lv_label_set_text(s_title_label, st.song_name);
-        lv_label_set_text(s_sub_label, st.dir_name);
-        ESP_LOGI(TAG, "now playing: %s [%s]", st.song_name, st.dir_name);
+    if (st->cur_global != s_last_global) {
+        s_last_global = st->cur_global;
+        lv_label_set_text(s_title_label, st->song_name);
+        lv_label_set_text(s_sub_label, st->dir_name);
+        ESP_LOGI(TAG, "now playing: %s [%s]", st->song_name, st->dir_name);
     }
 
     /* 时长 */
     char buf[16];
-    np_format_time(buf, sizeof(buf), st.position_s);
+    np_format_time(buf, sizeof(buf), st->position_s);
     lv_label_set_text(s_cur_time, buf);
-    np_format_time(buf, sizeof(buf), st.duration_s);
+    np_format_time(buf, sizeof(buf), st->duration_s);
     lv_label_set_text(s_total_time, buf);
 
     /* 进度条（非拖动时跟随播放位置） */
     if (!s_slider_dragging) {
-        if (st.duration_s > 0) {
-            lv_slider_set_range(s_slider, 0, (int32_t)st.duration_s);
-            lv_slider_set_value(s_slider, (int32_t)st.position_s, LV_ANIM_OFF);
+        if (st->duration_s > 0) {
+            lv_slider_set_range(s_slider, 0, (int32_t)st->duration_s);
+            lv_slider_set_value(s_slider, (int32_t)st->position_s, LV_ANIM_OFF);
         } else {
             lv_slider_set_value(s_slider, 0, LV_ANIM_OFF);
         }
     }
 
     /* 播放/暂停图标 */
-    const char *icon = (st.playing == MP3_STATE_PLAYING)
+    const char *icon = (st->playing == MP3_STATE_PLAYING)
                        ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY;
     if (strcmp(lv_label_get_text(s_play_icon), icon) != 0) {
         lv_label_set_text(s_play_icon, icon);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 封面图隐藏/渐显 + 栏背景不透明度（滚动时省带宽优化）                   */
+/* ------------------------------------------------------------------ */
+
+#if NP_HIDE_COVER_ON_SCROLL
+/* 封面图透明度动画回调（仅隐藏封面模式使用） */
+static void cover_opa_anim_cb(void *var, int32_t value)
+{
+    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+#endif
+
+/* 栏（标题栏/控制栏）背景不透明度动画回调：var = 栏对象 */
+static void bar_bg_opa_anim_cb(void *var, int32_t value)
+{
+    lv_obj_set_style_bg_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
+}
+
+/* 设置标题栏/控制栏背景不透明度：
+   - animated=true：渐变到目标值（滚动停止后恢复半透明）；
+   - animated=false：立即设置（滚动开始时直接不透明纯黑，
+     滚动期间栏不参与 alpha 混合，减少渲染开销）。 */
+static void np_set_bars_bg_opa(lv_opa_t target, bool animated)
+{
+    lv_obj_t *bars[] = { s_title_bar, s_control_bar };
+    for (size_t i = 0; i < sizeof(bars) / sizeof(bars[0]); i++) {
+        lv_obj_t *bar = bars[i];
+        if (bar == NULL) {
+            continue;
+        }
+        if (!animated) {
+            lv_anim_del(bar, bar_bg_opa_anim_cb);
+            lv_obj_set_style_bg_opa(bar, target, 0);
+            continue;
+        }
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, bar);
+        lv_anim_set_exec_cb(&a, bar_bg_opa_anim_cb);
+        lv_anim_set_values(&a, (int32_t)lv_obj_get_style_bg_opa(bar, 0), target);
+        lv_anim_set_time(&a, NP_COVER_FADE_MS);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+        lv_anim_start(&a);
+    }
+}
+
+/* 滚动开始：标题栏/控制栏/状态栏立即不透明纯黑（滚动期间不做 alpha 混合，
+   省带宽；封面按 NP_HIDE_COVER_ON_SCROLL 决定是否同时立即隐藏）。
+   s_bars_opaque 防抖：SCROLL_BEGIN 可能多次到达，只在状态变化时执行。 */
+static void np_on_scroll_begin(void)
+{
+    if (!s_bars_opaque) {
+        s_bars_opaque = true;
+        np_set_bars_bg_opa(LV_OPA_COVER, false);
+        app_status_set_bg_opa(LV_OPA_COVER, false);
+    }
+#if NP_HIDE_COVER_ON_SCROLL
+    if (s_cover_visible) {
+        /* 封面立即隐藏（无动画） */
+        s_cover_visible = false;
+        lv_anim_del(s_cover, cover_opa_anim_cb);
+        lv_obj_set_style_opa(s_cover, LV_OPA_TRANSP, 0);
+    }
+#endif
+}
+
+/* 滚动完全停止且停在播放页：封面渐显（可选）+ 栏渐变回半透明
+   （栏被用户隐藏时则渐变回全透明）。同样带防抖。 */
+static void np_on_scroll_end(void)
+{
+#if NP_HIDE_COVER_ON_SCROLL
+    if (!s_cover_visible) {
+        /* 封面 0.3s 渐变显示 */
+        s_cover_visible = true;
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_cover);
+        lv_anim_set_exec_cb(&a, cover_opa_anim_cb);
+        lv_anim_set_values(&a, (int32_t)lv_obj_get_style_opa(s_cover, 0),
+                           LV_OPA_COVER);
+        lv_anim_set_time(&a, NP_COVER_FADE_MS);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+        lv_anim_start(&a);
+    }
+#endif
+    if (s_bars_opaque) {
+        s_bars_opaque = false;
+        lv_opa_t bar_opa = s_ui_visible ? LV_OPA_50 : LV_OPA_TRANSP;
+        np_set_bars_bg_opa(bar_opa, true);
+        app_status_set_bg_opa(bar_opa, true);
+    }
+}
+
+/* tabview 内容容器滚动事件：
+   - SCROLL_BEGIN：开始滑动 → 栏立即不透明纯黑（NP_HIDE_COVER_ON_SCROLL=1 时
+     封面同时立即隐藏）；
+   - SCROLL_END：滚动完全停止且停在正在播放页（tab 2）→ 栏渐变回半透明
+     （NP_HIDE_COVER_ON_SCROLL=1 时封面同步渐显）。
+   ⚠ 关键：松手时 lv_tabview 内部会先发出一次 SCROLL_END（事件参数=indev，
+   此时吸附/惯性滚动动画才刚开始），随后动画真正完成时再发一次
+   （事件参数=NULL）。因此：
+   - SCROLL_BEGIN 参数非 NULL 表示滚动动画开始（置 s_scroll_anim_running）；
+   - SCROLL_END 参数为 NULL 才代表滚动动画完成；
+   - 仅在 s_scroll_anim_running==false 时执行恢复，保证渐变发生在滚动完全
+     停止后，不在惯性滚动动画中开始（否则动画卡顿）；
+   - 与 lv_tabview 内部一致地忽略"手指仍按下"的收尾 SCROLL_END。 */
+static void np_scroll_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *cont = lv_event_get_target(e);
+
+    if (code == LV_EVENT_SCROLL_BEGIN) {
+        if (lv_event_get_param(e) != NULL) {
+            /* 滚动动画（松手后的吸附/惯性）开始 */
+            s_scroll_anim_running = true;
+        }
+        np_on_scroll_begin();
+    } else if (code == LV_EVENT_SCROLL_END) {
+        lv_indev_t *indev = lv_indev_get_act();
+        if (indev != NULL && indev->proc.state == LV_INDEV_STATE_PRESSED) {
+            return;   /* 手指未抬起（新一轮拖拽中旧动画的收尾），忽略 */
+        }
+        if (lv_event_get_param(e) == NULL) {
+            /* 滚动动画完成/程序化滚动结束：滚动已真正停止 */
+            s_scroll_anim_running = false;
+        }
+        if (!s_scroll_anim_running &&
+            lv_tabview_get_tab_act(lv_obj_get_parent(cont)) == 2) {
+            np_on_scroll_end();
+        }
     }
 }
 
@@ -239,14 +383,26 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
 {
     s_page = lv_tabview_add_tab(tv, "");
     ui_page_style(s_page);
+    /* 播放页底色：深灰色而非纯黑（封面图渐隐时露出，增加层次感） */
+    lv_obj_set_style_bg_color(s_page, lv_color_hex(NP_PAGE_BG_COLOR), 0);
 
-    /* 封面图：全屏 460x460，点击切换标题栏/控制栏显示 */
-    lv_obj_t *cover = lv_img_create(s_page);
-    lv_img_set_src(cover, &default_cover);
-    lv_obj_set_size(cover, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
-    lv_obj_set_pos(cover, 0, 0);
-    lv_obj_add_flag(cover, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(cover, cover_click_cb, LV_EVENT_CLICKED, NULL);
+    /* 封面图：全屏 460x460，点击切换标题栏/控制栏显示。
+       NP_HIDE_COVER_ON_SCROLL=1 时初始透明度 0（隐藏），首次停在播放页时
+       渐显、滑动时立即隐藏；=0 时始终显示 */
+    s_cover = lv_img_create(s_page);
+    lv_img_set_src(s_cover, &default_cover);
+    lv_obj_set_size(s_cover, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    lv_obj_set_pos(s_cover, 0, 0);
+#if NP_HIDE_COVER_ON_SCROLL
+    lv_obj_set_style_opa(s_cover, LV_OPA_TRANSP, 0);
+#endif
+    lv_obj_add_flag(s_cover, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_cover, cover_click_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 监听 tabview 内容容器滚动：滚动开始隐藏封面+栏纯黑，停在播放页恢复 */
+    lv_obj_t *cont = lv_tabview_get_content(tv);
+    lv_obj_add_event_cb(cont, np_scroll_event_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(cont, np_scroll_event_cb, LV_EVENT_SCROLL_END, NULL);
 
     /* 顶部标题栏：50% 半透明黑，位于状态栏下方；点击跳转到播放列表 */
     s_title_bar = lv_obj_create(s_page);
@@ -341,9 +497,13 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
     lv_obj_add_event_cb(s_slider, slider_event_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_slider, slider_event_cb, LV_EVENT_RELEASED, NULL);
 
-    /* 立即填充一次 + 周期刷新 */
-    np_refresh_timer_cb(NULL);
-    lv_timer_create(np_refresh_timer_cb, NP_REFRESH_MS, NULL);
+    /* 立即填充一次 + 周期刷新（复用共享 player_ticker，不再自建 timer） */
+    {
+        player_controller_status_t st_now;
+        player_controller_get_status(&st_now);
+        np_refresh_cb(&st_now, NULL);
+    }
+    player_ticker_subscribe(np_refresh_cb, NULL);
 
     ESP_LOGI(TAG, "now playing page created");
     return s_page;

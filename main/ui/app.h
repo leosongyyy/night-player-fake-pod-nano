@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "lvgl.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +36,17 @@ void app_status_set_page(uint8_t tab_index);
  * @param visible true 恢复半透明显示 / false 透明隐藏
  */
 void app_status_set_ui_visible(bool visible);
+
+/**
+ * @brief 设置状态栏背景不透明度（滚动期间省带宽用）
+ *
+ * 滚动翻页时正在播放页的封面隐藏、各栏改为不透明纯黑（不做 alpha 混合），
+ * 滚动停止后与封面同步渐变回半透明。由 now_playing 的滚动事件调用。
+ *
+ * @param opa      目标不透明度（LV_OPA_COVER=纯黑不透明 / LV_OPA_50=半透明 / LV_OPA_TRANSP=透明）
+ * @param animated true 渐变（约 300ms，与封面渐显同步）/ false 立即设置
+ */
+void app_status_set_bg_opa(lv_opa_t opa, bool animated);
 
 #ifdef __cplusplus
 }

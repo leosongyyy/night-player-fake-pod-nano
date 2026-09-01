@@ -35,10 +35,15 @@ static void main_tabs_sync(void)
 
     /* 离开正在播放页时，强制恢复播放页的标题栏/控制栏与顶部状态栏显示：
        用户在播放页点封面隐藏的栏（含联动的状态栏）在下次进入前复位，
-       避免其它页面缺少状态栏 */
+       避免其它页面缺少状态栏。
+       状态栏背景强制保持不透明纯黑：半透明仅用于播放页——松手时
+       VALUE_CHANGED 会在惯性滚动动画结束前触发本函数，若不覆盖，
+       app_status_set_ui_visible 会把状态栏立即改回半透明，导致
+       惯性滚动期间状态栏提前变透明。 */
     if (act != 2) {
         now_playing_force_show_ui();
         app_status_set_ui_visible(true);
+        app_status_set_bg_opa(LV_OPA_COVER, false);
     }
 
     ESP_LOGI(TAG, "tab active %u, marquee %s",

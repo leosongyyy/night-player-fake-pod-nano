@@ -156,10 +156,10 @@ static void lvgl_touchpad_read_cb(lv_indev_drv_t *indev_driver, lv_indev_data_t 
     esp_lcd_touch_read_data(tp);
     bool touched = esp_lcd_touch_get_coordinates(tp, &touchpad_x, &touchpad_y, NULL, &touchpad_cnt, 1) && (touchpad_cnt > 0);
 
-    /* Y 坐标纵向比例校准（×23/24），LVGL 与触摸测试回调共用此值。
+    /* 以下坐标校准，LVGL 与触摸测试回调共用此值。
        经过调整和优化后点击位置最符合直觉。 */
-    touchpad_y = (uint16_t)((uint32_t)touchpad_y * 23 / 24);
-
+    touchpad_y = (uint16_t)((uint32_t)touchpad_y * 29 / 30);
+    touchpad_x = (uint16_t)((uint32_t)touchpad_x * 29 / 30);
     data->state = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     data->point.x = touchpad_x;
     data->point.y = touchpad_y;
