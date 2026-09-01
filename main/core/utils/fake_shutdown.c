@@ -18,7 +18,7 @@
 
 static const char *TAG = "fake_shutdown";
 
-/* 关机流程互斥标志：防止"长按伪关机进行中"又被双按/睡眠定时器再次触发
+/* 关机流程互斥标志：防止"长按伪关机进行中"又被睡眠定时器再次触发
    （deepsleep 前的停外设阶段两路并发会重复删除 I2C/SDMMC 驱动而崩溃）。
    多个任务（按键/睡眠定时器）只做"置 true"的写与判读，单字节原子。 */
 static volatile bool s_shutting_down = false;
@@ -147,7 +147,7 @@ static void fake_shutdown_task(void *arg)
 
 void fake_shutdown_enter(void)
 {
-    /* 防御：伪关机流程已在进行（长按关机期间又触发双按/睡眠定时器）时
+    /* 防御：伪关机流程已在进行（长按关机期间又触发睡眠定时器）时
        直接返回，避免并发关闭外设重复删除驱动 */
     if (s_shutting_down) {
         return;

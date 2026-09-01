@@ -99,11 +99,15 @@ main/
                             #   触摸 indev、触摸事件订阅（lvgl_port_register_touch_cb）
       touch_test.h/.c       # 触摸区域测试（白点跟随 + 淡出，CONFIG_TOUCH_TEST）
     utils/
-      performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植）
+      performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
+      fake_shutdown.h/.c        # 伪关机（睡眠定时器到点；A 键长按"等待断电"，见第 4 点）
+      sleep_timer.h/.c          # 睡眠定时器（到点触发普通伪关机）
+      screen_sleep.h/.c         # 息屏管理（全黑 + 挂起 LVGL + esp_pm 降频 + 无操作超时自动息屏）
   ui/                       # 应用 UI
-    app.h/.c                # UI 组装入口 + 顶部状态栏（时间）
-    main_ui.h/.c            # 主界面（正弦波播放控制：采样率×频率按钮 + 停止 + 音量滑块）
+    app.h/.c                # UI 组装入口 + 顶部状态栏（时间/音量/电量）
+    main_ui.h/.c            # 主界面（四页滑动 tab：目录/播放列表/正在播放/设置）
     notification_panel.h/.c # 下拉通知栏（电池/亮度/拖拽，LVGL 事件驱动）
+    key_handler.h/.c        # 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）
 components/
   esp_lcd_qspi_amoled/      # AMOLED 面板驱动（QSPI，含亮度 0x51 命令）
   esp_lcd_touch_cst816/     # CST816 触摸

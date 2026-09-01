@@ -19,54 +19,19 @@
 #include "core/hardware/touch.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
-#include "core/utils/fake_shutdown.h"
 #include "core/utils/performance_monitor.h"
+#include "core/utils/screen_sleep.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
+#include "ui/key_handler.h"
 
 static const char *TAG = "app_main";
 
 /* ------------------------------------------------------------------ */
-/* 按键事件回调（按钮任务上下文）                                        */
-/*                                                                     */
-/* 唤醒源：B 键 GPIO0（RTC GPIO，外部 10k 上拉），按下为低电平唤醒。      */
-/* A 键 GPIO48 不是 RTC GPIO，无法用于 deep sleep 唤醒（见 fake_shutdown）。*/
-/* ⚠ GPIO0 是 strapping 引脚：若唤醒后仍按住会进入下载模式。             */
+/* 按键事件：亮屏/息屏两套映射由 ui/key_handler 统一分发                 */
+/* （亮屏：A=音量+ B=音量- A长按=伪关机 B长按=音量-10 双按=息屏；          */
+/*   息屏：A=播放/暂停 B=下一曲 B长按=上一曲 A长按=亮屏+伪关机 双按=亮屏）  */
 /* ------------------------------------------------------------------ */
-
-/* 唤醒防循环：deepsleep 唤醒 = 芯片重启，若唤醒时按键仍被按住，boot 后
-   button_service 去抖仍会报告事件 → 立即再次休眠。开机 1.2 秒内忽略
-   按键事件（长按由 button_service 的"开机初始按压"机制另行抑制）。 */
-#define DEEP_SLEEP_IGNORE_MS  1200
-
-/* 按键事件回调（按钮任务上下文）：
-   - A 键长按 2s（电源键）→ 伪关机"等待断电"：保存配置、停外设、屏幕定格
-     提示后 deepsleep；继续按住满 3s 由电源侧关机芯片硬件断电（屏幕靠断电
-     自然熄灭），未断电时按 B 键唤醒即取消关机；
-   - 双键同时按下 → 普通伪关机（关尽外设含屏幕 + deepsleep）。 */
-static void on_button_event(button_event_t event, void *ctx)
-{
-    (void)ctx;
-    /* 防循环：刚开机/唤醒 1.2 秒内忽略按键事件（唤醒时用户可能仍按着按键） */
-    if (esp_timer_get_time() < (int64_t)DEEP_SLEEP_IGNORE_MS * 1000) {
-        ESP_LOGI(TAG, "button event %d ignored within %d ms after boot",
-                 (int)event, DEEP_SLEEP_IGNORE_MS);
-        return;
-    }
-    switch (event) {
-    case BUTTON_EVENT_A_LONG:
-        /* A 键（电源键，与关机芯片复用）长按 2s：固件先保存配置并停外设，
-           定格提示后 deepsleep。用户继续按住满 3s 即硬件断电（真正关机）；
-           松手未断电时可按 B 键（GPIO0）唤醒取消关机。 */
-        fake_shutdown_wait_power_off();
-        break;
-    case BUTTON_EVENT_BOTH:
-        fake_shutdown_enter();
-        break;
-    default:
-        break;
-    }
-}
 
 /* 触摸初始化完成回调（触摸异步初始化任务上下文）：
    把就绪的触摸句柄交给 LVGL 输入设备，触摸输入即刻生效 */
@@ -118,8 +83,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Initialize button service (A=GPIO48, B=GPIO0)");
     button_service_init();
-    /* 双键同时按下 → 深度休眠（见 on_button_event） */
-    button_service_register_cb(on_button_event, NULL);
+    /* 按键分发（亮屏/息屏两套映射）在 LVGL 初始化后统一注册（见下） */
 
     ESP_LOGI(TAG, "Initialize SD card (SDMMC)");
     sd_card_init();   // 挂载失败不阻塞，由 boot_flow 依据 sd_card_is_mounted() 决定流程
@@ -151,6 +115,14 @@ void app_main(void)
 
     // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
     sleep_timer_init();
+
+    // 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）。
+    // 放在 LVGL 初始化之后，注册 button_service 事件回调。
+    key_handler_init();
+
+    // 息屏管理：esp_pm 动态调频（亮屏 240MHz/息屏空闲自动降频）+ 触摸活动
+    // 订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）。需在 LVGL 之后。
+    screen_sleep_init();
 
     // 启动性能监视（内存 + 双核 CPU 使用率）
     startPerformanceMonitor();

@@ -21,6 +21,8 @@ extern "C" {
  *   - 随机播放位置 shuffle_pos（uint64，无限确定性随机序列的逻辑位置），
  *     由 player_controller 在切歌/暂停/关机时保存，开机恢复随机序列现场
  *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）
+ *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
+ *     超过该时长后自动息屏（见 core/utils/screen_sleep），设置页可调
  *   - 上次播放位置（歌曲全局下标 + 秒），由 player_controller 在暂停/切歌/
  *     关机时保存，开机读取跳转恢复
  *
@@ -38,6 +40,7 @@ extern "C" {
 #define CONFIG_STORE_BRIGHTNESS_DEFAULT 0xFFu
 #define CONFIG_STORE_LOOP_DEFAULT       2u   /* PLAYER_LOOP_LIST */
 #define CONFIG_STORE_SLEEP_DEFAULT_MIN  45u
+#define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
 
 /** 配置变更回调（在调用 set_xxx 的线程上下文中同步执行） */
 typedef void (*config_store_cb_t)(void *ctx);
@@ -75,6 +78,9 @@ bool config_store_get_shuffle_pos(uint64_t *pos);
 /** @brief 睡眠定时的默认时长（分钟，0=无默认） */
 uint32_t config_store_get_sleep_default_min(void);
 
+/** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
+uint32_t config_store_get_screen_off_s(void);
+
 /**
  * @brief 读取上次播放位置
  * @param[out] global 上次播放歌曲全局下标
@@ -102,6 +108,9 @@ void config_store_set_shuffle_pos(uint64_t pos);
 
 /** @brief 设置睡眠定时的默认时长并持久化（分钟，0=关闭） */
 void config_store_set_sleep_default_min(uint32_t minutes);
+
+/** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
+void config_store_set_screen_off_s(uint32_t seconds);
 
 /** @brief 保存上次播放位置并持久化（由 player_controller 调用） */
 void config_store_set_last_song(uint32_t global, uint32_t pos_s);

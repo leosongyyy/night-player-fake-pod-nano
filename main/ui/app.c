@@ -7,6 +7,7 @@
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/display.h"
+#include "core/storage/config_store.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -69,6 +70,32 @@ static const char *status_volume_icon(uint8_t vol)
     return LV_SYMBOL_AUDIO;
 }
 
+/* 独立刷新状态栏音量（label 已创建时）：按键调节音量后由 config_store
+   变更回调即时同步，不必等 5 秒周期刷新。
+   读 config_store 的配置值（set_volume 先更新内存值再通知回调，必为新值）；
+   不读 audio_get_volume()——按键调音量时 audio_set_volume 与 config 回调
+   的先后顺序在不同调用路径下不保证，读配置值最稳。
+   ⚠ 调用方必须持有 LVGL 锁（config 回调在按键任务上下文也可能触发）。 */
+static void status_refresh_volume(void)
+{
+    if (vol_label == NULL) {
+        return;
+    }
+    uint8_t vol = config_store_get_volume();
+    char vol_buf[16];
+    snprintf(vol_buf, sizeof(vol_buf), "%s %u",
+             status_volume_icon(vol), (unsigned)vol);
+    lv_label_set_text(vol_label, vol_buf);
+}
+
+/* 配置变更回调：音量（按键调节）变化后立即刷新状态栏音量显示。
+   config_store 回调在调用 set_xxx 的线程上下文同步执行（按键任务持锁调用）。 */
+static void app_config_changed_cb(void *ctx)
+{
+    (void)ctx;
+    status_refresh_volume();
+}
+
 /* 状态栏周期刷新：电量（电池图标按百分比分级 + 电压 0.01V）+ 音量（实时跟随）。
    图标与数值拼接为单个 label（图标 + 空格 + 文本）。
    创建后立即手动调用一次填充初始值。 */
@@ -92,11 +119,7 @@ static void status_refresh_timer_cb(lv_timer_t *timer)
     }
 
     /* 音量：当前音量等级（0~100） */
-    uint8_t vol = audio_get_volume();
-    char vol_buf[16];
-    snprintf(vol_buf, sizeof(vol_buf), "%s %u",
-             status_volume_icon(vol), (unsigned)vol);
-    lv_label_set_text(vol_label, vol_buf);
+    status_refresh_volume();
 }
 
 /* 独立顶部状态栏：左=音量（图标+等级）、中=当前页面名称、右=电量（图标+电压）。
@@ -140,6 +163,10 @@ static lv_obj_t *create_status_bar(void)
     /* 周期刷新（每 5 秒）+ 立即填充一次初始值 */
     lv_timer_create(status_refresh_timer_cb, STATUS_BATTERY_REFRESH_MS, NULL);
     status_refresh_timer_cb(NULL);
+
+    /* 订阅配置变更：音量（按键调节等）变化后即时刷新状态栏音量显示。
+       回调在调用 set_xxx 的线程上下文执行（按键任务持锁调用，安全）。 */
+    config_store_register_cb(app_config_changed_cb, NULL);
 
     /* 状态栏创建晚于主界面：开机可能已切到非第 0 页（如默认停在正在播放页），
        需同步一次当前页名称（此前 main_ui_switch_tab 时的同步因状态栏未建被忽略） */

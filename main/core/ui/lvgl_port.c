@@ -15,7 +15,8 @@
 
 static const char *TAG = "lvgl_port";
 static SemaphoreHandle_t lvgl_mux = NULL;
-static TaskHandle_t s_lvgl_task = NULL;   /* LVGL 任务句柄（供深度休眠前挂起） */
+static TaskHandle_t s_lvgl_task = NULL;   /* LVGL 任务句柄（供息屏/深度休眠前挂起） */
+static esp_timer_handle_t s_tick_timer = NULL; /* LVGL tick 定时器（息屏挂起时停止，恢复时重启） */
 static lv_disp_draw_buf_t disp_buf;  // contains internal graphic buffer(s) called draw buffer(s)
 static lv_disp_drv_t disp_drv;       // contains callback functions
 static lv_indev_drv_t indev_drv;     // 触摸输入设备驱动（供 LVGL 控件接收触摸事件）
@@ -129,12 +130,20 @@ lv_disp_drv_t *lvgl_port_get_disp_drv(void)
     return &disp_drv;
 }
 
-/* 触摸事件订阅：由 indev 触摸轮询统一驱动，避免各功能重复轮询触摸 */
-static lvgl_port_touch_cb_t s_touch_cb = NULL;
-static void *s_touch_cb_ctx = NULL;
+/* 触摸事件订阅（多订阅者）：由 indev 触摸轮询统一驱动，避免各功能重复轮询。
+   固定数组容量：触摸测试（CONFIG_TOUCH_TEST）+ 息屏活动检测 + 预留，够用。 */
+#define TOUCH_CB_MAX  4
+
+typedef struct {
+    lvgl_port_touch_cb_t cb;
+    void *ctx;
+} touch_cb_entry_t;
+
+static touch_cb_entry_t s_touch_cbs[TOUCH_CB_MAX];
+static uint8_t s_touch_cb_count = 0;
 
 /* 触摸输入设备读取回调：把 esp_lcd_touch 的坐标/按下状态交给 LVGL，
-   并转发给注册的触摸事件订阅者（如触摸测试）。
+   并转发给所有注册的触摸事件订阅者（如触摸测试、息屏活动检测）。
    Y 坐标按比例修正：先乘以 23 再除以 24（触摸面板与屏幕的纵向比例校准）。 */
 static void lvgl_touchpad_read_cb(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 {
@@ -164,15 +173,42 @@ static void lvgl_touchpad_read_cb(lv_indev_drv_t *indev_driver, lv_indev_data_t 
     data->point.x = touchpad_x;
     data->point.y = touchpad_y;
 
-    if (s_touch_cb != NULL) {
-        s_touch_cb(touched, touchpad_x, touchpad_y, s_touch_cb_ctx);
+    for (uint8_t i = 0; i < s_touch_cb_count; i++) {
+        if (s_touch_cbs[i].cb != NULL) {
+            s_touch_cbs[i].cb(touched, touchpad_x, touchpad_y, s_touch_cbs[i].ctx);
+        }
     }
 }
 
 void lvgl_port_register_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx)
 {
-    s_touch_cb = cb;
-    s_touch_cb_ctx = user_ctx;
+    if (cb == NULL || s_touch_cb_count >= TOUCH_CB_MAX) {
+        return;
+    }
+    /* 相同回调+上下文重复注册：忽略，避免重复通知 */
+    for (uint8_t i = 0; i < s_touch_cb_count; i++) {
+        if (s_touch_cbs[i].cb == cb && s_touch_cbs[i].ctx == user_ctx) {
+            return;
+        }
+    }
+    s_touch_cbs[s_touch_cb_count].cb = cb;
+    s_touch_cbs[s_touch_cb_count].ctx = user_ctx;
+    s_touch_cb_count++;
+}
+
+void lvgl_port_unregister_touch_cb(lvgl_port_touch_cb_t cb)
+{
+    if (cb == NULL) {
+        return;
+    }
+    for (uint8_t i = 0; i < s_touch_cb_count; i++) {
+        if (s_touch_cbs[i].cb == cb) {
+            /* 用最后一个元素填补空位，保持数组紧凑 */
+            s_touch_cbs[i] = s_touch_cbs[s_touch_cb_count - 1];
+            s_touch_cb_count--;
+            return;
+        }
+    }
 }
 
 /* 设置触摸句柄：触摸异步初始化完成后由上层（main.c 的 ready 回调）调用，
@@ -216,9 +252,8 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
         .callback = &increase_lvgl_tick,
         .name = "lvgl_tick"
     };
-    esp_timer_handle_t lvgl_tick_timer = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
+    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &s_tick_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
     lvgl_mux = xSemaphoreCreateMutex();
     assert(lvgl_mux);
@@ -244,11 +279,38 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
 
 void lvgl_port_suspend(void)
 {
+    /* 1. 停止 LVGL tick 计时：LVGL 时间冻结，恢复后动画/定时器从暂停点继续，
+          避免挂起期间积累的 tick 在恢复后一次性触发大量过期 timer。
+          已停止（重复挂起，如息屏后睡眠定时器再走伪关机）时返回
+          ESP_ERR_INVALID_STATE，容忍。 */
+    if (s_tick_timer != NULL) {
+        esp_timer_stop(s_tick_timer);
+    }
+    /* 2. 挂起 LVGL 任务：停止刷屏与触摸轮询。
+           息屏/深度休眠前调用；deepsleep 场景无需恢复（唤醒后重启），
+           息屏场景用 lvgl_port_resume 恢复。 */
     if (s_lvgl_task != NULL) {
-        /* 挂起 LVGL 任务：停止刷屏与触摸轮询。
-           深度休眠前调用，避免删除 I2C 驱动后触摸轮询继续报错；
-           唤醒后系统重启，无需恢复接口。 */
         vTaskSuspend(s_lvgl_task);
         ESP_LOGI(TAG, "LVGL task suspended");
+    }
+}
+
+void lvgl_port_resume(void)
+{
+    /* 1. 恢复 LVGL 任务：重新开始刷屏与触摸轮询。
+           任务恢复后若尝试获取 LVGL 互斥锁会等待调用方释放（见调用方流程） */
+    if (s_lvgl_task != NULL) {
+        vTaskResume(s_lvgl_task);
+        ESP_LOGI(TAG, "LVGL task resumed");
+    }
+    /* 2. 重新启动 tick 计时：LVGL 时间从挂起时刻继续。
+          ⚠ 勿用 ESP_ERROR_CHECK：tick 已在运行（异常状态）时返回
+          ESP_ERR_INVALID_STATE，容忍即可，不影响功能。 */
+    if (s_tick_timer != NULL) {
+        esp_err_t err = esp_timer_start_periodic(s_tick_timer,
+                                                 EXAMPLE_LVGL_TICK_PERIOD_MS * 1000);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "restart lvgl tick failed: %s", esp_err_to_name(err));
+        }
     }
 }

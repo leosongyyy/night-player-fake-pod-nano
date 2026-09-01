@@ -16,6 +16,7 @@ static const char *TAG = "config_store";
 #define KEY_SHUFFLE_POS_LO   "shuf_pos_lo"
 #define KEY_SHUFFLE_POS_VAL  "shuf_pos_val"
 #define KEY_SLEEP_DEFAULT    "sleepdef"
+#define KEY_SCREEN_OFF       "screenoff"
 #define KEY_LAST_GLOBAL      "last_glob"
 #define KEY_LAST_POS         "last_pos"
 #define KEY_LAST_VALID       "last_valid"
@@ -37,6 +38,7 @@ static uint32_t s_shuf_pos_hi = 0;
 static uint32_t s_shuf_pos_lo = 0;
 static bool     s_shuf_pos_valid = false;
 static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
+static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
 static uint32_t s_last_global = 0;
 static uint32_t s_last_pos    = 0;
 static bool     s_last_valid  = false;
@@ -160,6 +162,9 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_sleep_def) != ESP_OK) {
         s_sleep_def = CONFIG_STORE_SLEEP_DEFAULT_MIN;
     }
+    if (nvs_get_u32(s_nvs, KEY_SCREEN_OFF, &s_screen_off) != ESP_OK) {
+        s_screen_off = CONFIG_STORE_SCREEN_OFF_DEFAULT;
+    }
     uint8_t valid = 0;
     if (nvs_get_u8(s_nvs, KEY_LAST_VALID, &valid) != ESP_OK || valid == 0) {
         s_last_valid = false;
@@ -175,9 +180,10 @@ void config_store_init(void)
 
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
-                  "sleep_def=%u min last=%s(global=%u,pos=%u) shuf_pos=%s",
+                  "sleep_def=%u min screen_off=%u s last=%s(global=%u,pos=%u) shuf_pos=%s",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
-             (int)s_shuffle, (unsigned)s_sleep_def, s_last_valid ? "yes" : "no",
+             (int)s_shuffle, (unsigned)s_sleep_def, (unsigned)s_screen_off,
+             s_last_valid ? "yes" : "no",
              (unsigned)s_last_global, (unsigned)s_last_pos,
              s_shuf_pos_valid ? "yes" : "no");
 }
@@ -216,6 +222,11 @@ bool config_store_get_shuffle_pos(uint64_t *pos)
 uint32_t config_store_get_sleep_default_min(void)
 {
     return s_sleep_def;
+}
+
+uint32_t config_store_get_screen_off_s(void)
+{
+    return s_screen_off;
 }
 
 bool config_store_get_last_song(uint32_t *global, uint32_t *pos_s)
@@ -293,6 +304,21 @@ void config_store_set_sleep_default_min(uint32_t minutes)
     }
     s_sleep_def = minutes;
     cfg_write_u32(KEY_SLEEP_DEFAULT, minutes);
+    config_notify();
+}
+
+void config_store_set_screen_off_s(uint32_t seconds)
+{
+    /* 收敛到合理范围：5 秒 ~ 1 小时；0 表示不自动息屏 */
+    if (seconds != 0) {
+        if (seconds < 5) seconds = 5;
+        if (seconds > 3600) seconds = 3600;
+    }
+    if (seconds == s_screen_off) {
+        return;
+    }
+    s_screen_off = seconds;
+    cfg_write_u32(KEY_SCREEN_OFF, seconds);
     config_notify();
 }
 

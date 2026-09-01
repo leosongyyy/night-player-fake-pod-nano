@@ -111,6 +111,9 @@ static void settings_refresh_sleep(void)
     }
 }
 
+/* 自动息屏超时（config_store 配置）：不在此页展示，后续放独立的不常用
+   设置页（见 FUTURE_PLAN 第 5 点），此处仅保留配置存取。 */
+
 /* 配置变更回调（config_store 通知）：外部入口修改配置后同步本页显示 */
 static void settings_config_changed_cb(void *ctx)
 {
@@ -323,7 +326,8 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     lv_obj_add_event_cb(sleep_cell, sleep_cell_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(sleep_cell, sleep_cell_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* 其余 6 格：预留空位（保持九宫格结构，无内容无交互） */
+    /* 其余 6 格：预留空位（保持九宫格结构，无内容无交互；
+       自动息屏超时设置项后续放独立的不常用设置页，见 FUTURE_PLAN 第 5 点） */
     for (int i = 0; i < 6; i++) {
         settings_cell_create(grid);
     }

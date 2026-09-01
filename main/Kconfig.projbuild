@@ -28,5 +28,7 @@ menu "FakePodNanoNightPlayer 应用配置"
             阈值须明显小于 3000ms（硬件断电时间），给保存/停外设留出窗口。
             曾用 2000ms 实测偶发"按了却没触发"（按满 3s 直接硬件断电，
             提示一闪而过），默认改为 1200ms 便于观察提示画面。
+            ⚠ 仅影响 A 键；B 键（GPIO0）长按阈值固定 600ms
+            （见 button_service.c 的 BUTTON_B_LONG_PRESS_MS）。
 
 endmenu

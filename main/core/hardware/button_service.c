@@ -17,7 +17,7 @@ static const char *TAG = "button";
    GPIO0 是 RTC GPIO，deepsleep 后按下可唤醒（取消关机）。 */
 #define BUTTON_B_PIN        GPIO_NUM_0
 
-/* 长按阈值（ms）：单键按住超过该时长即上报长按事件（无需等待抬起）。
+/* A 键长按阈值（ms）：单键按住超过该时长即上报长按事件（无需等待抬起）。
    与电源侧关机芯片的 3 秒硬断电配合：固件在阈值时刻主动保存配置并伪关机，
    剩余窗口（3s - 阈值）足够完成 NVS 写入与停外设。
    经 Kconfig CONFIG_BUTTON_LONG_PRESS_MS 配置（默认 1200ms）：
@@ -25,10 +25,16 @@ static const char *TAG = "button";
    约 1 秒甚至一闪而过（伪关机流程本身还要耗时），降到 1.2s 后提示显示
    窗口约 1.8s，更容易观察。 */
 #ifdef CONFIG_BUTTON_LONG_PRESS_MS
-#define BUTTON_LONG_PRESS_MS  CONFIG_BUTTON_LONG_PRESS_MS
+#define BUTTON_A_LONG_PRESS_MS  CONFIG_BUTTON_LONG_PRESS_MS
 #else
-#define BUTTON_LONG_PRESS_MS  1200
+#define BUTTON_A_LONG_PRESS_MS  1200
 #endif
+
+/* B 键长按阈值（ms）：B 键（GPIO0）可安全长按，亮屏=音量-10、息屏=上一曲，
+   判定缩短到 600ms 提升响应速度（用户要求 2026-09-03）。
+   ⚠ 与双按判定不冲突：长按判定要求"另一键未按下"，双按判定以"两键按下
+   时间重叠"为准，机制互斥。 */
+#define BUTTON_B_LONG_PRESS_MS  600
 
 /* 轮询周期（ms） */
 #define BUTTON_POLL_MS      5
@@ -51,6 +57,7 @@ enum {
 typedef struct {
     gpio_num_t pin;         /* GPIO 编号 */
     bool       pullup_en;   /* 是否启用内部上拉 */
+    uint32_t   long_press_ms; /* 本键长按阈值（ms），A/B 可不同（A=1200，B=600） */
     bool       raw_level;   /* 最近一次原始采样电平（true=高=抬起） */
     uint8_t    stable_cnt;  /* 当前原始电平已连续稳定的采样次数 */
     bool       level;       /* 去抖后的稳定电平（true=高=抬起） */
@@ -61,8 +68,10 @@ typedef struct {
 } button_state_t;
 
 static button_state_t s_buttons[BTN_IDX_MAX] = {
-    [BTN_IDX_A] = { .pin = BUTTON_A_PIN, .pullup_en = true  },
-    [BTN_IDX_B] = { .pin = BUTTON_B_PIN, .pullup_en = false },
+    [BTN_IDX_A] = { .pin = BUTTON_A_PIN, .pullup_en = true,
+                    .long_press_ms = BUTTON_A_LONG_PRESS_MS },
+    [BTN_IDX_B] = { .pin = BUTTON_B_PIN, .pullup_en = false,
+                    .long_press_ms = BUTTON_B_LONG_PRESS_MS },
 };
 
 /* 交互状态：一次交互 = 从第一个键按下到所有键全部抬起。
@@ -86,12 +95,12 @@ static void button_report(button_event_t event)
         ESP_LOGI(TAG, "B key (GPIO%d) short press", BUTTON_B_PIN);
         break;
     case BUTTON_EVENT_A_LONG:
-        ESP_LOGI(TAG, "A key (GPIO%d) long press (%d ms)",
-                 BUTTON_A_PIN, BUTTON_LONG_PRESS_MS);
+        ESP_LOGI(TAG, "A key (GPIO%d) long press (%u ms)",
+                 BUTTON_A_PIN, (unsigned)BUTTON_A_LONG_PRESS_MS);
         break;
     case BUTTON_EVENT_B_LONG:
-        ESP_LOGI(TAG, "B key (GPIO%d) long press (%d ms)",
-                 BUTTON_B_PIN, BUTTON_LONG_PRESS_MS);
+        ESP_LOGI(TAG, "B key (GPIO%d) long press (%u ms)",
+                 BUTTON_B_PIN, (unsigned)BUTTON_B_LONG_PRESS_MS);
         break;
     case BUTTON_EVENT_BOTH:
         ESP_LOGI(TAG, "both keys pressed together");
@@ -131,7 +140,7 @@ static void button_scan(void)
             if (b->pressed && !b->long_reported && !b->initial_hold
                 && !s_buttons[1 - i].pressed
                 && esp_timer_get_time() - b->press_start_us
-                   >= (int64_t)BUTTON_LONG_PRESS_MS * 1000) {
+                   >= (int64_t)b->long_press_ms * 1000) {
                 b->long_reported = true;
                 button_report((i == BTN_IDX_A) ? BUTTON_EVENT_A_LONG
                                                : BUTTON_EVENT_B_LONG);

@@ -64,10 +64,21 @@ typedef void (*lvgl_port_touch_cb_t)(bool pressed, uint16_t x, uint16_t y, void 
 /**
  * @brief 注册触摸事件回调（复用 LVGL 输入设备的触摸轮询，无需额外定时器）
  *
- * @param cb       回调函数；传 NULL 取消注册
+ * 支持多个订阅者（内部按固定容量数组保存，见 lvgl_port.c 的 TOUCH_CB_MAX）；
+ * 相同 cb+ctx 重复注册会被忽略。回调运行在 LVGL 任务上下文（已持锁），
+ * 可安全调用 LVGL API；也可只做轻量状态记录（如息屏活动的"最近操作时间"）。
+ *
+ * @param cb       回调函数（传 NULL 忽略）
  * @param user_ctx 透传给回调的用户上下文
  */
 void lvgl_port_register_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
+
+/**
+ * @brief 注销触摸事件回调（按 cb 匹配，忽略 ctx）
+ *
+ * @param cb 之前注册过的回调函数；传 NULL 忽略
+ */
+void lvgl_port_unregister_touch_cb(lvgl_port_touch_cb_t cb);
 
 /**
  * @brief 设置触摸句柄（触摸异步初始化完成后调用）
@@ -81,11 +92,21 @@ void lvgl_port_register_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
 void lvgl_port_set_touch_handle(esp_lcd_touch_handle_t touch_handle);
 
 /**
- * @brief 挂起 LVGL 任务（停止刷屏与触摸轮询），供深度休眠前调用
+ * @brief 挂起 LVGL（停止 tick 计时 + 挂起 LVGL 任务）
  *
- * 唤醒后系统重启会重新初始化，无需恢复接口。
+ * 供息屏/深度休眠前调用：停止 lv_tick（LVGL 时间冻结，恢复后动画从暂停点
+ * 继续）并挂起 LVGL 任务（停止刷屏与触摸轮询）。恢复用 lvgl_port_resume。
+ * 深度休眠（deepsleep）场景无需恢复，唤醒后系统重启重新初始化。
  */
 void lvgl_port_suspend(void);
+
+/**
+ * @brief 恢复 LVGL（恢复任务 + 重新启动 tick 计时）
+ *
+ * 与 lvgl_port_suspend 配对，供息屏唤醒后调用。恢复后 LVGL 任务继续
+ * 刷屏与触摸轮询，tick 时间从挂起时刻继续（无跳变）。
+ */
+void lvgl_port_resume(void);
 
 #ifdef __cplusplus
 }
