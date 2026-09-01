@@ -88,7 +88,7 @@ main/
       display.h/.c          # AMOLED LCD（QSPI 总线/面板）+ 屏幕尺寸配置 + 亮度控制
       touch.h/.c            # 触摸控制器（I2C + CST816/820/CHSC6417 按需选择）
       battery.h/.c          # 电池电压 ADC（分压换算 + 校准）
-      button_service.h/.c   # A/B 双键服务（GPIO48/GPIO0，去抖 + 单击/双按事件）
+      button_service.h/.c   # A/B 双键服务（GPIO48/GPIO0，去抖 + 单击/双按/长按事件）
       sd_card.h/.c          # SD 卡驱动（SDMMC 4-bit + FAT 挂载 /sdcard）
       audio/
         audio.h/.c          # 音频播放 API（I2S 主机 + 正弦波 + PCM 流写 I2S）
@@ -120,7 +120,7 @@ components/
 
 | GPIO | 功能 | 说明 |
 |---|---|---|
-| 0 | B 键 | 按键接 GND，外部 10kΩ 上拉（`core/hardware/button_service.c`）。⚠ strapping 引脚：复位时若被按住会进入下载模式 |
+| 0 | B 键 | 按键接 GND，外部 10kΩ 上拉（`core/hardware/button_service.c`）。⚠ strapping 引脚：复位时若被按住会进入下载模式。RTC GPIO，deepsleep 唤醒源：伪关机后按下可"取消关机"并唤醒重启 |
 | 1 | 电池电压 ADC | ADC1_CH0，10K+10K 分压（`battery.c`） |
 | 2 | 触摸 SCL | I²C 时钟（`touch.h`） |
 | 3 | 触摸 SDA | I²C 数据（`touch.h`） |
@@ -140,6 +140,7 @@ components/
 | 39 | 音频 DIN | I2S 数据输出（`core/hardware/audio/audio.c`） |
 | 40 | 音频 BCK | I2S 位时钟，主机输出（`core/hardware/audio/audio.c`） |
 | 41 | CS43131 RESET# | DAC 复位，低有效，经 3.3→1.8V 电平转换（`core/hardware/audio/cs43131.c`） |
+| 48 | A 键（电源键） | 按键接 GND，内部上拉（`core/hardware/button_service.c`）。⚠ 与电源侧**3 秒关机芯片复用同一按键**：长按满 2s 固件伪关机（`fake_shutdown_wait_power_off`，保存配置+停外设+定格提示+deepsleep），继续按住满 3s 由硬件直接断电/开机。非 RTC GPIO，无法用于 deepsleep 唤醒 |
 
 **历史注释规划（源码 `main.c` 旧版注释，当前未启用、未验证）：**
 - LCD 相关：`TFT_TE = 6`（撕裂效果同步）

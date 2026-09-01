@@ -2,16 +2,33 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "button";
 
-/* A 键：GPIO48，GPIO-按钮-GND，外部无上拉，需启用内部上拉 */
+/* A 键：GPIO48，GPIO-按钮-GND，外部无上拉，需启用内部上拉。
+   ⚠ A 键与成品机电源侧的 3 秒关机芯片复用同一按键：长按超过 3 秒由硬件
+   直接断电/开机；固件在长按 2 秒（BUTTON_LONG_PRESS_MS）时主动伪关机。 */
 #define BUTTON_A_PIN        GPIO_NUM_48
 /* B 键：GPIO0，按键接 GND，外部已有 10kΩ 上拉，无需内部上拉。
-   注意 GPIO0 为 strapping 引脚：复位时若被按住会进入下载模式，属硬件特性。 */
+   注意 GPIO0 为 strapping 引脚：复位时若被按住会进入下载模式，属硬件特性。
+   GPIO0 是 RTC GPIO，deepsleep 后按下可唤醒（取消关机）。 */
 #define BUTTON_B_PIN        GPIO_NUM_0
+
+/* 长按阈值（ms）：单键按住超过该时长即上报长按事件（无需等待抬起）。
+   与电源侧关机芯片的 3 秒硬断电配合：固件在阈值时刻主动保存配置并伪关机，
+   剩余窗口（3s - 阈值）足够完成 NVS 写入与停外设。
+   经 Kconfig CONFIG_BUTTON_LONG_PRESS_MS 配置（默认 1200ms）：
+   曾用 2000ms 实测偶发"按了却没看到提示"——用户按满 3s 时提示只显示
+   约 1 秒甚至一闪而过（伪关机流程本身还要耗时），降到 1.2s 后提示显示
+   窗口约 1.8s，更容易观察。 */
+#ifdef CONFIG_BUTTON_LONG_PRESS_MS
+#define BUTTON_LONG_PRESS_MS  CONFIG_BUTTON_LONG_PRESS_MS
+#else
+#define BUTTON_LONG_PRESS_MS  1200
+#endif
 
 /* 轮询周期（ms） */
 #define BUTTON_POLL_MS      5
@@ -38,6 +55,9 @@ typedef struct {
     uint8_t    stable_cnt;  /* 当前原始电平已连续稳定的采样次数 */
     bool       level;       /* 去抖后的稳定电平（true=高=抬起） */
     bool       pressed;     /* 当前是否处于按下状态 */
+    bool       initial_hold;   /* 开机时已被按住（首次抬起前不触发长按） */
+    bool       long_reported;  /* 本次按压是否已上报过长按（抬起不再报单击） */
+    int64_t    press_start_us; /* 本次按下开始时刻（esp_timer，us） */
 } button_state_t;
 
 static button_state_t s_buttons[BTN_IDX_MAX] = {
@@ -65,6 +85,14 @@ static void button_report(button_event_t event)
     case BUTTON_EVENT_B_SHORT:
         ESP_LOGI(TAG, "B key (GPIO%d) short press", BUTTON_B_PIN);
         break;
+    case BUTTON_EVENT_A_LONG:
+        ESP_LOGI(TAG, "A key (GPIO%d) long press (%d ms)",
+                 BUTTON_A_PIN, BUTTON_LONG_PRESS_MS);
+        break;
+    case BUTTON_EVENT_B_LONG:
+        ESP_LOGI(TAG, "B key (GPIO%d) long press (%d ms)",
+                 BUTTON_B_PIN, BUTTON_LONG_PRESS_MS);
+        break;
     case BUTTON_EVENT_BOTH:
         ESP_LOGI(TAG, "both keys pressed together");
         break;
@@ -77,7 +105,7 @@ static void button_report(button_event_t event)
     }
 }
 
-/* 轮询扫描两个按键：去抖 + 事件判定 */
+/* 轮询扫描两个按键：去抖 + 长按判定 + 事件判定 */
 static void button_scan(void)
 {
     for (int i = 0; i < BTN_IDX_MAX; i++) {
@@ -97,13 +125,32 @@ static void button_scan(void)
             continue;   /* 仍处于抖动中，忽略本次采样 */
         }
         if (b->level == raw) {
-            continue;   /* 去抖后的电平未变化 */
+            /* 去抖后的电平未变化：若处于"按住"状态，检查是否达到长按阈值。
+               长按条件：单键按住（另一键未按下，双按交互不触发长按）、
+               非开机初始按压、按住时长 >= 阈值。上报一次后不再重复。 */
+            if (b->pressed && !b->long_reported && !b->initial_hold
+                && !s_buttons[1 - i].pressed
+                && esp_timer_get_time() - b->press_start_us
+                   >= (int64_t)BUTTON_LONG_PRESS_MS * 1000) {
+                b->long_reported = true;
+                button_report((i == BTN_IDX_A) ? BUTTON_EVENT_A_LONG
+                                               : BUTTON_EVENT_B_LONG);
+            }
+            continue;
         }
         b->level = raw;
 
         if (!raw) {
             /* ---- 按下（低电平） ---- */
             b->pressed = true;
+            b->long_reported = false;
+            if (b->initial_hold) {
+                /* 开机初始按压（长按 3s 开机后未及时松手）：不启动长按计时，
+                   等首次抬起后恢复正常检测 */
+                b->press_start_us = 0;
+            } else {
+                b->press_start_us = esp_timer_get_time();
+            }
             if (s_any_pressed) {
                 /* 已有另一键处于按下状态：本次交互发生双键同时按下 */
                 s_simultaneous = true;
@@ -115,6 +162,9 @@ static void button_scan(void)
         } else {
             /* ---- 抬起 ---- */
             b->pressed = false;
+            b->initial_hold = false;   /* 首次抬起后解除开机按压抑制 */
+            const bool was_long = b->long_reported;
+            b->long_reported = false;
 
             if (s_buttons[1 - i].pressed) {
                 /* 另一键仍按住：本键抬起属双按交互的一部分，暂不上报 */
@@ -127,8 +177,9 @@ static void button_scan(void)
                 /* 双键同时按下：全部抬起后统一上报 */
                 button_report(BUTTON_EVENT_BOTH);
                 s_simultaneous = false;
-            } else {
-                /* 单键：抬起即上报单击 */
+            } else if (!was_long) {
+                /* 单键且未上报过长按：抬起即上报单击；
+                   已上报过长按（如 A 键长按 2s 关机）的抬起不再补报单击 */
                 button_report((i == BTN_IDX_A) ? BUTTON_EVENT_A_SHORT : BUTTON_EVENT_B_SHORT);
             }
         }
@@ -163,6 +214,11 @@ void button_service_init(void)
         s_buttons[i].stable_cnt = 0;
         s_buttons[i].level = true;
         s_buttons[i].pressed = false;
+        /* 开机时已被按住（如长按电源键 3s 开机后未及时松手）：标记为初始
+           按压，首次抬起前不触发长按，避免"开机即误判长按关机" */
+        s_buttons[i].initial_hold   = (gpio_get_level(s_buttons[i].pin) == 0);
+        s_buttons[i].long_reported  = false;
+        s_buttons[i].press_start_us = 0;
     }
 
     xTaskCreatePinnedToCore(button_task, "button_svc",

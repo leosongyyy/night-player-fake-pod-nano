@@ -74,7 +74,9 @@ static void settings_refresh_loop(void)
     }
 }
 
-/* 顺序/随机播放：图标与文字随开关切换 */
+/* 顺序/随机播放：图标与文字随开关切换。
+   顺序播放用 "AZ" 文字当图标（类似睡眠定时器的 "Zz"），随机播放用
+   LV_SYMBOL_SHUFFLE 图标。 */
 static void settings_refresh_shuffle(void)
 {
     if (s_shuffle_icon == NULL || s_shuffle_status == NULL) {
@@ -84,7 +86,7 @@ static void settings_refresh_shuffle(void)
         lv_label_set_text(s_shuffle_icon, LV_SYMBOL_SHUFFLE);
         lv_label_set_text(s_shuffle_status, "随机播放");
     } else {
-        lv_label_set_text(s_shuffle_icon, LV_SYMBOL_PLAY);
+        lv_label_set_text(s_shuffle_icon, "AZ");
         lv_label_set_text(s_shuffle_status, "顺序播放");
     }
 }
@@ -302,9 +304,10 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     settings_refresh_loop();
     lv_obj_add_event_cb(loop_cell, loop_cell_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 格子 2：顺序/随机播放（点击切换，图标随状态切换） */
+    /* 格子 2：顺序/随机播放（点击切换，图标随状态切换：
+       顺序 "AZ" 文字 / 随机 LV_SYMBOL_SHUFFLE） */
     lv_obj_t *shuffle_cell = settings_cell_create(grid);
-    s_shuffle_icon = settings_icon_label_create(shuffle_cell, LV_SYMBOL_PLAY);
+    s_shuffle_icon = settings_icon_label_create(shuffle_cell, "AZ");
     s_shuffle_status = settings_status_label_create(shuffle_cell, false);
     settings_refresh_shuffle();
     lv_obj_add_event_cb(shuffle_cell, shuffle_cell_cb, LV_EVENT_CLICKED, NULL);

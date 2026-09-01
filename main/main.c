@@ -35,23 +35,37 @@ static const char *TAG = "app_main";
 /* ------------------------------------------------------------------ */
 
 /* 唤醒防循环：deepsleep 唤醒 = 芯片重启，若唤醒时按键仍被按住，boot 后
-   button_service 去抖仍会报告双按 → 立即再次休眠。开机 1.2 秒内忽略双按。 */
+   button_service 去抖仍会报告事件 → 立即再次休眠。开机 1.2 秒内忽略
+   按键事件（长按由 button_service 的"开机初始按压"机制另行抑制）。 */
 #define DEEP_SLEEP_IGNORE_MS  1200
 
 /* 按键事件回调（按钮任务上下文）：
-   双键同时按下 → 进入伪关机（关尽外设 + deepsleep） */
+   - A 键长按 2s（电源键）→ 伪关机"等待断电"：保存配置、停外设、屏幕定格
+     提示后 deepsleep；继续按住满 3s 由电源侧关机芯片硬件断电（屏幕靠断电
+     自然熄灭），未断电时按 B 键唤醒即取消关机；
+   - 双键同时按下 → 普通伪关机（关尽外设含屏幕 + deepsleep）。 */
 static void on_button_event(button_event_t event, void *ctx)
 {
     (void)ctx;
-    if (event != BUTTON_EVENT_BOTH) {
-        return;
-    }
-    /* 防循环：刚开机/唤醒 1.2 秒内忽略双按（唤醒时用户可能仍按着按键） */
+    /* 防循环：刚开机/唤醒 1.2 秒内忽略按键事件（唤醒时用户可能仍按着按键） */
     if (esp_timer_get_time() < (int64_t)DEEP_SLEEP_IGNORE_MS * 1000) {
-        ESP_LOGI(TAG, "both keys ignored within %d ms after boot", DEEP_SLEEP_IGNORE_MS);
+        ESP_LOGI(TAG, "button event %d ignored within %d ms after boot",
+                 (int)event, DEEP_SLEEP_IGNORE_MS);
         return;
     }
-    fake_shutdown_enter();
+    switch (event) {
+    case BUTTON_EVENT_A_LONG:
+        /* A 键（电源键，与关机芯片复用）长按 2s：固件先保存配置并停外设，
+           定格提示后 deepsleep。用户继续按住满 3s 即硬件断电（真正关机）；
+           松手未断电时可按 B 键（GPIO0）唤醒取消关机。 */
+        fake_shutdown_wait_power_off();
+        break;
+    case BUTTON_EVENT_BOTH:
+        fake_shutdown_enter();
+        break;
+    default:
+        break;
+    }
 }
 
 /* 触摸初始化完成回调（触摸异步初始化任务上下文）：
