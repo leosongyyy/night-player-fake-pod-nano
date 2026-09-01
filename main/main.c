@@ -73,8 +73,8 @@ void app_main(void)
     ESP_LOGI(TAG, "Initialize audio (I2S + CS43131)");
     audio_init();
 
-    /* 应用用户音量配置（NVS 持久化；audio_init 内部先按默认音量初始化 DAC） */
-    audio_set_volume(config_store_get_volume());
+    /* 应用用户音量配置（NVS 持久化，档位 0~30；audio_init 内部先按默认档初始化 DAC） */
+    audio_set_volume_level(config_store_get_volume());
 
     ESP_LOGI(TAG, "Initialize pldata partition (播放列表数据)");
     if (pldata_init() != ESP_OK) {

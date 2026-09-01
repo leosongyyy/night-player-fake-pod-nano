@@ -384,9 +384,10 @@ static void player_cmd_pause(void)
 {
     if (mp3_player_get_state() == MP3_STATE_PLAYING) {
         mp3_player_pause();
-        /* 暂停时保存播放位置（暂停瞬间的位置，误差在几毫秒内）；
-           随机模式下同步保存随机位置，保证断点续播回到同一序列 */
-        config_store_set_last_song(s_cur_global, mp3_player_get_position_s());
+        /* 暂停时保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置，
+           开机从歌曲开头开始）；随机模式下同步保存随机位置，
+           保证断点续播回到同一序列 */
+        config_store_set_last_song(s_cur_global, 0);
         if (s_shuffle) {
             config_store_set_shuffle_pos(s_shuffle_pos);
         }
@@ -395,8 +396,7 @@ static void player_cmd_pause(void)
 
 /* 手动切歌/自动续播后保存新曲位置（从头开始）：
    保证用户"切走之后直接关机/断电"也能在下次开机恢复到最后听的歌。
-   注意：开机恢复播放走的是 CMD_PLAY_SONG/CMD_PLAY_SONG_RANDOM，不在此列，
-   不会覆盖已保存的恢复位置（随后 CMD_SEEK 才会真正跳转）。
+   注意：开机恢复播放走的是 CMD_PLAY_SONG/CMD_PLAY_SONG_RANDOM，不在此列。
    随机模式下同时保存随机位置（切歌后 position 已推进到新歌）。 */
 static void player_save_new_song(void)
 {
@@ -496,10 +496,10 @@ static void player_task(void *arg)
         case CMD_SET_SHUFFLE: player_cmd_set_shuffle(msg.arg != 0); break;
         case CMD_FINISHED:   player_play_global(player_auto_next()); player_save_new_song(); break;
         case CMD_STOP:
-            /* 停止前保存当前播放位置（用户主动停止也记住进度，开机可恢复）；
+            /* 停止前保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置）；
                随机模式下同步保存随机位置 */
             if (mp3_player_get_state() != MP3_STATE_IDLE) {
-                config_store_set_last_song(s_cur_global, mp3_player_get_position_s());
+                config_store_set_last_song(s_cur_global, 0);
                 if (s_shuffle) {
                     config_store_set_shuffle_pos(s_shuffle_pos);
                 }
@@ -565,10 +565,17 @@ esp_err_t player_controller_init(void)
 
     s_ready = true;
 
-    /* 读取上次播放位置（NVS 持久化），供恢复随机列表目录 / 恢复播放用 */
+    /* 读取上次播放歌曲（NVS 持久化），供恢复随机列表目录 / 恢复播放用。
+       ⚠ NightPlayer 原版机制：只记忆歌曲，不记忆秒数位置（开机从歌曲
+       开头开始），last_pos 已不再使用。 */
     uint32_t last_global = 0;
-    uint32_t last_pos = 0;
+    uint32_t last_pos = 0;   /* 保留接口参数，值为 0（不记忆秒数） */
     bool has_last = config_store_get_last_song(&last_global, &last_pos);
+
+    /* 关机前播放状态记忆（NVS）：false=伪关机前已暂停/停止 → 开机只恢复
+       当前歌曲不自动播放，随后紧跟 CMD_PAUSE 停在暂停态；
+       true=关机前在播放（或无记录，默认）→ 开机自动播放（旧行为）。 */
+    const bool resume_paused = !config_store_get_was_playing();
 
     /* 恢复随机播放开关（NVS）：开启时按"当前列表"（上次播放歌曲所在目录）
        初始化随机列表缓存，并恢复/生成随机位置。缓存分配失败则降级为
@@ -589,9 +596,9 @@ esp_err_t player_controller_init(void)
         }
     }
 
-    /* 默认从上次播放位置恢复（NVS 持久化）：先切到上次歌曲，再 seek 到
-       上次位置。无记录或下标越界（SD 卡换过）时从头播放第一首。
-       命令队列串行处理，PLAY_SONG/PLAY_SONG_RANDOM 之后紧跟 SEEK，顺序正确。
+    /* 默认从上次播放歌曲恢复（NVS 持久化）：切到上次歌曲后从开头播放
+       （不记忆秒数位置，NightPlayer 原版机制）。无记录或下标越界（SD 卡
+       换过）时播放第一首。命令队列串行处理，顺序正确。
        随机模式下：优先用保存的随机位置（序列一致，回到同一首歌、同一目录）；
        无有效记录则生成随机起点（首次开启后未播过 / SD 卡数据变化）。 */
     ESP_LOGI(TAG, "controller ready, dirs=%u songs=%u, loop=%d, shuffle=%d",
@@ -620,15 +627,18 @@ esp_err_t player_controller_init(void)
             player_post_cmd64(CMD_PLAY_SONG_RANDOM, s_shuffle_pos);
             config_store_set_shuffle_pos(s_shuffle_pos);
         }
-        if (has_last && last_pos > 0) {
-            player_post_cmd(CMD_SEEK, last_pos);
+        /* 关机前已暂停：恢复当前歌曲后立即暂停（不自动出声） */
+        if (resume_paused) {
+            player_post_cmd(CMD_PAUSE, 0);
         }
     } else if (has_last && last_global < s_song_count) {
-        ESP_LOGI(TAG, "resume last song #%u @ %u s",
-                 (unsigned)last_global, (unsigned)last_pos);
+        ESP_LOGI(TAG, "resume last song #%u%s",
+                 (unsigned)last_global,
+                 resume_paused ? " (paused, no auto play)" : "");
         player_post_cmd(CMD_PLAY_SONG, last_global);
-        if (last_pos > 0) {
-            player_post_cmd(CMD_SEEK, last_pos);
+        /* 关机前已暂停：恢复当前歌曲后立即暂停（不自动出声） */
+        if (resume_paused) {
+            player_post_cmd(CMD_PAUSE, 0);
         }
     } else {
         ESP_LOGI(TAG, "no last song record, play first song");
@@ -712,15 +722,20 @@ void player_controller_save_last_position(void)
     if (!s_ready) {
         return;
     }
-    uint32_t pos = (mp3_player_get_state() != MP3_STATE_IDLE)
-                   ? mp3_player_get_position_s() : 0;
-    config_store_set_last_song(s_cur_global, pos);
+    /* ⚠ NightPlayer 原版机制：只记忆当前歌曲，不记忆秒数位置
+       （pos 恒为 0，开机从歌曲开头开始） */
+    config_store_set_last_song(s_cur_global, 0);
+    /* 记录关机前播放状态（NVS）：true=当时在播放（开机自动播放），
+       false=已暂停/停止（开机只恢复当前歌曲不自动播放，避免突然出声）。
+       与当前歌曲一起保存，供 player_controller_init 恢复。 */
+    config_store_set_was_playing(mp3_player_get_state() == MP3_STATE_PLAYING);
     /* 随机模式下同步保存随机位置（关机前最后状态，开机完整恢复序列） */
     if (s_shuffle) {
         config_store_set_shuffle_pos(s_shuffle_pos);
     }
-    ESP_LOGI(TAG, "save last position: song #%u @ %u s%s",
-             (unsigned)s_cur_global, (unsigned)pos,
+    ESP_LOGI(TAG, "save last position: song #%u was_playing=%d%s",
+             (unsigned)s_cur_global,
+             (int)(mp3_player_get_state() == MP3_STATE_PLAYING),
              s_shuffle ? " (shuffle)" : "");
 }
 

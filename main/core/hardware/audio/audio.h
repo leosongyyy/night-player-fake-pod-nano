@@ -33,7 +33,7 @@ typedef enum {
  * @brief 初始化音频子系统（I2S 通道 + CS43131）
  *
  * 前置条件：touch_init() 已完成（I2C_NUM_0 总线已安装）。
- * 默认采样率 48kHz，默认音量 80%。
+ * 默认采样率 48kHz，默认音量 20 档。
  *
  * @return ESP_OK 成功
  */
@@ -83,12 +83,26 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames);
  */
 esp_err_t audio_pcm_stop(void);
 
+/** 音量档位：0 = 静音，1~30 线性映射 20%~80%（人耳有效区间线性化） */
+#define AUDIO_VOL_LEVEL_MUTE    0u   /* 静音档：音量寄存器写最小 0xFF */
+#define AUDIO_VOL_LEVEL_MIN     1u   /* 最小非静音档（对应 20%） */
+#define AUDIO_VOL_LEVEL_MAX     30u  /* 最大档（对应 80%） */
+#define AUDIO_VOL_LEVEL_DEFAULT 20u  /* 默认档（NVS 无设置时，对应约 59%） */
+
+/* 档位→百分比映射端点：1 档 = 20%，30 档 = 80%（每档约 2.07 个百分点） */
+#define AUDIO_VOL_PERCENT_MIN   20u
+#define AUDIO_VOL_PERCENT_MAX   80u
+
 /**
- * @brief 设置音量（映射到 CS43131 音量寄存器）
- * @param percent 0~100（100 = 0dB 最大音量）
+ * @brief 设置音量档位（映射到 CS43131 音量寄存器）
+ *
+ * 档位 1~30 线性映射 20%~80%；0 档直接写音量寄存器最小值 0xFF 实现静音
+ * （原配置下 <10 已几乎无声，无需走 CS43131 静音控制位）。
+ *
+ * @param level 0~30（0 = 静音，越界自动钳位到 30）
  * @return ESP_OK 成功
  */
-esp_err_t audio_set_volume(uint8_t percent);
+esp_err_t audio_set_volume_level(uint8_t level);
 
 /** @brief 是否正在播放 */
 bool audio_is_playing(void);
@@ -99,8 +113,8 @@ audio_fs_t audio_get_fs(void);
 /** @brief 当前播放频率（Hz） */
 uint16_t audio_get_freq(void);
 
-/** @brief 当前音量（0~100） */
-uint8_t audio_get_volume(void);
+/** @brief 当前音量档位（0~30） */
+uint8_t audio_get_volume_level(void);
 
 #ifdef __cplusplus
 }

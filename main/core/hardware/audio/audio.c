@@ -49,7 +49,7 @@ static bool i2s_enabled = false;   /* I2S 通道是否已 enable（避免重复 
 static volatile bool playing = false;
 static audio_fs_t cur_fs = AUDIO_FS_48000;
 static uint16_t cur_freq = 0;
-static uint8_t volume_percent = 80;
+static uint8_t volume_level = AUDIO_VOL_LEVEL_DEFAULT;
 
 static int16_t sine_table[SINE_TABLE_SIZE];
 
@@ -173,12 +173,12 @@ esp_err_t audio_init(void)
         return ret;
     }
 
-    ret = audio_set_volume(volume_percent);
+    ret = audio_set_volume_level(volume_level);
     if (ret != ESP_OK) {
         return ret;
     }
 
-    ESP_LOGI(TAG, "audio init done (volume %u%%)", volume_percent);
+    ESP_LOGI(TAG, "audio init done (volume level %u/30)", (unsigned)volume_level);
     return ESP_OK;
 }
 
@@ -335,15 +335,36 @@ esp_err_t audio_pcm_stop(void)
     return ESP_OK;
 }
 
-esp_err_t audio_set_volume(uint8_t percent)
+/* 音量档位 → 百分比：1~30 线性映射 20%~80%（整数运算，端点到点：
+   档 1 = 20%，档 30 = 80%，每档约 2.07 个百分点） */
+static uint8_t vol_level_to_percent(uint8_t level)
 {
-    if (percent > 100) {
-        percent = 100;
+    if (level <= AUDIO_VOL_LEVEL_MUTE) {
+        return 0;
     }
-    volume_percent = percent;
+    if (level >= AUDIO_VOL_LEVEL_MAX) {
+        return AUDIO_VOL_PERCENT_MAX;
+    }
+    return (uint8_t)(AUDIO_VOL_PERCENT_MIN +
+                     ((uint32_t)(level - AUDIO_VOL_LEVEL_MIN)
+                      * (AUDIO_VOL_PERCENT_MAX - AUDIO_VOL_PERCENT_MIN)
+                      / (AUDIO_VOL_LEVEL_MAX - AUDIO_VOL_LEVEL_MIN)));
+}
 
-    /* CS43131 音量 0x00 = 0dB（最大），0xFF = 最小；滑块 100 → 0dB */
-    uint8_t reg = (uint8_t)(255u - ((uint32_t)percent * 255u / 100u));
+esp_err_t audio_set_volume_level(uint8_t level)
+{
+    if (level > AUDIO_VOL_LEVEL_MAX) {
+        level = AUDIO_VOL_LEVEL_MAX;
+    }
+    volume_level = level;
+
+    /* CS43131 音量 0x00 = 0dB（最大），0xFF = 最小。
+       0 档静音：直接写最小音量 0xFF（原配置下 <10 已几乎无声，不走静音控制位） */
+    uint8_t reg = 0xFF;
+    if (level > AUDIO_VOL_LEVEL_MUTE) {
+        uint8_t percent = vol_level_to_percent(level);
+        reg = (uint8_t)(255u - ((uint32_t)percent * 255u / 100u));
+    }
     return cs43131_set_volume(reg);
 }
 
@@ -362,7 +383,7 @@ uint16_t audio_get_freq(void)
     return cur_freq;
 }
 
-uint8_t audio_get_volume(void)
+uint8_t audio_get_volume_level(void)
 {
-    return volume_percent;
+    return volume_level;
 }

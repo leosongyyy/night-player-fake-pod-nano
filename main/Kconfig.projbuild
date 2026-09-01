@@ -31,4 +31,15 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ 仅影响 A 键；B 键（GPIO0）长按阈值固定 600ms
             （见 button_service.c 的 BUTTON_B_LONG_PRESS_MS）。
 
+    config PAUSE_AUTO_SHUTDOWN_MIN
+        int "息屏暂停超时自动伪关机（分钟，0=关闭）"
+        default 10
+        range 0 60
+        help
+            设备处于**息屏且暂停**状态持续超过该时长，自动伪关机省电
+            （deepsleep，B 键/双按唤醒重启）。亮屏时暂停不计时（用户在看
+            屏幕随时会操作）。伪关机前会记录播放状态（config_store 的
+            was_playing），开机按记忆恢复：关机前在播放 → 开机自动播放；
+            关机前已暂停 → 开机停在暂停态不自动出声。0 = 关闭该功能。
+
 endmenu

@@ -13,7 +13,7 @@ extern "C" {
  *
  * 把用户可调配置持久化到 NVS（partitions.csv 的 nvs 分区，24KB），开机
  * 自动恢复。当前管理的配置项：
- *   - 音量 volume（0~100，默认 80）
+ *   - 音量 volume（0~30 档：0=静音，1~30 线性映射 20%~80%，默认 20）
  *   - 亮度 brightness（0~255，默认 0xFF 最亮，与 DISPLAY_BRIGHTNESS_DEFAULT 一致）
  *   - 循环模式 loop_mode（uint8，取值对应 player_loop_mode_t，默认列表循环）
  *   - 随机播放开关 shuffle（默认关闭=顺序播放；UI 切换并持久化，
@@ -23,8 +23,14 @@ extern "C" {
  *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/screen_sleep），设置页可调
+ *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
+ *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
+ *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
  *   - 上次播放位置（歌曲全局下标 + 秒），由 player_controller 在暂停/切歌/
  *     关机时保存，开机读取跳转恢复
+ *
+ * ⚠ NightPlayer 原版机制：只记忆"当前歌曲"，不记忆秒数位置——pos_s 恒为 0，
+ * 开机从歌曲开头开始（避免恢复播放位置带来的复杂度/体验差异）。
  *
  * 设计要点：
  *   - 所有 set_xxx 立即写 NVS 并通知已注册的变更回调（config_store_register_cb），
@@ -36,7 +42,9 @@ extern "C" {
  */
 
 /** 各配置项默认值 */
-#define CONFIG_STORE_VOLUME_DEFAULT     80u
+#define CONFIG_STORE_VOLUME_DEFAULT     20u  /* 音量档位默认（NVS 无设置时） */
+#define CONFIG_STORE_VOLUME_MIN         0u   /* 0 = 静音 */
+#define CONFIG_STORE_VOLUME_MAX         30u  /* 上限：1~30 线性映射 20%~80% */
 #define CONFIG_STORE_BRIGHTNESS_DEFAULT 0xFFu
 #define CONFIG_STORE_LOOP_DEFAULT       2u   /* PLAYER_LOOP_LIST */
 #define CONFIG_STORE_SLEEP_DEFAULT_MIN  45u
@@ -55,7 +63,7 @@ void config_store_init(void);
 
 /* ---------- 读取（内存值，开机时已从 NVS 加载） ---------- */
 
-/** @brief 当前音量（0~100） */
+/** @brief 当前音量档位（0~30，0=静音） */
 uint8_t config_store_get_volume(void);
 
 /** @brief 当前亮度（0~255） */
@@ -81,6 +89,10 @@ uint32_t config_store_get_sleep_default_min(void);
 /** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
 uint32_t config_store_get_screen_off_s(void);
 
+/** @brief 关机前是否在播放（true=播放中，开机自动续播；false=已暂停/停止，
+ *          开机只恢复现场不自动播放）。无 NVS 记录时默认 true（保持旧行为）。 */
+bool config_store_get_was_playing(void);
+
 /**
  * @brief 读取上次播放位置
  * @param[out] global 上次播放歌曲全局下标
@@ -91,7 +103,7 @@ bool config_store_get_last_song(uint32_t *global, uint32_t *pos_s);
 
 /* ---------- 写入（更新内存 + 写 NVS + 通知变更回调） ---------- */
 
-/** @brief 设置音量并持久化（0~100，越界自动钳位） */
+/** @brief 设置音量档位并持久化（0~30，0=静音，越界自动钳位） */
 void config_store_set_volume(uint8_t vol);
 
 /** @brief 设置亮度并持久化（0~255） */
@@ -111,6 +123,10 @@ void config_store_set_sleep_default_min(uint32_t minutes);
 
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);
+
+/** @brief 设置关机前播放状态并持久化（由 player_controller 在伪关机保存
+ *          播放位置时一并调用；UI 无展示，不通知回调） */
+void config_store_set_was_playing(bool playing);
 
 /** @brief 保存上次播放位置并持久化（由 player_controller 调用） */
 void config_store_set_last_song(uint32_t global, uint32_t pos_s);

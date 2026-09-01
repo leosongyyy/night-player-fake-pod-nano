@@ -62,19 +62,15 @@ static const char *status_battery_icon(float pct)
     return LV_SYMBOL_BATTERY_EMPTY;
 }
 
-/* 音量图标按音量等级分级（暂无低音量专用图标，低档用音符代替） */
-static const char *status_volume_icon(uint8_t vol)
-{
-    if (vol >= 70) return LV_SYMBOL_VOLUME_MAX;
-    if (vol >= 30) return LV_SYMBOL_VOLUME_MID;
-    return LV_SYMBOL_AUDIO;
-}
+/* 状态栏音量图标固定用"中音量"图标：界面只看后面的数字档位，
+   图标不随音量变化（避免每按一下图标跳变） */
+#define VOLUME_ICON_FIXED  LV_SYMBOL_VOLUME_MID
 
 /* 独立刷新状态栏音量（label 已创建时）：按键调节音量后由 config_store
    变更回调即时同步，不必等 5 秒周期刷新。
    读 config_store 的配置值（set_volume 先更新内存值再通知回调，必为新值）；
-   不读 audio_get_volume()——按键调音量时 audio_set_volume 与 config 回调
-   的先后顺序在不同调用路径下不保证，读配置值最稳。
+   不读 audio_get_volume_level()——按键调音量时 audio_set_volume_level 与
+   config 回调的先后顺序在不同调用路径下不保证，读配置值最稳。
    ⚠ 调用方必须持有 LVGL 锁（config 回调在按键任务上下文也可能触发）。 */
 static void status_refresh_volume(void)
 {
@@ -83,8 +79,7 @@ static void status_refresh_volume(void)
     }
     uint8_t vol = config_store_get_volume();
     char vol_buf[16];
-    snprintf(vol_buf, sizeof(vol_buf), "%s %u",
-             status_volume_icon(vol), (unsigned)vol);
+    snprintf(vol_buf, sizeof(vol_buf), VOLUME_ICON_FIXED " %u", (unsigned)vol);
     lv_label_set_text(vol_label, vol_buf);
 }
 
@@ -139,9 +134,9 @@ static lv_obj_t *create_status_bar(void)
     lv_obj_set_style_border_width(status, 0, 0);
     lv_obj_set_style_pad_all(status, 0, 0);
 
-    /* 左侧：音量（图标 + 空格 + 数值，单 label） */
+    /* 左侧：音量（固定图标 + 空格 + 数值，单 label） */
     vol_label = lv_label_create(status);
-    lv_label_set_text(vol_label, LV_SYMBOL_VOLUME_MAX " --");
+    lv_label_set_text(vol_label, VOLUME_ICON_FIXED " --");
     lv_obj_set_style_text_font(vol_label, STATUS_SMALL_FONT, 0);
     lv_obj_set_style_text_color(vol_label, lv_color_white(), 0);
     lv_obj_align(vol_label, LV_ALIGN_LEFT_MID, 12, 0);

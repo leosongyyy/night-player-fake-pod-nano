@@ -170,7 +170,7 @@ static bool cs43131_detect(void)
 /* 应用 CS43131 完整寄存器配置（晶振 → 直通 MCLK → ASP 从机 → HP/pop-free →
    PCM 路径）。前置条件：设备已探测到，电源域处于默认（全掉电）状态。
    PCM 音量寄存器（0x090001/0x090002）不在此写——音量由 audio 层
-   audio_set_volume 统一管理，避免开机恢复配置时把用户音量重置回 0dB。 */
+   audio_set_volume_level 统一管理，避免开机恢复配置时把用户音量重置回 0dB。 */
 static esp_err_t cs43131_apply_full_config(void)
 {
     uint8_t scratch = 0;

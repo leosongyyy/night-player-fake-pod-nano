@@ -17,6 +17,7 @@ static const char *TAG = "config_store";
 #define KEY_SHUFFLE_POS_VAL  "shuf_pos_val"
 #define KEY_SLEEP_DEFAULT    "sleepdef"
 #define KEY_SCREEN_OFF       "screenoff"
+#define KEY_WAS_PLAYING      "was_play"
 #define KEY_LAST_GLOBAL      "last_glob"
 #define KEY_LAST_POS         "last_pos"
 #define KEY_LAST_VALID       "last_valid"
@@ -39,6 +40,8 @@ static uint32_t s_shuf_pos_lo = 0;
 static bool     s_shuf_pos_valid = false;
 static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
+/* 关机前播放状态：默认 true（无记录时开机自动播放，保持旧行为） */
+static bool     s_was_playing = true;
 static uint32_t s_last_global = 0;
 static uint32_t s_last_pos    = 0;
 static bool     s_last_valid  = false;
@@ -129,9 +132,24 @@ void config_store_init(void)
         return;
     }
 
-    /* 逐个加载配置；缺失或类型不匹配时保持默认值 */
+    /* 逐个加载配置；缺失或类型不匹配时保持默认值。
+       音量：范围 0~30 档（0=静音，1~30 线性映射 20%~80%）。旧版本存的是
+       0~100 百分比，读出的值若超范围按"20%~80% → 1~30 档"线性迁移并写回，
+       保证老设备升级后音量平滑过渡（开发期升级）。 */
     if (nvs_get_u8(s_nvs, KEY_VOLUME, &s_volume) != ESP_OK) {
         s_volume = CONFIG_STORE_VOLUME_DEFAULT;
+    } else if (s_volume > CONFIG_STORE_VOLUME_MAX) {
+        uint8_t old_pct = s_volume;   /* 旧版本存储的 0~100 百分比 */
+        if (old_pct == 0) {
+            s_volume = CONFIG_STORE_VOLUME_MIN;
+        } else if (old_pct <= 20) {
+            s_volume = 1;             /* 旧 1~20% 全部归到最小档 1（原配置下几乎无声） */
+        } else if (old_pct >= 80) {
+            s_volume = CONFIG_STORE_VOLUME_MAX;
+        } else {
+            s_volume = (uint8_t)(((uint32_t)(old_pct - 20) * 29u / 60u) + 1u);
+        }
+        cfg_write_u8(KEY_VOLUME, s_volume);   /* 写回迁移结果，下次直接读到新档位 */
     }
     if (nvs_get_u8(s_nvs, KEY_BRIGHTNESS, &s_brightness) != ESP_OK) {
         s_brightness = CONFIG_STORE_BRIGHTNESS_DEFAULT;
@@ -165,6 +183,13 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SCREEN_OFF, &s_screen_off) != ESP_OK) {
         s_screen_off = CONFIG_STORE_SCREEN_OFF_DEFAULT;
     }
+    /* 关机前播放状态：无记录（首次烧录/升级）时保持默认 true（自动播放） */
+    uint8_t was_play = 1;
+    if (nvs_get_u8(s_nvs, KEY_WAS_PLAYING, &was_play) != ESP_OK) {
+        s_was_playing = true;
+    } else {
+        s_was_playing = (was_play != 0);
+    }
     uint8_t valid = 0;
     if (nvs_get_u8(s_nvs, KEY_LAST_VALID, &valid) != ESP_OK || valid == 0) {
         s_last_valid = false;
@@ -180,9 +205,10 @@ void config_store_init(void)
 
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
-                  "sleep_def=%u min screen_off=%u s last=%s(global=%u,pos=%u) shuf_pos=%s",
+                  "sleep_def=%u min screen_off=%u s was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
              (int)s_shuffle, (unsigned)s_sleep_def, (unsigned)s_screen_off,
+             (int)s_was_playing,
              s_last_valid ? "yes" : "no",
              (unsigned)s_last_global, (unsigned)s_last_pos,
              s_shuf_pos_valid ? "yes" : "no");
@@ -229,6 +255,11 @@ uint32_t config_store_get_screen_off_s(void)
     return s_screen_off;
 }
 
+bool config_store_get_was_playing(void)
+{
+    return s_was_playing;
+}
+
 bool config_store_get_last_song(uint32_t *global, uint32_t *pos_s)
 {
     if (!s_last_valid) {
@@ -245,8 +276,8 @@ bool config_store_get_last_song(uint32_t *global, uint32_t *pos_s)
 
 void config_store_set_volume(uint8_t vol)
 {
-    if (vol > 100) {
-        vol = 100;
+    if (vol > CONFIG_STORE_VOLUME_MAX) {
+        vol = CONFIG_STORE_VOLUME_MAX;
     }
     if (vol == s_volume) {
         return;
@@ -320,6 +351,15 @@ void config_store_set_screen_off_s(uint32_t seconds)
     s_screen_off = seconds;
     cfg_write_u32(KEY_SCREEN_OFF, seconds);
     config_notify();
+}
+
+void config_store_set_was_playing(bool playing)
+{
+    if (playing == s_was_playing) {
+        return;
+    }
+    s_was_playing = playing;
+    cfg_write_u8(KEY_WAS_PLAYING, playing ? 1 : 0);
 }
 
 void config_store_set_last_song(uint32_t global, uint32_t pos_s)

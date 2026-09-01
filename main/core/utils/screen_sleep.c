@@ -2,9 +2,11 @@
 
 #include <assert.h>
 
+#include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/fake_shutdown.h"
 
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -38,6 +40,14 @@ static const char *TAG = "screen_sleep";
      更吃力，若实测卡顿可考虑改锁 160MHz）。 */
 #define PM_CPU_FREQ_ON_MHZ  240
 #define PM_CPU_FREQ_OFF_MHZ 80
+
+/* 暂停超时自动伪关机（分钟）：暂停状态持续超过该时长自动伪关机省电。
+   经 Kconfig CONFIG_PAUSE_AUTO_SHUTDOWN_MIN 配置（默认 10 分钟，0=关闭）。 */
+#ifdef CONFIG_PAUSE_AUTO_SHUTDOWN_MIN
+#define PAUSE_SHUTDOWN_MIN  CONFIG_PAUSE_AUTO_SHUTDOWN_MIN
+#else
+#define PAUSE_SHUTDOWN_MIN  10
+#endif
 
 /* 息屏状态与状态切换互斥锁：enter/exit 可能来自不同任务（按键任务/超时
    检测任务），用互斥锁保护状态机与"固定频率、挂起/恢复 LVGL、改亮度"
@@ -73,23 +83,63 @@ static void screen_sleep_touch_cb(bool pressed, uint16_t tx, uint16_t ty, void *
     }
 }
 
-/* 无操作超时检测任务：亮屏且距最近活动超过配置时长 → 自动息屏 */
+/* 暂停超时自动伪关机（省电）：**仅统计"息屏 + 暂停"**——亮屏时用户在看
+   屏幕随时会操作，暂停时长不累计；息屏且暂停持续超过 PAUSE_SHUTDOWN_MIN
+   分钟 → 普通伪关机（deepsleep）。
+   伪关机前 player_controller_save_last_position 会记录播放状态
+   （was_playing=false），开机恢复暂停态不自动播放。 */
+static bool s_prev_paused = false;      /* 上一轮检测是否处于"息屏+暂停" */
+static int64_t s_pause_start_us = 0;    /* 本次"息屏+暂停"开始时刻（esp_timer，us） */
+
+static void screen_sleep_check_pause_shutdown(void)
+{
+#if PAUSE_SHUTDOWN_MIN > 0
+    /* 亮屏：不计时（清标志，下次息屏重新起算） */
+    if (!s_sleeping) {
+        s_prev_paused = false;
+        return;
+    }
+    const mp3_player_state_t st = mp3_player_get_state();
+    if (st == MP3_STATE_PAUSED) {
+        if (!s_prev_paused) {
+            /* 进入"息屏+暂停"：记录开始时刻 */
+            s_prev_paused = true;
+            s_pause_start_us = esp_timer_get_time();
+        } else if (esp_timer_get_time() - s_pause_start_us
+                   >= (int64_t)PAUSE_SHUTDOWN_MIN * 60 * 1000000LL) {
+            ESP_LOGI(TAG, "paused (screen off) for %d min, auto fake shutdown",
+                     PAUSE_SHUTDOWN_MIN);
+            s_prev_paused = false;
+            fake_shutdown_enter();   /* 进入深度休眠，不返回 */
+        }
+    } else {
+        s_prev_paused = false;   /* 播放中/停止：暂停计时清零 */
+    }
+#endif
+}
+
+/* 无操作超时检测任务：亮屏且距最近活动超过配置时长 → 自动息屏；
+   同时检查暂停超时自动伪关机（省电，无论屏幕亮暗） */
 static void screen_sleep_task(void *arg)
 {
     (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(SCREEN_SLEEP_CHECK_MS));
-        if (s_sleeping) {
-            continue;   /* 已息屏：不再检查（息屏期间只允许按键唤醒） */
+
+        /* 1. 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒） */
+        if (!s_sleeping) {
+            uint32_t timeout_s = config_store_get_screen_off_s();
+            if (timeout_s != 0
+                    && esp_timer_get_time() - s_last_activity_us
+                       >= (int64_t)timeout_s * 1000000LL) {
+                ESP_LOGI(TAG, "no activity for %u s, auto screen off",
+                         (unsigned)timeout_s);
+                screen_sleep_enter();
+            }
         }
-        uint32_t timeout_s = config_store_get_screen_off_s();
-        if (timeout_s == 0) {
-            continue;   /* 配置为 0：不自动息屏 */
-        }
-        if (esp_timer_get_time() - s_last_activity_us >= (int64_t)timeout_s * 1000000LL) {
-            ESP_LOGI(TAG, "no activity for %u s, auto screen off", (unsigned)timeout_s);
-            screen_sleep_enter();
-        }
+
+        /* 2. 暂停超时自动伪关机：与息屏状态无关，暂停过久即关机省电 */
+        screen_sleep_check_pause_shutdown();
     }
 }
 
