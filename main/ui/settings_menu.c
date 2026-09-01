@@ -492,12 +492,13 @@ static void root_page_build(void)
                                      "按键帮助", NULL);
     lv_menu_set_load_page_event(s_menu, row4, help_page);
 
-    /* 5. 关于：子页作者信息 */
+    /* 5. 关于：子页作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING） */
     lv_obj_t *about_page = lv_menu_page_create(s_menu, (char *)"关于");
     page_style_apply(about_page);
     menu_text_row_create(about_page,
         "FakePodNanoNightPlayer\n基于 NightPlayer 的第三方固件");
     menu_text_row_create(about_page, "作者：ZYFDroid\nAI 协作：DeepSeek");
+    menu_text_row_create(about_page, "固件版本：" CONFIG_FIRMWARE_VERSION_STRING);
     lv_obj_t *row5 = menu_row_create(s_root_page, LV_SYMBOL_SETTINGS,
                                      "关于", NULL);
     lv_menu_set_load_page_event(s_menu, row5, about_page);

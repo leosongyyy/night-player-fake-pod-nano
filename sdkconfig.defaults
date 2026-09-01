@@ -1,5 +1,5 @@
 # This file was generated using idf.py save-defconfig or menuconfig [D] key. It can be edited manually.
-# Espressif IoT Development Framework (ESP-IDF) 5.5.5 Project Minimal Configuration
+# Espressif IoT Development Framework (ESP-IDF) 5.5.4 Project Minimal Configuration
 #
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
@@ -7,7 +7,7 @@ CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_UI_SYSTEM_FONT_FULL=n
+CONFIG_UI_COVER_FLASH=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_COMPILER_ORPHAN_SECTIONS_PLACE=y
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
@@ -18,12 +18,6 @@ CONFIG_PM_ENABLE=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
-# ⚠ SPIRAM_RODATA 必须保持开启（=y）：关闭后 .rodata（字符串常量等）留在
-#   Flash，而扫描保存播放列表要写/擦除 Flash——Flash 写操作期间访问 Flash
-#   中的 rodata 会出问题（实测乱码 + BREAK instr 复位，分区保存失败）。
-#   开启后 rodata 复制进 PSRAM，Flash 写期间正常。代价是完整版字体/封面
-#   占 PSRAM（~3MB），开机扫描构建播放列表（需分配 ~3.7MB PSRAM 缓冲）
-#   可能内存不足，用精简版字体即可避免。
 CONFIG_SPIRAM_RODATA=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_MEMTEST=n
