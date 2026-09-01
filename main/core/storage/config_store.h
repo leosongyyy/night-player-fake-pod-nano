@@ -46,6 +46,7 @@ extern "C" {
 #define CONFIG_STORE_VOLUME_MIN         0u   /* 0 = 静音 */
 #define CONFIG_STORE_VOLUME_MAX         30u  /* 上限：1~30 线性映射 20%~80% */
 #define CONFIG_STORE_BRIGHTNESS_DEFAULT 0xFFu
+#define CONFIG_STORE_BRIGHTNESS_MIN     16u  /* 亮度下限（0~255 总量程）：防止屏幕完全看不清 */
 #define CONFIG_STORE_LOOP_DEFAULT       2u   /* PLAYER_LOOP_LIST */
 #define CONFIG_STORE_SLEEP_DEFAULT_MIN  45u
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */

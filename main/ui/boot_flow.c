@@ -8,6 +8,7 @@
 #include "core/player/player_controller.h"
 #include "core/hardware/display.h"
 #include "core/hardware/sd_card.h"
+#include "core/storage/config_store.h"
 #include "core/storage/playlist_builder.h"
 #include "core/storage/playlist_store.h"
 #include "esp_log.h"
@@ -183,6 +184,15 @@ static void boot_show_no_sd(void)
     /* failsafe：清除内部扫描数据（擦除 pldata 头部，使分区无效） */
     lv_obj_t *btn = boot_make_button(root, "清除扫描数据", clear_scan_data_btn_cb);
     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 130);
+
+    /* 进入 failsafe 界面即把亮度拉满（255）并持久化到 NVS：
+       无卡场景可能带着上次的低亮度（甚至全黑）开机，拉满便于看清界面/
+       操作"清除扫描数据"。boot_flow_run 在 app_main 的 LVGL 锁内调用，
+       此处调 display_set_brightness 安全；app_main 随后点亮时读到的
+       config_store 亮度也已是 255（set 会写 NVS 并通知回调，boot 阶段
+       UI 未创建，无回调副作用）。 */
+    config_store_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
+    display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
 }
 
 /* 3. 有卡但数据无效：提示扫描 + "开始扫描"按钮（无拒绝选项，只能关机） */

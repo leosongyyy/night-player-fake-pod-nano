@@ -154,6 +154,11 @@ void config_store_init(void)
     if (nvs_get_u8(s_nvs, KEY_BRIGHTNESS, &s_brightness) != ESP_OK) {
         s_brightness = CONFIG_STORE_BRIGHTNESS_DEFAULT;
     }
+    /* 亮度下限：历史 NVS 可能存过极低亮度（如调试期滑到 0），
+       钳制到 CONFIG_STORE_BRIGHTNESS_MIN，避免开机屏幕完全看不清 */
+    if (s_brightness < CONFIG_STORE_BRIGHTNESS_MIN) {
+        s_brightness = CONFIG_STORE_BRIGHTNESS_MIN;
+    }
     if (nvs_get_u8(s_nvs, KEY_LOOP_MODE, &s_loop_mode) != ESP_OK) {
         s_loop_mode = CONFIG_STORE_LOOP_DEFAULT;
     }
@@ -289,6 +294,10 @@ void config_store_set_volume(uint8_t vol)
 
 void config_store_set_brightness(uint8_t brightness)
 {
+    /* 亮度下限：不允许存到 CONFIG_STORE_BRIGHTNESS_MIN 以下（防全黑看不清） */
+    if (brightness < CONFIG_STORE_BRIGHTNESS_MIN) {
+        brightness = CONFIG_STORE_BRIGHTNESS_MIN;
+    }
     if (brightness == s_brightness) {
         return;
     }
