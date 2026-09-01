@@ -24,8 +24,22 @@ extern "C" {
  * 串行处理；把 mp3_player_play() 切换歌曲时最长 2s 的阻塞等待放在独立任务里，
  * 避免卡住 LVGL / UI 所在线程。
  *
- * 初始化（player_controller_init）后默认从**第一个目录的第一首**音乐开始播放，
- * 循环模式默认【列表循环】（后续再做 NVS 持久化）。
+ * 初始化（player_controller_init）后默认恢复上次播放位置（NVS 持久化：
+ * 歌曲全局下标 + 秒），无记录时从第一个目录的第一首音乐开始播放；
+ * 循环模式默认【列表循环】，开机从 NVS 恢复用户设置。
+ *
+ * 随机播放（shuffle，设置页开关，NVS 持久化）：
+ *   基于"无限确定性随机列表"（见 core/player/shuffle_player）：随机序列
+ *   由无数个"块"（当前列表歌曲的随机排列）组成，只需保存一个 uint64
+ *   逻辑位置即可完全恢复现场。**随机序列固定基于当前播放目录/歌单**
+ *   （与循环模式无关，永不跨出当前列表）：位置 P → 目录内索引 → 全局下标，
+ *   仅当用户从其它目录选歌时随机列表随之切换。随机位置的重置（重新生成）
+ *   仅在以下时机发生：
+ *     - 用户从列表指定播放歌曲（player_controller_play_song，含切换到
+ *       其它目录的列表选歌）
+ *     - 用户把随机播放关闭后再次开启
+ *   其余情况（上一曲/下一曲/自然播完/暂停/关机/开机恢复）均保持并保存
+ *   随机位置，保证断点续播回到同一首歌、同一序列。
  */
 
 /** 循环模式 */
@@ -92,11 +106,31 @@ void player_controller_play_song(uint32_t global_idx);
 /** @brief 停止播放 */
 void player_controller_stop(void);
 
+/**
+ * @brief 保存当前播放位置到 NVS（供伪关机/睡眠定时器关机前调用）
+ *
+ * 记录当前歌曲全局下标 + 当前播放位置（秒），下次开机恢复。
+ * 控制器未就绪时不做任何事。
+ */
+void player_controller_save_last_position(void);
+
 /** @brief 设置循环模式 */
 void player_controller_set_loop_mode(player_loop_mode_t mode);
 
 /** @brief 读取当前循环模式 */
 player_loop_mode_t player_controller_get_loop_mode(void);
+
+/**
+ * @brief 设置随机播放开关（true=随机，false=顺序）
+ *
+ * 关闭→开启时：初始化随机列表，并重新生成随机位置（定位到当前歌曲，
+ * 之后"下一曲/上一曲"从新随机序列继续）；开启→关闭时切回顺序播放。
+ * 开关状态经 config_store 持久化并通知 UI（设置页图标同步）。
+ */
+void player_controller_set_shuffle(bool on);
+
+/** @brief 读取当前随机播放开关（与 config_store 持久化值一致） */
+bool player_controller_get_shuffle(void);
 
 /** @brief 读取播放器状态快照（供前端界面刷新） */
 void player_controller_get_status(player_controller_status_t *out);

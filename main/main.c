@@ -17,9 +17,11 @@
 #include "core/hardware/pldata.h"
 #include "core/hardware/sd_card.h"
 #include "core/hardware/touch.h"
+#include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/fake_shutdown.h"
 #include "core/utils/performance_monitor.h"
+#include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
 
 static const char *TAG = "app_main";
@@ -73,6 +75,10 @@ void app_main(void)
         ESP_LOGW(TAG, "boot: woken by unexpected source %d", (int)wakeup_cause);
     }
 
+    // 用户配置存储（NVS）：尽早初始化，开机恢复音量/亮度/循环模式等
+    ESP_LOGI(TAG, "Initialize config store (NVS)");
+    config_store_init();
+
     // 硬件初始化
     ESP_LOGI(TAG, "Initialize display");
     esp_lcd_panel_handle_t panel_handle = display_init();
@@ -87,6 +93,9 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Initialize audio (I2S + CS43131)");
     audio_init();
+
+    /* 应用用户音量配置（NVS 持久化；audio_init 内部先按默认音量初始化 DAC） */
+    audio_set_volume(config_store_get_volume());
 
     ESP_LOGI(TAG, "Initialize pldata partition (播放列表数据)");
     if (pldata_init() != ESP_OK) {
@@ -114,15 +123,20 @@ void app_main(void)
         // 提交到屏幕，避免出现"点亮后空白/半帧刷新"的窗口
         lv_refr_now(NULL);
 
-        // 完整点亮（亮度 255）：与首帧渲染在同一个 LVGL 锁内连续执行。
-        // ⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须在持锁时调用；锁外执行
-        // 会被更高优先级的 LVGL 任务抢占并发刷屏，导致画面定格/花屏。
-        ESP_LOGI(TAG, "Turn on display (restore brightness %d)", DISPLAY_BRIGHTNESS_DEFAULT);
-        display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
+        // 完整点亮（恢复用户配置亮度，默认 255）：与首帧渲染在同一个 LVGL
+        // 锁内连续执行。⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须在持锁时
+        // 调用；锁外执行会被更高优先级的 LVGL 任务抢占并发刷屏，导致画面
+        // 定格/花屏。
+        uint8_t boot_brightness = config_store_get_brightness();
+        ESP_LOGI(TAG, "Turn on display (restore brightness %d)", boot_brightness);
+        display_set_brightness(boot_brightness);
         lvgl_port_unlock();
     }
 
     ESP_LOGI(TAG, "App started");
+
+    // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
+    sleep_timer_init();
 
     // 启动性能监视（内存 + 双核 CPU 使用率）
     startPerformanceMonitor();

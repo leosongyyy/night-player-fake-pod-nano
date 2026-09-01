@@ -11,6 +11,7 @@
 #include "core/hardware/display.h"
 #include "core/hardware/sd_card.h"
 #include "core/hardware/touch.h"
+#include "core/player/player_controller.h"
 #include "core/ui/lvgl_port.h"
 
 static const char *TAG = "fake_shutdown";
@@ -20,6 +21,10 @@ static const char *TAG = "fake_shutdown";
 void fake_shutdown_enter(void)
 {
     ESP_LOGI(TAG, "=== fake shutdown: close all peripherals, enter deep sleep ===");
+
+    /* 0. 保存当前播放位置到 NVS（关机后开机自动恢复播放进度）。
+        先保存再做后续的停播/关外设，因为停播后播放状态即失效。 */
+    player_controller_save_last_position();
 
     /* 1. 停止播放并等待解码任务退出（释放文件句柄与 I2S） */
     if (mp3_player_get_state() != MP3_STATE_IDLE) {

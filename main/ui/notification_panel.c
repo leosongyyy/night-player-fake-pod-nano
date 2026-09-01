@@ -4,6 +4,7 @@
 #include "core/hardware/display.h"
 #include "core/fonts/system_font.h"
 #include "core/fonts/system_smaller_font.h"
+#include "core/storage/config_store.h"
 
 #include <stdio.h>
 
@@ -22,6 +23,9 @@ static const char *TAG = "notification_panel";
 #define VEL_THRESH   400   /* px/s，超过则按速度方向决定 */
 
 static lv_obj_t *notif_bar = NULL;
+
+/* 亮度滑块句柄（供配置变更回调同步其它页面对同一配置源的修改） */
+static lv_obj_t *brightness_slider = NULL;
 
 static lv_obj_t *bat_value_label = NULL;
 static lv_obj_t *bat_bar = NULL;
@@ -134,16 +138,29 @@ static void notif_attach_events(lv_obj_t *obj)
     lv_obj_add_event_cb(obj, notif_panel_event_cb, LV_EVENT_RELEASED, NULL);
 }
 
-/* 亮度滑块事件回调：滑块值 0~255 直接映射到屏幕亮度 */
+/* 亮度滑块事件回调：滑块值 0~255 直接映射到屏幕亮度。
+   写入配置存储（NVS 持久化 + 通知其它 UI 同步），再应用硬件亮度。
+   回调运行在 LVGL 任务上下文（已持锁），display_set_brightness 安全。 */
 static void brightness_slider_cb(lv_event_t *e)
 {
     lv_obj_t *slider = lv_event_get_target(e);
     uint8_t brightness = (uint8_t)lv_slider_get_value(slider);
+    config_store_set_brightness(brightness);
     esp_err_t ret = display_set_brightness(brightness);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Set brightness %u failed: %s", brightness, esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "Set brightness %u", brightness);
+    }
+}
+
+/* 配置变更回调：其它界面（如播放设置页）修改亮度后，同步本页滑块位置 */
+static void notif_config_changed_cb(void *ctx)
+{
+    (void)ctx;
+    if (brightness_slider != NULL) {
+        lv_slider_set_value(brightness_slider,
+                            (int32_t)config_store_get_brightness(), LV_ANIM_OFF);
     }
 }
 
@@ -252,21 +269,26 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
-    /* 亮度调节：标签 + 滑块（0~255，初始为开机默认亮度）。
-       注意：UI 创建时硬件亮度仍为 0（全黑启动），故此处直接用
-       DISPLAY_BRIGHTNESS_DEFAULT，与 app_main 点亮后恢复的亮度一致。 */
+    /* 亮度调节：标签 + 滑块（0~255，初始为配置存储中的亮度）。
+       注意：UI 创建时硬件亮度仍为 0（全黑启动），此处直接用配置值
+       （默认 DISPLAY_BRIGHTNESS_DEFAULT），与 app_main 点亮后恢复的亮度一致。
+       配置变更（如播放设置页修改）经 config_store 回调同步本滑块。 */
     lv_obj_t *brightness_label = lv_label_create(notif_bar);
     lv_label_set_text(brightness_label, LV_SYMBOL_SETTINGS " Brightness");
     lv_obj_set_style_text_font(brightness_label, &system_smaller_font, 0);
     lv_obj_set_style_text_color(brightness_label, lv_color_white(), 0);
     lv_obj_align(brightness_label, LV_ALIGN_BOTTOM_MID, 0, -160);
 
-    lv_obj_t *brightness_slider = lv_slider_create(notif_bar);
+    brightness_slider = lv_slider_create(notif_bar);
     lv_obj_set_size(brightness_slider, 320, 20);
     lv_slider_set_range(brightness_slider, 0, 255);
-    lv_slider_set_value(brightness_slider, DISPLAY_BRIGHTNESS_DEFAULT, LV_ANIM_OFF);
+    lv_slider_set_value(brightness_slider,
+                        (int32_t)config_store_get_brightness(), LV_ANIM_OFF);
     lv_obj_align(brightness_slider, LV_ALIGN_BOTTOM_MID, 0, -120);
     lv_obj_add_event_cb(brightness_slider, brightness_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* 订阅配置变更：设置页等其它入口修改亮度时同步本滑块 */
+    config_store_register_cb(notif_config_changed_cb, NULL);
 
     /* 电池周期刷新（约 1s） */
     lv_timer_create(battery_timer_cb, 1000, NULL);
