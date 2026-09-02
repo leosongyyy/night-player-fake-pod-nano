@@ -20,7 +20,6 @@ set(MAIN_SRCS
     "core/ui/touch_test.c"
     "core/ui/virtual_list.c"
     "core/utils/fake_shutdown.c"
-    "core/utils/performance_monitor.c"
     "core/utils/screen_sleep.c"
     "core/utils/sleep_timer.c"
     "core/fonts/system_smaller_font.c"
@@ -41,6 +40,13 @@ set(MAIN_SRCS
     "ui/settings_menu.c"
     "ui/settings_page.c")
 
+# 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR
+# 开启时编译；关闭可减小固件并省掉监视任务的内存开销（依赖
+# CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS，见 sdkconfig.defaults）。
+if(CONFIG_PERFORMANCE_MONITOR)
+    list(APPEND MAIN_SRCS "core/utils/performance_monitor.c")
+endif()
+
 # 完整版系统字体体积很大（固件约 4.1MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
 # 开启时才编译；关闭时改用精简版 system_global_font_lite，便于调试快速烧录。
 # ⚠ 曾尝试 SPIFFS 运行时加载（font_store），实测解析 ~8 秒开机太慢已回退。
@@ -57,9 +63,6 @@ endif()
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "." "core" "ui")
-# ⚠ spiffs 组件依赖通过 main/idf_component.yml 声明（"spiffs: \"*\"")，
-#    不用 PRIV_REQUIRES：显式 REQUIRES 会覆盖 IDF 默认的"自动依赖全部组件"，
-#    导致本地/系统组件逐一缺失。
 
 set_source_files_properties(
     ${LV_DEMOS_SOURCES}

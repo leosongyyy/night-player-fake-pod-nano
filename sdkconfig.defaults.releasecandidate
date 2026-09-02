@@ -1,0 +1,20 @@
+# Release Candidate 构建差异配置（叠加在 sdkconfig.defaults 之后）
+# 用途：调试 release 版在可用内存变小情况下的运行状况 —— 完整字体 + 极速版
+#       封面（与 release 相同的内存占用，完整字体经 SPIRAM_RODATA 拷贝进
+#       PSRAM 约 2.6MB），但保留全部调试功能（触摸测试/性能监视/FPS 计数），
+#       便于在低内存环境下定位问题。
+# 使用：idf.py -B build/releasecandidate -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.releasecandidate" build
+
+# 编译优化：Performance（-O2）—— 与 release 一致（公共默认已是，显式声明）
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# 完整字体：与 release 一致（PSRAM 占用大，模拟 release 内存环境）
+CONFIG_UI_SYSTEM_FONT_FULL=y
+# 极速版封面：RGB565 真彩色 default_cover_flash（与 release 一致）
+CONFIG_UI_COVER_FLASH=y
+
+# 调试功能全部保留（同 debug）
+CONFIG_TOUCH_TEST=y
+CONFIG_PERFORMANCE_MONITOR=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_LV_USE_PERF_MONITOR=y

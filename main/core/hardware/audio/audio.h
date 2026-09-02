@@ -104,11 +104,11 @@ esp_err_t audio_pcm_stop(void);
 #define AUDIO_VOL_LEVEL_MUTE    0u   /* 静音档：音量寄存器写最小 0xFF */
 #define AUDIO_VOL_LEVEL_MIN     1u   /* 最小非静音档（对应 20%） */
 #define AUDIO_VOL_LEVEL_MAX     30u  /* 最大档（对应 80%） */
-#define AUDIO_VOL_LEVEL_DEFAULT 20u  /* 默认档（NVS 无设置时，对应约 59%） */
+#define AUDIO_VOL_LEVEL_DEFAULT 16u  /* 默认档（NVS 无设置时，对应约 59%） */
 
 /* 档位→百分比映射端点：1 档 = 20%，30 档 = 80%（每档约 2.07 个百分点） */
-#define AUDIO_VOL_PERCENT_MIN   20u
-#define AUDIO_VOL_PERCENT_MAX   80u
+#define AUDIO_VOL_PERCENT_MIN   35u
+#define AUDIO_VOL_PERCENT_MAX   85u
 
 /**
  * @brief 设置音量档位（映射到 CS43131 音量寄存器）

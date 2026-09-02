@@ -44,10 +44,54 @@
 - **⚠ 若提示 `IDF server is not running at http://localhost:19781/idf.`**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.vbs` 或上述 `--server` 命令），不要自行尝试在受限权限下重建服务器。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
 - 服务器由 `idfc.exe` 内部派生的 `--server-child` 进程承载，用 `pwsh` 前台启动更稳定。
 
-**5. 常用命令**
+**5. 开发命令**
 
-- `idfc build`：构建项目（初次/配置变更后较久，建议放宽超时）。
-- `idfc -p COMx flash`：烧录到设备。**通常烧录前先征得用户确认。COM口不一定固定，（除非用户已明确要求烧录，并指定COM口）**。
+本项目使用多配置构建系统，以下是不同配置的命令速查表：
+
+** debug（精简字体 + 调试全开） **
+
+```powershell
+# 增量构建
+.\idfc.exe -B build/debug build
+
+# 重新配置（改过 sdkconfig.defaults* 后，先删 build/debug/sdkconfig 再执行）
+.\idfc.exe -B build/debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" -D SDKCONFIG="build/debug/sdkconfig" reconfigure
+
+# 烧录
+.\idfc.exe -B build/debug -p COMn flash
+```
+
+** releasecandidate（完整字体 + 调试全开） **
+
+```powershell
+# 增量构建
+.\idfc.exe -B build/releasecandidate build
+
+# 重新配置
+.\idfc.exe -B build/releasecandidate -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.releasecandidate" -D SDKCONFIG="build/releasecandidate/sdkconfig" reconfigure
+
+# 烧录
+.\idfc.exe -B build/releasecandidate -p COMn flash
+```
+
+** release（完整字体 + 调试全关） **
+
+```powershell
+# 增量构建
+.\idfc.exe -B build/release build
+
+# 重新配置
+.\idfc.exe -B build/release -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" -D SDKCONFIG="build/release/sdkconfig" reconfigure
+
+# 烧录
+.\idfc.exe -B build/release -p COMn flash
+```
+
+**备注**：只有首次或"改过 `sdkconfig.defaults.*`"才需要带 `-D` 重新配置；日常增量构建和烧录只带 `-B` 即可。烧录前记得确认串口号。
+默认情况下，构建调试版的，除非用户指定。
+
+完整的多配置构建说明见 ideas_and_exps/BUILD_CONFIG.md
+
 - `idfc -p COMx monitor`：查看串口日志（退出 Ctrl+C或者直接结束任务）。
 - 已开放 `C:\esp\` 与 `C:\Espressif\` 的读取权限，可查阅 IDF 源码。
 

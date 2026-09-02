@@ -1,0 +1,17 @@
+# Release 构建差异配置（叠加在 sdkconfig.defaults 之后）
+# 用途：正式使用 —— 完整字体 + 极速版封面，关闭全部调试功能。
+# 使用：idf.py -B build/release -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" build
+
+# 编译优化：Performance（-O2）—— 运行性能优先（公共默认已是，显式声明）
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# 完整字体：全量中文/日文/阿拉伯文/藏文等（编译进固件）
+CONFIG_UI_SYSTEM_FONT_FULL=y
+# 极速版封面：RGB565 真彩色 default_cover_flash（与屏幕像素格式一致）
+CONFIG_UI_COVER_FLASH=y
+
+# 调试功能全部关闭
+# CONFIG_TOUCH_TEST is not set
+# CONFIG_PERFORMANCE_MONITOR is not set
+# CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not set
+# CONFIG_LV_USE_PERF_MONITOR is not set

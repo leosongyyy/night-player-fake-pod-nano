@@ -1,0 +1,21 @@
+# Debug 构建差异配置（叠加在 sdkconfig.defaults 之后，覆盖其中的默认值）
+# 用途：快速烧录调试 —— 精简字体 + 非极速版封面 + 触摸测试 + 性能监视 +
+#       FreeRTOS 运行时统计（performance_monitor 依赖）+ LVGL FPS 计数。
+# 使用：idf.py -B build/debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" build
+
+# 编译优化：Performance（-O2）—— 与 release 一致（运行性能优先）
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# 精简字体：仅系统 UI 用字 + ASCII，固件小、烧录快（覆盖公共默认的完整版）
+# CONFIG_UI_SYSTEM_FONT_FULL is not set
+# 非极速版封面：2bit 索引色 default_cover，省 Flash（覆盖公共默认的极速版）
+# CONFIG_UI_COVER_FLASH is not set
+
+# 触摸区域测试（20px 白点跟随手指）
+CONFIG_TOUCH_TEST=y
+# 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）
+CONFIG_PERFORMANCE_MONITOR=y
+# FreeRTOS 运行时统计：performance_monitor 依赖（CPU 空闲计数器）
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+# LVGL FPS 计数（屏幕角落显示刷新帧率/耗时）
+CONFIG_LV_USE_PERF_MONITOR=y

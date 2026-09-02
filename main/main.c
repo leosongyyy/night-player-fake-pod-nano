@@ -135,6 +135,8 @@ void app_main(void)
     // 订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）。需在 LVGL 之后。
     screen_sleep_init();
 
-    // 启动性能监视（内存 + 双核 CPU 使用率）
+    // 启动性能监视（内存 + 双核 CPU 使用率），Kconfig CONFIG_PERFORMANCE_MONITOR 控制
+#ifdef CONFIG_PERFORMANCE_MONITOR
     startPerformanceMonitor();
+#endif
 }
