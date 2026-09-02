@@ -86,6 +86,11 @@ static lv_obj_t *bright_fill = NULL;
 /* 音量竖条 */
 static lv_obj_t *vol_fill = NULL;
 
+/* 左列第一个圆形按钮：睡眠定时开关（"Zz" 文字，点击一键开/关，颜色指示状态） */
+static lv_obj_t *s_sleep_btn = NULL;
+static lv_obj_t *s_sleep_btn_lbl = NULL;
+static bool s_sleep_btn_on = false;   /* 上次刷新时定时是否开启（1s 定时器对比，状态未变不重复刷样式） */
+
 /* 面板拖拽状态 */
 static bool dragging = false;
 static int32_t drag_press_y = 0;
@@ -329,6 +334,56 @@ static void settings_btn_cb(lv_event_t *e)
     settings_menu_show();
 }
 
+/* 刷新睡眠定时开关按钮配色：开启 = 黄色高亮底 + 黑字（醒目"激活"），
+   关闭 = 深灰底 + 白字（与其它圆形按钮一致）。 */
+static void notif_refresh_sleep_btn(void)
+{
+    if (s_sleep_btn == NULL || s_sleep_btn_lbl == NULL) {
+        return;
+    }
+    if (sleep_timer_is_active()) {
+        lv_obj_set_style_bg_color(s_sleep_btn, NOTIF_PRESS_COLOR, 0);
+        lv_obj_set_style_text_color(s_sleep_btn_lbl, lv_color_black(), 0);
+    } else {
+        lv_obj_set_style_bg_color(s_sleep_btn, TRACK_BG_COLOR, 0);
+        lv_obj_set_style_text_color(s_sleep_btn_lbl, lv_color_white(), 0);
+    }
+}
+
+/* 睡眠定时开关按钮：点击一键开启/关闭（行为与设置页长按一致）。
+   - 关闭 → 开启：用默认时长（config_store 的 sleep_default_min，设置页
+     点击档位时保存；无默认时兜底 45 分钟）启动睡眠定时；
+   - 开启 → 关闭：取消定时（若正在最后 30s 音量渐降，sleep_timer_set 内部
+     会触发恢复渐降前音量）。 */
+static void sleep_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (sleep_timer_is_active()) {
+        sleep_timer_set(0);
+        ESP_LOGI(TAG, "sleep timer off (control center)");
+    } else {
+        uint32_t def = config_store_get_sleep_default_min();
+        if (def == 0) {
+            def = CONFIG_STORE_SLEEP_DEFAULT_MIN;   /* 兜底：无默认时长时用 45 分钟 */
+        }
+        sleep_timer_set(def);
+        ESP_LOGI(TAG, "sleep timer on: %u min (control center)", (unsigned)def);
+    }
+    notif_refresh_sleep_btn();
+}
+
+/* 周期同步睡眠按钮状态（1s）：睡眠定时可能在其它入口（设置页长按/开机
+   默认开启等）被开/关，按钮颜色需跟随；状态未变时跳过，避免反复设样式 */
+static void sleep_btn_status_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    bool on = sleep_timer_is_active();
+    if (on != s_sleep_btn_on) {
+        s_sleep_btn_on = on;
+        notif_refresh_sleep_btn();
+    }
+}
+
 /* 亮度竖条滑动：上滑变亮、下滑变暗，每滑动 5px 调整 1%（0~255 无上限限制，
    可直接滑到最大；下限钳制到 BRIGHT_SLIDE_MIN，防止屏幕完全看不清）。
    ⚠ 逻辑说明：
@@ -498,8 +553,11 @@ static lv_obj_t *vertical_bar_create(lv_obj_t *parent, lv_obj_t **fill_out,
 }
 
 /* 圆形按钮：默认深灰底（与竖条容器同色），按下时黄色高亮。
-   返回按钮句柄（供调用方挂点击事件）。 */
-static lv_obj_t *round_btn_create(lv_obj_t *parent, const char *icon)
+   返回按钮句柄（供调用方挂点击事件）。
+   @param[out] label_out  非 NULL 时返回按钮内图标/文字 label 句柄（供调用方
+                          按状态改文字颜色，如睡眠定时开关的开/关配色） */
+static lv_obj_t *round_btn_create(lv_obj_t *parent, const char *icon,
+                                  lv_obj_t **label_out)
 {
     lv_obj_t *btn = lv_obj_create(parent);
     lv_obj_set_size(btn, ROUND_BTN_DIAM, ROUND_BTN_DIAM);
@@ -517,6 +575,10 @@ static lv_obj_t *round_btn_create(lv_obj_t *parent, const char *icon)
     lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(icon_lbl, lv_color_white(), 0);
     lv_obj_center(icon_lbl);
+
+    if (label_out != NULL) {
+        *label_out = icon_lbl;
+    }
     return btn;
 }
 
@@ -576,7 +638,8 @@ static void header_create(void)
 }
 
 /* 中间内容区：左中右三列（flex row，等宽均分）。
-   - 左列：两个圆形占位按钮（深灰底，功能待定）；
+   - 左列：睡眠定时开关（"Zz" 文字，点击一键开/关，开启=黄底黑字、关闭=
+     深灰底白字）+ 设置按钮（打开设置菜单）；
    - 中列：亮度竖条（深灰容器 + 贴边浅灰填充条 + 橙色图标叠于条上，
      0~255 无上限，每滑 5px 调 1%）；
    - 右列：音量竖条（同样式，蓝色喇叭图标，每滑 20px 调 1 档，滑动上限 24 档）。 */
@@ -597,11 +660,13 @@ static void content_create(void)
                           LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_column(content, COL_GAP, 0);
 
-    /* ---- 左列：WiFi 占位按钮（上）+ 设置按钮（下，打开设置菜单） ---- */
+    /* ---- 左列：睡眠定时开关（上，"Zz" 文字，点击一键开/关，颜色指示状态）
+             + 设置按钮（下，打开设置菜单） ---- */
     lv_obj_t *left_col = content_col_create(content);
     lv_obj_set_style_pad_row(left_col, ROUND_BTN_GAP, 0);
-    round_btn_create(left_col, LV_SYMBOL_WIFI);
-    lv_obj_t *settings_btn = round_btn_create(left_col, LV_SYMBOL_SETTINGS);
+    s_sleep_btn = round_btn_create(left_col, "Zz", &s_sleep_btn_lbl);
+    lv_obj_add_event_cb(s_sleep_btn, sleep_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *settings_btn = round_btn_create(left_col, LV_SYMBOL_SETTINGS, NULL);
     lv_obj_add_event_cb(settings_btn, settings_btn_cb, LV_EVENT_CLICKED, NULL);
 
     /* ---- 中列：亮度竖条（贴边浅灰填充条 + 橙色图标叠于条上） ---- */
@@ -668,6 +733,8 @@ void notification_panel_create(lv_obj_t *status_bar)
     /* 初始填充：顶部状态区（音量/电量）与亮度/音量竖条 */
     notif_refresh_volume_ui(config_store_get_volume());
     notif_refresh_brightness_ui(config_store_get_brightness());
+    notif_refresh_sleep_btn();
+    s_sleep_btn_on = sleep_timer_is_active();
     battery_timer_cb(NULL);
 
     /* 订阅配置变更：按键调音量、设置页改亮度等修改后同步本面板显示 */
@@ -675,6 +742,10 @@ void notification_panel_create(lv_obj_t *status_bar)
 
     /* 电池周期刷新（约 1s） */
     lv_timer_create(battery_timer_cb, 1000, NULL);
+
+    /* 睡眠定时开关按钮状态周期同步（1s）：睡眠定时可能被设置页长按/开机
+       默认开启等入口修改，按钮颜色跟随（状态未变时不重绘） */
+    lv_timer_create(sleep_btn_status_timer_cb, 1000, NULL);
 
     /* 触摸事件：状态栏（面板收起时下拉）与通知栏（展开时上拉/下拉）共用拖拽事件。
        亮度/音量竖条、圆形按钮等可点击子控件会消费自身事件（不冒泡），

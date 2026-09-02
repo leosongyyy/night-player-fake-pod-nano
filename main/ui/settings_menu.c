@@ -482,12 +482,11 @@ static void root_page_build(void)
     lv_obj_t *help_page = lv_menu_page_create(s_menu, (char *)"按键帮助");
     page_style_apply(help_page);
     menu_text_row_create(help_page,
-        "上键 = A 键（电源键）\n下键 = B 键\n\n"
         "亮屏状态：\n上键 短按 音量+\n下键 短按 音量-\n"
         "上键 长按 关机\n下键 长按 音量-10\n两个按键一起按下 息屏");
     menu_text_row_create(help_page,
         "息屏状态：\n上键 短按 播放/暂停\n下键 短按 下一曲\n"
-        "下键 长按 上一曲\n上键 长按 亮屏+关机\n两个按键一起按下 亮屏");
+        "下键 长按 上一曲\n两个按键一起按下 亮屏");
     lv_obj_t *row4 = menu_row_create(s_root_page, LV_SYMBOL_KEYBOARD,
                                      "按键帮助", NULL);
     lv_menu_set_load_page_event(s_menu, row4, help_page);
