@@ -5,11 +5,14 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
 #include "driver/spi_master.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "display";
 
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static uint8_t s_brightness = 0xFF;  // 当前亮度，默认最亮
+static bool s_display_asleep = false; /* 面板是否处于 SLEEP IN（息屏）状态 */
 
 #if CURRENT_SCREEN_SIZE == AM196Q410502LK_196_410x502
   static const qspi_amoled_lcd_init_cmd_t lcd_init_cmds[] = {
@@ -183,16 +186,53 @@ uint8_t display_get_brightness(void)
     return s_brightness;
 }
 
+void display_sleep_enter(void)
+{
+    if (s_panel_handle == NULL || s_display_asleep) {
+        return;
+    }
+    /* 先 0x28 关显示（像素熄灭），再 0x10 SLEEP IN（驱动 IC 停止 DC/DC、
+       振荡器与扫描，显示 RAM 保留）——SLEEP IN 才是 AMOLED 真正的低功耗态，
+       仅 DISPOFF 时驱动 IC 仍满负荷运行（实测息屏电流大头）。
+       唤醒用 display_sleep_exit（SLEEP OUT 恢复，无需重走初始化）。 */
+    esp_lcd_panel_disp_on_off(s_panel_handle, false);
+    esp_lcd_panel_disp_sleep(s_panel_handle, true);
+    s_display_asleep = true;
+    ESP_LOGI(TAG, "display sleep in (screen off)");
+}
+
+void display_sleep_exit(void)
+{
+    if (s_panel_handle == NULL || !s_display_asleep) {
+        return;
+    }
+    /* 实测：该面板 SLEEP OUT 后仅发 0x11 + 120ms + 0x29 无法恢复显示（屏黑），
+       必须重新初始化（组件注释亦注明"退出睡眠后需重新初始化"）：
+       1. 先 0x11 唤醒并等规格书要求的 120ms 恢复时间——SLEEP IN 状态下
+          扩展命令可能无效，0x11 是 MIPI 标准命令，保证能唤醒；
+       2. 再 esp_lcd_panel_init() 重发完整 init（MADCTL/COLMOD + display_init
+          的 lcd_init_cmds，含 0x51=0 全黑、0x29 DISPON；不含硬件 reset）。
+          面板 RAM 随之重置为黑——调用方须随后全屏重刷（screen_sleep_exit
+          中 lv_obj_invalidate + lv_refr_now），再按用户配置恢复亮度
+          （与开机"全黑启动防白屏"的点亮顺序一致）。 */
+    esp_lcd_panel_disp_sleep(s_panel_handle, false);   /* 0x11 SLEEP OUT */
+    vTaskDelay(pdMS_TO_TICKS(120));                    /* 规格书恢复时间，不可省 */
+    esp_err_t err = esp_lcd_panel_init(s_panel_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "panel re-init after sleep out failed: %s",
+                 esp_err_to_name(err));
+    }
+    s_display_asleep = false;
+    ESP_LOGI(TAG, "display awake (sleep out + re-init)");
+}
+
 void display_power_off(void)
 {
     if (s_panel_handle == NULL) {
         return;
     }
-    /* 先 0x28 关显示（像素熄灭），再 0x10 SLEEP IN（驱动 IC 停止 DC/DC、
-       振荡器与扫描，内存保留）——SLEEP IN 才是 AMOLED 真正的低功耗态，
-       仅 DISPOFF 时驱动 IC 仍满负荷运行（实测深睡电流大头之一）。
-       唤醒后 display_init() 会重新走 0x11 + 120ms 完整初始化。 */
-    esp_lcd_panel_disp_on_off(s_panel_handle, false);
-    esp_lcd_panel_disp_sleep(s_panel_handle, true);
+    /* 深度休眠前的最终断电：命令序列与息屏相同（DISPOFF + SLEEP IN）；
+       唤醒即系统重启，display_init() 会重新走完整初始化，无需恢复 */
+    display_sleep_enter();
     ESP_LOGI(TAG, "display powered off (DISPOFF + SLEEP IN)");
 }

@@ -31,7 +31,7 @@
 
 - **启动服务器**（需要 `danger-full-access` 权限，否则 HTTP.sys 端口绑定会失败）：
   ```powershell
-  .\idfc.exe --server --idfenv "C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1"
+  .\idfc.exe --server --idfenv "C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1"   # 版本号按本机安装（5.5.4 或 5.5.5）
   ```
   也可以让用户直接运行项目根目录的 `StartIDFCServer.vbs`。
 
@@ -99,8 +99,9 @@
 
 - `main/Kconfig.projbuild`：应用配置项（menuconfig）：
   - `CONFIG_TOUCH_TEST`（触摸区域测试，默认开）：显示 20px 白点跟随手指，抬起后 1s 渐变消失，用于触摸区域调试
-- `sdkconfig.defaults`：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、LVGL indev 轮询 15ms、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、LVGL 字体（12/16/20/28/48）与演示。
-- `sdkconfig`（生成结果，已纳入 git）：由构建自动合并 defaults 生成；`fullclean` 只清空 `build/`，不会删除 sdkconfig，仅在 sdkconfig 不存在时从 defaults 重新生成。
+  - `CONFIG_SCREEN_OFF_STOP_CORE1`（息屏停 Core1，**默认关**，实验失败方案）：esp_cpu_stall 停核与 PSRAM/XIP 总线竞态致崩溃，勿开启，见第 6 节
+- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.releasecandidate` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、LVGL 刷新 33ms / indev 轮询 33ms、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、LVGL 字体（12/16/20/24/28/32/48，默认 18）
+- **版本管理：配置事实源只有 `sdkconfig.defaults*` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cfg>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个 build 目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cfg>/sdkconfig` 指定）；`fullclean` 只清 `build/`，不会删 sdkconfig。改配置的正确姿势：改 `sdkconfig.defaults*` 或 `Kconfig.projbuild` 后，按第 5 节命令删对应 `build/<cfg>/sdkconfig` 再带 `-D` reconfigure（IDF 也会在 defaults 变化时自动重新合并，删了重建最干净）。
 - `partitions.csv`：`nvs`(0x9000) / `phy_init`(0xf000) / `factory`(6M，0x10000 起)。
 
 ### 项目内容
@@ -116,8 +117,9 @@
 
 **当前实现状态：**
 - 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + MP3 解码播放）、SD 卡（SDMMC 4-bit + FAT，挂载 `/sdcard`）
-- LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（15ms，Y 坐标 ×23/24 校准）、触摸事件订阅回调
-- UI：主界面（Hello World 占位）、顶部状态栏（运行时长时钟）、下拉通知栏（电池显示 + 亮度滑块 + 底部上拉把手，**纯 LVGL 事件驱动**拖拽）
+- **任务核心布局：播放类任务全部固定 Core0，UI（LVGL + 封面加载）固定 Core1，二者分核互不抢占（见第 6 节；"息屏停 Core1"实验已失败并默认关闭，布局本身保留）**
+- LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core1）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）
+- UI：主界面（四页滑动 tab：目录/播放列表/正在播放/设置）、顶部状态栏（运行时长时钟）、下拉通知栏（电池显示 + 亮度滑块 + 底部上拉把手，**纯 LVGL 事件驱动**拖拽）
 - 工具：双核 CPU/内存性能监视（串口每 2s 输出）、触摸区域测试（Kconfig 控制）
 
 ### 代码结构
@@ -137,9 +139,9 @@ main/
       audio/
         audio.h/.c          # 音频播放 API（I2S 主机 + 正弦波 + PCM 流写 I2S）
         cs43131.h/.c        # CS43131 DAC 驱动（I2C 控制、24.576MHz 直通 MCLK、ASP 从机 I2S、音量）
-        mp3_player.h/.c     # MP3 解码播放（Helix + 跳 ID3v2 + 写 I2S，Core1 后台任务）
+        mp3_player.h/.c     # MP3 解码播放（Helix + 跳 ID3v2 + 写 I2S，Core0 后台任务）
     ui/                     # 通用 UI 基础设施（与应用无关）
-      lvgl_port.h/.c        # LVGL 移植层：显示驱动、tick、任务(Core0)、互斥锁、
+      lvgl_port.h/.c        # LVGL 移植层：显示驱动、tick、任务(Core1)、互斥锁、
                             #   触摸 indev、触摸事件订阅（lvgl_port_register_touch_cb）
       touch_test.h/.c       # 触摸区域测试（白点跟随 + 淡出，CONFIG_TOUCH_TEST）
     utils/
@@ -208,11 +210,12 @@ components/
 - `main.c` 只做初始化装配：`display_init() → touch_init() → battery_init() → audio_init() → lvgl_port_init(panel, tp) → app_ui_create() → startPerformanceMonitor()`
 
 **2. LVGL 移植层**（`core/ui/lvgl_port.c`，已完成）
-- 显示驱动注册（flush/rounder 回调、DMA draw buffer、2ms tick）、LVGL 任务固定 **Core0**（`xTaskCreatePinnedToCore`）
+- 显示驱动注册（flush/rounder 回调、DMA draw buffer、2ms tick）、LVGL 任务固定 **Core1**（`xTaskCreatePinnedToCore`；UI 与播放/按键分核互不抢占，见第 6 节）
 - 互斥锁 `lvgl_port_lock/unlock`：LVGL API 非线程安全，所有外部 UI 操作必须先持锁
+- 辅助 UI 任务注册 `lvgl_port_register_aux_task`：会触碰 LVGL 的后台任务（封面加载）注册后随 `lvgl_port_suspend/resume` 一起挂起/恢复（先挂起/先恢复，避免冻结在持锁中途）
 - 触摸输入设备：`lvgl_touchpad_read_cb` 统一读取触摸（**触摸数据全项目只读一次**），并支持事件订阅 `lvgl_port_register_touch_cb(pressed, x, y, ctx)`，避免各功能重复轮询
 - **触摸异步初始化**：`touch_init()` 只同步做 I2C 总线/扫描/面板 IO，控制器完整初始化（`esp_lcd_touch_new_i2c_xxx`，含约 400ms 复位等待）放后台任务，就绪后经 `touch_register_ready_cb` 回调把句柄交给 LVGL（`lvgl_port_set_touch_handle`）；就绪前 `read_cb` 判空返回"未按下"不给数据
-- **触摸 Y 坐标校准：`y = y * 23 / 24`**，在 `lvgl_touchpad_read_cb` 中统一应用，LVGL 与订阅回调共用（触摸面板纵向比例修正，经实测最符合直觉）
+- **触摸坐标校准：`x = x * 29 / 30`、`y = y * 29 / 30`**（x/y 等比缩放），在 `lvgl_touchpad_read_cb` 中统一应用，LVGL 与订阅回调共用（触摸面板比例修正，经实测最符合直觉）
 
 **3. 下拉通知栏**（`ui/notification_panel.c`，已完成）
 - 全屏面板 + 顶部状态栏（时间）+ 电池显示 + 亮度滑块 + 底部上拉把手
@@ -229,6 +232,14 @@ components/
 - 20px 白色圆点跟随手指，抬起后 1s 内 `ease_in` 渐变消失
 - 复用 `lvgl_port_register_touch_cb` 触摸数据（无独立 timer）；圆点 `HIT_TEST` 穿透，不拦截控件
 - 在 `lvgl_port_init()` 末尾初始化（Kconfig 开关）
+
+**6. 任务核心布局（播放/UI 分核）**
+- 布局动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL + 封面加载）固定在 Core1**、**播放/按键/控制/关机等固定在 Core0**，二者互不抢占；息屏时挂起 UI 任务后 Core1 空闲进入 waiti，Core0 继续 80MHz 降频播放。
+- Core0：`boot_scan`、`mp3_play`/`mp3_out`/`audio_tone`（播放解码）、`sleep_timer`、`screen_sleep`、`rescan`、`button_svc`、`player_ctrl`、`shutdown`（伪关机）、`touch_init`、`mem_monitor` 及系统 esp_timer 任务/ISR（sdkconfig 固定 CPU0）与全部驱动中断（app_main 于 Core0 初始化）
+- Core1：`LVGL`（lvgl_port_task）、`cover_load`（封面加载，注册为 lvgl_port 辅助 UI 任务，息屏随 LVGL 挂起）
+- 息屏（`screen_sleep_enter`）：**AMOLED SLEEP IN**（DISPOFF 0x28 + SLEEP IN 0x10，`display_sleep_enter`：驱动 IC 停 DC/DC/振荡器/扫描，显示 RAM 保留——这才是真正的低功耗态，仅亮度 0 时 IC 仍满负荷）→ `lvgl_port_suspend`（停 tick + 挂起 LVGL/封面任务）→ 固定 80MHz
+- 亮屏（`screen_sleep_exit`）：固定 240MHz → **持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms 恢复等待 + DISPON，须先于 LVGL resume——休眠中面板不能接收刷屏）+ 恢复用户亮度** → `lvgl_port_resume`。面板 RAM 休眠保留，恢复直接显示旧帧；若实测画面异常需全屏 invalidate 重刷
+- ⚠ **"息屏停掉 Core1"（esp_cpu_stall，`CONFIG_SCREEN_OFF_STOP_CORE1`）已实测失败，默认关闭**：ESP32-S3 上长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态——Core1 若恰在 PSRAM 总线事务上被冻结，Core0 访问 PSRAM 永久等待 → INT WDT 超时（Guru Meditation "Interrupt wdt timeout on CPU0"，PC 停在解码等访问 PSRAM 的代码）。esp_cpu_stall 只适合瞬时跨核操作。代码保留供参考（含停核期 INT WDT/Task WDT 处理逻辑），**勿再开启**；真正的进一步省电方向：暂停/停止时 light sleep 或走既有伪关机
 
 ### 关键技术要点与踩坑记录（务必遵守）
 

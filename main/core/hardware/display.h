@@ -132,9 +132,41 @@ esp_err_t display_set_brightness(uint8_t brightness);
 uint8_t display_get_brightness(void);
 
 /**
- * @brief 关闭显示屏（AMOLED 显示关断，进入低功耗）
+ * @brief 息屏：AMOLED 进入低功耗休眠（DISPOFF + SLEEP IN，可逆）
  *
- * 发送 0x28 关显示命令，像素熄灭；供深度休眠前调用。
+ * 先发 0x28 关显示（像素熄灭），再发 0x10 SLEEP IN：驱动 IC 停止 DC/DC、
+ * 振荡器与扫描（显示 RAM 保留），这才是 AMOLED 真正的低功耗态——仅亮度 0
+ * 或仅 DISPOFF 时驱动 IC 仍满负荷运行（实测息屏电流大头）。
+ * 与 display_power_off() 命令序列相同，但语义为"可逆息屏"，由
+ * display_sleep_exit() 恢复；深度休眠（deepsleep）场景仍用 display_power_off
+ * （唤醒即重启，走 display_init 全初始化）。
+ *
+ * ⚠ 命令与 LVGL 刷屏共用 SPI 总线，必须在持有 lvgl_port_lock() 时调用。
+ * 幂等：已休眠时重复调用直接返回。
+ */
+void display_sleep_enter(void);
+
+/**
+ * @brief 亮屏：退出 AMOLED 休眠并恢复显示（可逆）
+ *
+ * 实测该面板 SLEEP OUT 后仅发 0x11 + DISPON **无法恢复显示**（屏黑），必须
+ * 重新初始化：先 0x11 唤醒并等 120ms（规格书恢复时间，与 display_init 中
+ * 0x11 后等待同规格，不可省），再 esp_lcd_panel_init() 重发完整初始化
+ * （MADCTL/COLMOD + display_init 的 lcd_init_cmds，含 0x51=0 全黑、0x29
+ * DISPON；不含硬件 reset）。重初始化会重置显示 RAM → 调用方须随后全屏重刷
+ * 并按用户配置恢复亮度（见 screen_sleep_exit：invalidate + lv_refr_now +
+ * display_set_brightness，同开机"全黑启动防白屏"顺序）。
+ *
+ * ⚠ 必须在持有 lvgl_port_lock() 时调用；须在 LVGL 任务恢复（resume）之前
+ * 完成——休眠中/刚唤醒的面板不能接收刷屏数据。
+ * 幂等：未休眠时重复调用直接返回。
+ */
+void display_sleep_exit(void);
+
+/**
+ * @brief 关闭显示屏（深度休眠前调用，等效 display_sleep_enter）
+ *
+ * 发送 0x28 关显示 + 0x10 SLEEP IN（驱动 IC 停 DC/DC/振荡器，内存保留）。
  * 唤醒/重启后由 display_init() 重新初始化恢复。
  */
 void display_power_off(void);

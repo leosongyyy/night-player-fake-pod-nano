@@ -194,14 +194,18 @@ void screen_sleep_enter(void)
     }
     s_sleeping = true;
 
-    /* 1. 全黑：亮度置 0。⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须持 LVGL 锁 */
+    /* 1. AMOLED 休眠（DISPOFF + SLEEP IN）：驱动 IC 停止 DC/DC/振荡器/扫描，
+           显示 RAM 保留——这是息屏真正的低功耗态（仅亮度 0 时驱动 IC 仍
+           满负荷运行，曾是息屏电流大头）。⚠ 命令与 LVGL 刷屏共用 SPI 总线，
+           必须持 LVGL 锁。 */
     if (lvgl_port_lock(-1)) {
-        display_set_brightness(0);
+        display_sleep_enter();
         lvgl_port_unlock();
     }
 
     /* 2. 挂起 LVGL：停止 tick（LVGL 时间冻结）+ 挂起任务（停止刷屏与触摸轮询）。
-          AMOLED 为存储型显示，亮度 0 后屏幕全黑且保持最后帧，恢复即续显。 */
+          AMOLED 为存储型显示，休眠后屏幕全黑且保持最后帧（RAM 保留），
+          唤醒时重新初始化并全屏重刷。 */
     lvgl_port_suspend();
 
     /* 3. 固定 CPU 频率 80MHz（省电）。⚠ 若 MP3 解码卡顿，可改 PM_CPU_FREQ_OFF_MHZ=160 */
@@ -209,7 +213,7 @@ void screen_sleep_enter(void)
         ESP_LOGW(TAG, "esp_pm_configure(80MHz) failed, freq unchanged");
     }
 
-    ESP_LOGI(TAG, "screen off: LVGL suspended, brightness 0, CPU fixed %d MHz",
+    ESP_LOGI(TAG, "screen off: AMOLED sleep in, LVGL suspended, CPU fixed %d MHz",
              PM_CPU_FREQ_OFF_MHZ);
     xSemaphoreGive(s_mux);
 }
@@ -230,15 +234,22 @@ void screen_sleep_exit(void)
         ESP_LOGW(TAG, "esp_pm_configure(240MHz) failed, freq unchanged");
     }
 
-    /* 2. 恢复 LVGL 任务与 tick（LVGL 时间从挂起时刻继续，无跳变） */
-    lvgl_port_resume();
-
-    /* 3. 恢复用户配置亮度。⚠ 必须持 LVGL 锁：恢复后的 LVGL 任务会尝试抢锁
-          刷屏，我们在持锁区间完成亮度命令，避免与刷屏并发冲突。 */
+    /* 2. 唤醒 AMOLED（SLEEP OUT + 重发完整初始化）并恢复显示：
+          ⚠ 必须先于 LVGL resume——休眠中/刚唤醒的面板不能接收刷屏数据；
+          ⚠ 实测该面板 SLEEP OUT 后需重新初始化（仅 0x11+DISPON 不亮屏），
+          重初始化会重置显示 RAM → 全屏重刷（invalidate + 同步 lv_refr_now，
+          此时亮度仍 0 全黑、无闪烁窗口），刷完再恢复用户亮度（与开机
+          "全黑启动防白屏"的点亮顺序一致）。全程持 LVGL 锁。 */
     if (lvgl_port_lock(-1)) {
-        display_set_brightness(config_store_get_brightness());
+        display_sleep_exit();
+        lv_obj_invalidate(lv_scr_act());   /* 面板 RAM 已重置：整屏标记脏区 */
+        lv_refr_now(NULL);                 /* 同步刷出整屏（黑屏中完成） */
+        display_set_brightness(config_store_get_brightness());  /* 刷完再点亮 */
         lvgl_port_unlock();
     }
+
+    /* 3. 恢复 LVGL 任务与 tick（LVGL 时间从挂起时刻继续，无跳变） */
+    lvgl_port_resume();
 
     /* 4. 重置活动计时：刚亮屏，避免立刻再次自动息屏 */
     s_last_activity_us = esp_timer_get_time();
