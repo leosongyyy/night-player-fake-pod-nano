@@ -30,14 +30,16 @@
 /* 伪关机：尽量关闭所有外设（含屏幕）并进入 deepsleep。
    该函数会关闭播放、挂起 LVGL、复位 DAC、关显示/触摸/SD，然后永久休眠；
    若被唤醒，系统整体重启（不会返回）。
-   注：关机流程在独立的 8KB 栈任务中执行（本函数仅创建任务后立即返回），
-   避免在按键/睡眠定时器等小栈任务里跑导致栈溢出。 */
+   注：关机深链（停外设 + 渲染提示 + deepsleep）委托给 deep_worker 大栈
+   任务执行（见 core/utils/deep_worker.h），本函数只做投递并等待完成；
+   进入 deepsleep 后芯片睡眠，调用方任务被冻结，函数不再返回。 */
 void fake_shutdown_enter(void);
 
 /* A 键（电源键）长按 2s 触发的"等待断电"伪关机：
    保存配置 → 优雅停播 → 屏幕定格提示 → 停外设（不含屏幕）→ deepsleep。
    用户继续按住 A 键满 3s 由关机芯片硬件断电；按 B 键唤醒即取消关机。
-   本函数创建独立任务执行后立即返回（断电或唤醒重启后任务结束）。 */
+   与 fake_shutdown_enter 相同，经 deep_worker 执行；断电或唤醒重启后
+   系统恢复。 */
 void fake_shutdown_wait_power_off(void);
 
 #endif /* FAKE_SHUTDOWN_H */

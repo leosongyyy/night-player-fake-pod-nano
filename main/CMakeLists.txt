@@ -20,6 +20,7 @@ set(MAIN_SRCS
     "core/ui/touch_test.c"
     "core/ui/virtual_list.c"
     "core/utils/fake_shutdown.c"
+    "core/utils/deep_worker.c"
     "core/utils/screen_sleep.c"
     "core/utils/sleep_timer.c"
     "core/fonts/system_smaller_font.c"

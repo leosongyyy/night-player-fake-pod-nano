@@ -1,7 +1,6 @@
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/audio/cs43131.h"
 
-#include <math.h>
 #include <string.h>
 
 #include "driver/i2s_std.h"
@@ -20,13 +19,6 @@ static const char *TAG = "audio";
 #define AUDIO_WS_PIN       GPIO_NUM_38   /* I2S 帧时钟 LRCK/WS（主机输出） */
 #define AUDIO_DOUT_PIN     GPIO_NUM_39   /* I2S 数据输出 DIN */
 
-#define AUDIO_TONE_TASK_STACK 4096
-#define AUDIO_TONE_TASK_PRIO  8          /* 高于 LVGL 任务，保证音频不卡顿 */
-#define AUDIO_TONE_TASK_CORE  1          /* LVGL 固定在 Core0，音频放 Core1 */
-
-/* 正弦波查表：1024 点 int16，相位用 32 位定点累加器的高 10 位索引 */
-#define SINE_TABLE_SIZE 1024
-
 /* 播放缓冲：帧数（每帧 = 左右各 32bit slot），48kHz 下约 10.7ms/缓冲 */
 #define AUDIO_BUF_FRAMES 512
 
@@ -43,19 +35,14 @@ static const char *TAG = "audio";
 /* ------------------------------------------------------------------ */
 
 static i2s_chan_handle_t tx_chan = NULL;
-static TaskHandle_t tone_task_handle = NULL;
 static bool i2s_enabled = false;   /* I2S 通道是否已 enable（避免重复 disable 警告） */
 
-static volatile bool playing = false;
 static audio_fs_t cur_fs = AUDIO_FS_48000;
-static uint16_t cur_freq = 0;
 static uint8_t volume_level = AUDIO_VOL_LEVEL_DEFAULT;
 
 /* 回放增益（16.16 定点线性系数，65536 = 0dB）：由上层按歌曲元数据设置，
    应用于 audio_pcm_write 的 int16→int32 转换 */
 static uint32_t replay_gain = AUDIO_REPLAY_GAIN_UNITY;
-
-static int16_t sine_table[SINE_TABLE_SIZE];
 
 /* 静音冲刷缓冲：覆盖整条 I2S DMA 链（6×240×2 个 32bit 样本 = 11520 字节），
    放静态区（BSS），不占播放任务栈 */
@@ -63,55 +50,6 @@ static int32_t silence_flush[I2S_DMA_FLUSH_SAMPLES];
 
 /* PCM 转换缓冲：int16 交织 → int32 左对齐，分块转换（512 帧 × 2ch × 4B = 4KB） */
 static int32_t pcm_buf[AUDIO_BUF_FRAMES * 2];
-
-/* ------------------------------------------------------------------ */
-/* 正弦波查表生成（一次生成，正弦 16bit 满幅）                           */
-/* ------------------------------------------------------------------ */
-
-static void gen_sine_table(void)
-{
-    for (uint32_t i = 0; i < SINE_TABLE_SIZE; i++) {
-        float v = sinf(2.0f * (float)M_PI * (float)i / (float)SINE_TABLE_SIZE);
-        sine_table[i] = (int16_t)(v * 32767.0f);
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* 播放任务：相位累加查表 → 32bit slot（16bit 数据左移 16 位）写 I2S      */
-/* ------------------------------------------------------------------ */
-
-static void tone_task(void *arg)
-{
-    /* 32 位定点相位步进：每采样点相位增量 = freq / fs × 2^32 */
-    uint32_t step = (uint32_t)(((uint64_t)cur_freq << 32) / (uint32_t)cur_fs);
-    uint32_t phase = 0;
-    /* 缓冲放静态区而非栈上：512 帧 × 2ch × 4B = 4KB，避免任务栈溢出 */
-    static int32_t buf[AUDIO_BUF_FRAMES * 2];
-
-    ESP_LOGI(TAG, "tone task start: %u Hz @ %u Hz sample rate",
-             (unsigned)cur_freq, (unsigned)cur_fs);
-
-    while (playing) {
-        for (uint32_t i = 0; i < AUDIO_BUF_FRAMES; i++) {
-            int16_t s = sine_table[(phase >> 22) & (SINE_TABLE_SIZE - 1)];
-            int32_t sample = ((int32_t)s) << 16;   /* 16bit 正弦左对齐到 32bit slot */
-            buf[2 * i] = sample;                   /* 左声道 */
-            buf[2 * i + 1] = sample;               /* 右声道（同相） */
-            phase += step;
-        }
-        size_t written = 0;
-        esp_err_t ret = i2s_channel_write(tx_chan, buf, sizeof(buf), &written, portMAX_DELAY);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
-            break;
-        }
-    }
-
-    playing = false;
-    tone_task_handle = NULL;
-    ESP_LOGI(TAG, "tone task exit");
-    vTaskDelete(NULL);
-}
 
 /* ------------------------------------------------------------------ */
 /* I2S 初始化                                                          */
@@ -163,8 +101,6 @@ static esp_err_t i2s_audio_init(void)
 
 esp_err_t audio_init(void)
 {
-    gen_sine_table();
-
     esp_err_t ret = i2s_audio_init();
     if (ret != ESP_OK) {
         return ret;
@@ -225,77 +161,10 @@ static esp_err_t audio_configure_fs(audio_fs_t fs)
     return ESP_OK;
 }
 
-esp_err_t audio_play_tone(audio_fs_t fs, uint16_t freq_hz)
-{
-    if (fs != AUDIO_FS_32000 && fs != AUDIO_FS_44100 && fs != AUDIO_FS_48000) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (freq_hz == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* 正在播放则先停止 */
-    if (playing) {
-        audio_stop();
-    }
-
-    esp_err_t ret = audio_configure_fs(fs);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    cur_freq = freq_hz;
-    playing = true;
-
-    BaseType_t created = xTaskCreatePinnedToCore(tone_task, "audio_tone",
-                                                 AUDIO_TONE_TASK_STACK, NULL,
-                                                 AUDIO_TONE_TASK_PRIO,
-                                                 &tone_task_handle,
-                                                 AUDIO_TONE_TASK_CORE);
-    if (created != pdPASS) {
-        playing = false;
-        ESP_LOGE(TAG, "create tone task failed");
-        return ESP_ERR_NO_MEM;
-    }
-
-    ESP_LOGI(TAG, "playing %u Hz sine @ %u Hz", freq_hz, (unsigned)fs);
-    return ESP_OK;
-}
-
-esp_err_t audio_stop(void)
-{
-    if (!playing && tone_task_handle == NULL) {
-        return ESP_OK;
-    }
-
-    playing = false;
-
-    /* 等待播放任务退出（最多 ~100ms，i2s write 阻塞解除后即退出） */
-    uint32_t wait = 0;
-    while (tone_task_handle != NULL && wait < 100) {
-        vTaskDelay(pdMS_TO_TICKS(2));
-        wait += 2;
-    }
-
-    if (i2s_enabled) {
-        i2s_channel_disable(tx_chan);
-        i2s_enabled = false;
-    }
-    cs43131_set_mute(true);   /* 停止后静音 DAC，避免残留噪声 */
-
-    ESP_LOGI(TAG, "audio stopped");
-    return ESP_OK;
-}
-
 esp_err_t audio_pcm_start(audio_fs_t fs)
 {
     if (fs != AUDIO_FS_32000 && fs != AUDIO_FS_44100 && fs != AUDIO_FS_48000) {
         return ESP_ERR_INVALID_ARG;
-    }
-
-    /* 若正弦正在播放则先停止 */
-    if (playing) {
-        audio_stop();
     }
 
     return audio_configure_fs(fs);
@@ -395,19 +264,9 @@ esp_err_t audio_set_volume_level(uint8_t level)
     return cs43131_set_volume(reg);
 }
 
-bool audio_is_playing(void)
-{
-    return playing;
-}
-
 audio_fs_t audio_get_fs(void)
 {
     return cur_fs;
-}
-
-uint16_t audio_get_freq(void)
-{
-    return cur_freq;
 }
 
 uint8_t audio_get_volume_level(void)

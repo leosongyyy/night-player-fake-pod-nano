@@ -83,7 +83,10 @@ static bool     s_scroll_anim_running = false; /* 松手后的吸附/惯性滚�
 /* 封面加载（后台任务，歌曲变化时异步读取 .npd + JPEG 解码）              */
 /* ------------------------------------------------------------------ */
 
-#define COVER_TASK_STACK 8192   /* 解码调用链较深（tjpgd），与关机任务同规格 */
+/* ⚠ 栈 6KB：解码调用链较深（tjpgd JPEG 解码，460×460 帧缓冲落 PSRAM）。
+   实测栈高水位峰值约 3.8KB（mem_monitor 每 20s 打印的 stk 行），6KB 留约
+   2.2KB 余量；若未来解码库/封面尺寸变化导致余量吃紧，可回调到 8KB。 */
+#define COVER_TASK_STACK (6 * 1024)
 #define COVER_TASK_PRIO  1      /* 低优先级：不抢音频解码（mp3 播放任务 8/9） */
 #define COVER_TASK_CORE  1      /* 与音频同核但优先级低，空闲时才解码 */
 

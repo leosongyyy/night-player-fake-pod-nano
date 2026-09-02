@@ -15,6 +15,7 @@
 #include "core/hardware/touch.h"
 #include "core/player/player_controller.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/deep_worker.h"
 
 static const char *TAG = "fake_shutdown";
 
@@ -23,12 +24,10 @@ static const char *TAG = "fake_shutdown";
    多个任务（按键/睡眠定时器）只做"置 true"的写与判读，单字节原子。 */
 static volatile bool s_shutting_down = false;
 
-/* 伪关机任务参数：关机流程含 LVGL 渲染（提示画面，lv_refr_now 调用链深）
-   与 NVS/SD/I2C 等操作，必须放在独立的高栈任务执行——曾直接在按键任务
-   （栈 3KB）里跑导致栈溢出重启（A stack overflow in task button_svc）。 */
-#define FAKE_SHUTDOWN_TASK_STACK  (8 * 1024)
-#define FAKE_SHUTDOWN_TASK_PRIO   6   /* 高于 LVGL(2)/按键(4)，保证关机流程不被拖延 */
-#define FAKE_SHUTDOWN_TASK_CORE   0
+/* 关机流程（渲染提示 + 停外设 + deepsleep）调用链深（lv_refr_now 深链 +
+   NVS/SD/I2C 操作），统一委托给 deep_worker 大栈任务（8KB）执行——曾直接在
+   按键任务（栈 3KB）里跑导致栈溢出重启（A stack overflow in task
+   button_svc），故不再自建独立关机任务，复用 deep_worker 执行器。 */
 
 /* 全屏提示覆盖层（黑底 + 居中白字）：显示在 LVGL 顶层，覆盖当前界面；
    A 键长按关机时把提示定格为最后一帧，等待硬件断电自然熄灭。 */
@@ -136,13 +135,14 @@ static void fake_shutdown_common(bool show_hint, bool keep_display)
     esp_deep_sleep_start();
 }
 
-/* 伪关机任务：arg != NULL = A 键长按关机（显示提示、不关屏）；
-   arg == NULL = 普通伪关机（无提示、主动关屏）。进入 deepsleep 不返回。 */
-static void fake_shutdown_task(void *arg)
+/* 关机流程执行体（在 deep_worker 大栈任务上下文运行）：arg != NULL =
+   A 键长按关机（显示提示、不关屏）；arg == NULL = 普通伪关机（无提示、
+   主动关屏）。进入 deepsleep 不返回（deep_worker 任务随之随芯片睡眠，
+   唤醒即系统重启，无需恢复）。 */
+static void fake_shutdown_run(void *arg)
 {
     const bool power_key = (arg != NULL);
     fake_shutdown_common(power_key, power_key);
-    vTaskDelete(NULL);   /* 理论不可达：deepsleep 不返回 */
 }
 
 void fake_shutdown_enter(void)
@@ -154,13 +154,10 @@ void fake_shutdown_enter(void)
     }
     s_shutting_down = true;
     ESP_LOGI(TAG, "=== fake shutdown: close all peripherals, enter deep sleep ===");
-    /* 独立任务执行（栈 8KB）：不要在按键/睡眠定时器任务内直接跑关机流程 */
-    if (xTaskCreatePinnedToCore(fake_shutdown_task, "shutdown",
-                                FAKE_SHUTDOWN_TASK_STACK, NULL,
-                                FAKE_SHUTDOWN_TASK_PRIO, NULL,
-                                FAKE_SHUTDOWN_TASK_CORE) != pdPASS) {
-        ESP_LOGE(TAG, "create shutdown task failed");
-        s_shutting_down = false;   /* 创建失败：复位标志，允许重试 */
+    /* 委托 deep_worker 大栈任务执行关机流程（本调用方只做浅投递）；
+       失败（executor 未初始化/卡死）时复位标志，允许稍后重试 */
+    if (!deep_worker_call(fake_shutdown_run, NULL)) {
+        s_shutting_down = false;
     }
 }
 
@@ -171,12 +168,8 @@ void fake_shutdown_wait_power_off(void)
     }
     s_shutting_down = true;
     ESP_LOGI(TAG, "=== power-key shutdown: save, freeze hint, wait hardware power off ===");
-    /* 独立任务执行（栈 8KB）：流程含 LVGL 渲染提示，栈需求大 */
-    if (xTaskCreatePinnedToCore(fake_shutdown_task, "shutdown",
-                                FAKE_SHUTDOWN_TASK_STACK, (void *)1,
-                                FAKE_SHUTDOWN_TASK_PRIO, NULL,
-                                FAKE_SHUTDOWN_TASK_CORE) != pdPASS) {
-        ESP_LOGE(TAG, "create shutdown task failed");
-        s_shutting_down = false;   /* 创建失败：复位标志，允许重试 */
+    /* 同上：深链交给 deep_worker 执行 */
+    if (!deep_worker_call(fake_shutdown_run, (void *)1)) {
+        s_shutting_down = false;
     }
 }

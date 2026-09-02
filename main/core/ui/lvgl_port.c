@@ -29,7 +29,11 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-#define EXAMPLE_LVGL_TASK_STACK_SIZE   (8 * 1024)
+/* ⚠ 栈 6KB：LVGL 渲染（lv_timer_handler 内控件回调 + 刷屏 esp_lcd_panel_
+   draw_bitmap QSPI DMA 链）。实测栈高水位峰值约 3.3KB（mem_monitor 每 20s
+   打印的 stk 行），6KB 留约 2.7KB 余量。若后续 UI 复杂度上升（大面积
+   重绘/动画并发）导致余量吃紧，可回调到 8KB。 */
+#define EXAMPLE_LVGL_TASK_STACK_SIZE   (6 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
 bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)

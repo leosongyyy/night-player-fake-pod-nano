@@ -42,14 +42,13 @@ static const char *TAG = "button";
 #define BUTTON_DEBOUNCE_SAMPLES 3
 
 /* 轮询任务参数 */
-/* ⚠ 栈 8KB（与 screen_sleep 任务同规格）：本任务执行按键分发回调
-   （key_handler），其中"息屏双按亮屏/亮屏双按息屏"会直接跑
-   screen_sleep_exit()——该流程现在含 AMOLED 唤醒重新初始化
-   （esp_lcd_panel_init 深调用链）+ lv_refr_now 全屏重刷 + esp_pm_configure，
-   调用链很深（实测 3KB 曾爆栈：A stack overflow in task button_svc；
-   与 screen_sleep 任务"2048B 爆栈"同源，见 screen_sleep.c 顶部注释）。
-   轮询周期 5ms、去抖 3 采样，8KB 栈的常驻开销可接受。 */
-#define BUTTON_TASK_STACK   (8 * 1024)
+/* ⚠ 栈 4KB：本任务执行按键分发回调（key_handler）。息屏/亮屏/伪关机的深
+   调用链（esp_pm_configure + AMOLED 唤醒重初始化 + lv_refr_now 全屏重刷 +
+   停外设）已委托给 deep_worker 大栈任务（见 core/utils/deep_worker.h），
+   本任务只做浅投递 + 等待完成，实测栈高水位峰值约 2KB（历史 3KB 爆栈是
+   因为直接内跑 screen_sleep_exit 深链，勿回到那种写法），4KB 留足余量。
+   轮询周期 5ms、去抖 3 采样，4KB 栈的常驻开销小。 */
+#define BUTTON_TASK_STACK   (4 * 1024)
 #define BUTTON_TASK_PRIO    4        /* 高于 LVGL(2)/性能监视(2)，低于音频(8) */
 #define BUTTON_TASK_CORE    0        /* 固定 Core0，不影响 Core1 音频解码 */
 

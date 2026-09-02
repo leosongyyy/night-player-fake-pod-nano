@@ -6,6 +6,7 @@
 #include "esp_private/esp_clk.h"
 #include "esp_timer.h"
 #include <stdint.h>
+#include <stdio.h>
 
 #define MEM_MONITOR_TASK_STACK 4096
 #define MEM_MONITOR_TASK_PRIO  2
@@ -54,6 +55,36 @@ static void cpu_collector_task(void *pvParameters)
     }
 }
 
+/* 关键任务栈高水位汇总（低频打印，验证深链委托/缩栈安全性）：
+   每 20s 打印一次所有目标任务的"最小剩余栈"（uxTaskGetStackHighWaterMark，
+   自启动以来峰值用栈的余量；本 port StackType_t=uint8_t，返回值即字节）。
+   - 值越小 → 峰值用栈越接近分配值（接近爆栈）；
+   - 任务不存在（未创建，如非播放态的 mp3_play；或已删除）时跳过。
+   用途：确认 deep_worker 接手深链后 button/screen_sleep 等任务的高富余，
+   作为后续缩栈的依据；同时监控 deep_worker 自身 8KB 栈的余量。 */
+static void mem_report_stack_hwm(void)
+{
+    static const char *names[] = {
+        "deep_worker", "button_svc", "screen_sleep", "LVGL", "player_ctrl",
+        "sleep_timer", "mem_monitor", "cpu_coll0", "cpu_coll1",
+        "mp3_play", "mp3_out", "cover_load",
+        "touch_init", "boot_scan", "rescan",
+    };
+    char buf[320];
+    size_t pos = 0;
+    for (size_t i = 0;
+         i < sizeof(names) / sizeof(names[0]) && pos < sizeof(buf) - 24; i++) {
+        const TaskHandle_t h = xTaskGetHandle(names[i]);
+        if (h == NULL) {
+            continue;   /* 未创建/已删除 */
+        }
+        const UBaseType_t hwm = uxTaskGetStackHighWaterMark(h);
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, " %s=%u",
+                                names[i], (unsigned)hwm);
+    }
+    ESP_LOGI("MEM", "stk:%s", buf);
+}
+
 static void mem_monitor_task(void *pvParameters)
 {
     /*
@@ -87,6 +118,7 @@ static void mem_monitor_task(void *pvParameters)
 
     size_t last_heap = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     size_t last_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint32_t loop_cnt = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(MEM_MONITOR_INTERVAL_MS));
 
@@ -110,6 +142,11 @@ static void mem_monitor_task(void *pvParameters)
 
         last_heap = heap_now;
         last_internal = internal_now;
+
+        /* 每 10 轮（约 20s）打印一次任务栈高水位（验证缩栈安全性） */
+        if ((++loop_cnt % 10) == 0) {
+            mem_report_stack_hwm();
+        }
     }
 }
 

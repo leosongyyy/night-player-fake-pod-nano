@@ -19,6 +19,7 @@
 #include "core/hardware/touch.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/deep_worker.h"
 #include "core/utils/performance_monitor.h"
 #include "core/utils/screen_sleep.h"
 #include "core/utils/sleep_timer.h"
@@ -112,6 +113,13 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "App started");
+
+    // 深路径执行器（常驻大栈任务，Core0）：息屏/亮屏/伪关机的深调用链
+    // （esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷 + 停外设）
+    // 集中到该任务执行，button/screen_sleep 等业务任务只做浅投递（见
+    // core/utils/deep_worker.h）。必须在任何投递方（睡眠定时器/息屏/按键）
+    // 可能动作之前初始化。
+    deep_worker_init();
 
     // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
     sleep_timer_init();
