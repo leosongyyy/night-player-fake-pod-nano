@@ -281,6 +281,8 @@ NightPlayer 原版的**音量渐降机制**（2026-09-01 完成）：
 
 ## 10. 适配 NightPlayer的EQ文件（BiQuadFilter）
 
+## 11. 研究USB读卡器和USB声卡的可能性
+
 ## 其它
 
 - 不常用设置项集中页 ✅ 已完成：新增全屏「设置」菜单（`ui/settings_menu.{c,h}`，
