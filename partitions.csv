@@ -1,8 +1,15 @@
-# Name,   Type, SubType, Offset,  Size, Flags
+# Name,   Type, SubType, Offset,   Size, Flags
+# 静态分区布局（偏移全部显式指定，锁定地址不随工具自动分配漂移）：
+#   bootloader @ 0x0         —— CONFIG_BOOTLOADER_OFFSET_IN_FLASH（默认 0x0，sdkconfig 控制）
+#   分区表      @ 0x8000     —— CONFIG_PARTITION_TABLE_OFFSET（默认 0x8000，sdkconfig 控制）；
+#                               分区表自身占用到 0x9000，故下方 nvs 从 0x9000 起
+#   nvs      @ 0x9000  (0x6000)  配置/用户数据
+#   phy_init @ 0xF000  (0x1000)  射频校准数据
+#   factory  @ 0x10000 (6M)      应用固件
+#   pldata   @ 0x610000 (4M)     播放列表数据结构分区（4MB = SPI_FLASH_MMU_PAGE_SIZE 64KB
+#                                整数倍，可整体内存映射只读访问；紧接 factory 之后）
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
-nvs,      data, nvs,     ,         0x6000,
-phy_init, data, phy,     ,         0x1000,
-factory,  app,  factory, ,         6M,
-# pldata: 播放列表数据结构分区（4MB）。偏移留空由工具自动分配（紧跟 factory），
-# 大小 4MB 是 SPI_FLASH_MMU_PAGE_SIZE(64KB) 的整数倍，可整体内存映射只读访问。
-pldata,   data, 0x40,    ,         4M,
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xF000,   0x1000,
+factory,  app,  factory, 0x10000,  6M,
+pldata,   data, 0x40,    0x610000, 4M,

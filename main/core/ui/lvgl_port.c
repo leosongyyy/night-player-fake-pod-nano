@@ -1,9 +1,7 @@
 #include "core/ui/lvgl_port.h"
 #include "core/hardware/display.h"
-
-#ifdef CONFIG_TOUCH_TEST
+#include "core/storage/config_store.h"
 #include "core/ui/touch_test.h"
-#endif
 
 #include <assert.h>
 
@@ -135,7 +133,7 @@ lv_disp_drv_t *lvgl_port_get_disp_drv(void)
 }
 
 /* 触摸事件订阅（多订阅者）：由 indev 触摸轮询统一驱动，避免各功能重复轮询。
-   固定数组容量：触摸测试（CONFIG_TOUCH_TEST）+ 息屏活动检测 + 预留，够用。 */
+   固定数组容量：触摸测试 + 息屏活动检测 + 预留，够用。 */
 #define TOUCH_CB_MAX  4
 
 typedef struct {
@@ -275,10 +273,16 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     xTaskCreatePinnedToCore(lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE,
                             NULL, EXAMPLE_LVGL_TASK_PRIORITY, &s_lvgl_task, 0);
 
-#ifdef CONFIG_TOUCH_TEST
-    // 触摸区域测试（Kconfig 控制）：白色圆点跟随手指，抬起后 1s 渐变消失
-    touch_test_create();
-#endif
+    /* 触摸区域测试（运行时开关，NVS）：config_store 的 touch_test（默认关，
+       在 设置 → 关于 → 开发者选项 中修改，开机读取、重启生效）为 true 时
+       创建白色圆点跟随手指。config_store_init 先于 lvgl_port_init 调用，
+       此处读取的是本次开机固化后的值。 */
+    if (config_store_get_touch_test()) {
+        touch_test_create();
+        ESP_LOGI(TAG, "Touch test dot enabled (developer option on)");
+    } else {
+        ESP_LOGI(TAG, "Touch test dot disabled (developer option off)");
+    }
 }
 
 void lvgl_port_suspend(void)

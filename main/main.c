@@ -145,9 +145,10 @@ void app_main(void)
     // 策略（息屏暂停超时 / 电池电压持续过低，见 Kconfig）。需在 LVGL 之后。
     power_service_init();
 
-    // 电池电压采样日志（测试/功耗测量用，CONFIG_BATTERY_LOGGER_MIN 控制，
-    // 0=关闭）：独立任务每 N 分钟把"运行时长 + 平均电压"写入 SD 卡。
-    // 需在 sd_card_init 之后（SD 未挂载时任务自行跳过）。
+    // 电池电压采样日志（开发者选项：设置 → 关于 → 开发者选项，NVS 运行时
+    // 开关，默认关）：开启时独立任务按所选间隔（默认 5 分钟）把
+    // "运行时长 + 平均电压"写入 SD 卡；此处读取开机时的 NVS 值决定是否建
+    // 任务（修改需重启生效）。需在 sd_card_init 之后（SD 未挂载时任务自行跳过）。
     battery_logger_init();
 
     // 启动性能监视（内存 + 双核 CPU 使用率），Kconfig CONFIG_PERFORMANCE_MONITOR 控制

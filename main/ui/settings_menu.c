@@ -420,6 +420,171 @@ static void menu_bg_click_cb(lv_event_t *e)
 }
 
 /* ------------------------------------------------------------------ */
+/* 开发者选项：电池电压日志 / 触摸测试白点（NVS 运行时开关，重启生效）     */
+/* ------------------------------------------------------------------ */
+
+/* 电池日志采样间隔档位（分钟）：开发者选项循环选择，存 config_store
+   （batt_log_min，NVS 持久化），开机读取生效（battery_logger_init） */
+static const uint8_t BATT_INTERVAL_STEPS[] = { 1, 2, 3, 5, 10 };
+#define BATT_INTERVAL_STEP_COUNT  (sizeof(BATT_INTERVAL_STEPS) / sizeof(BATT_INTERVAL_STEPS[0]))
+
+/* 开发者选项子页行的右侧状态文字句柄 */
+static lv_obj_t *s_dev_battlog_status  = NULL;  /* 电池电压日志：开/关 */
+static lv_obj_t *s_dev_interval_status = NULL;  /* 日志间隔：x 分钟 */
+static lv_obj_t *s_dev_touch_status    = NULL;  /* 触摸测试白点：开/关 */
+
+static void dev_refresh_battlog(void)
+{
+    if (s_dev_battlog_status == NULL) {
+        return;
+    }
+    lv_label_set_text(s_dev_battlog_status,
+                      config_store_get_battery_log() ? "开" : "关");
+}
+
+static void dev_refresh_interval(void)
+{
+    if (s_dev_interval_status == NULL) {
+        return;
+    }
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u 分钟",
+             (unsigned)config_store_get_battery_log_min());
+    lv_label_set_text(s_dev_interval_status, buf);
+}
+
+static void dev_refresh_touch(void)
+{
+    if (s_dev_touch_status == NULL) {
+        return;
+    }
+    lv_label_set_text(s_dev_touch_status,
+                      config_store_get_touch_test() ? "开" : "关");
+}
+
+/* 电池电压日志开关：点击切换并持久化（NVS），重启后生效（开机才检查） */
+static void dev_battlog_row_cb(lv_event_t *e)
+{
+    (void)e;
+    config_store_set_battery_log(!config_store_get_battery_log());
+    dev_refresh_battlog();
+    ESP_LOGI(TAG, "battery log -> %d (reboot to apply)",
+             (int)config_store_get_battery_log());
+}
+
+/* 日志采样间隔：点击在档位间循环并持久化（NVS），重启后生效 */
+static void dev_interval_row_cb(lv_event_t *e)
+{
+    (void)e;
+    uint8_t cur = config_store_get_battery_log_min();
+    uint8_t next = BATT_INTERVAL_STEPS[0];
+    for (size_t i = 0; i < BATT_INTERVAL_STEP_COUNT; i++) {
+        if (BATT_INTERVAL_STEPS[i] == cur) {
+            next = BATT_INTERVAL_STEPS[(i + 1) % BATT_INTERVAL_STEP_COUNT];
+            break;
+        }
+    }
+    config_store_set_battery_log_min(next);
+    dev_refresh_interval();
+    ESP_LOGI(TAG, "battery log interval -> %u min (reboot to apply)",
+             (unsigned)next);
+}
+
+/* 触摸测试白点开关：点击切换并持久化（NVS），重启后生效 */
+static void dev_touch_row_cb(lv_event_t *e)
+{
+    (void)e;
+    config_store_set_touch_test(!config_store_get_touch_test());
+    dev_refresh_touch();
+    ESP_LOGI(TAG, "touch test -> %d (reboot to apply)",
+             (int)config_store_get_touch_test());
+}
+
+/* 立即重启任务参数：只需短暂延时等点击反馈/日志刷出后重启，栈 2KB 足够 */
+#define DEV_RESTART_TASK_STACK  (2 * 1024)
+#define DEV_RESTART_TASK_PRIO   6
+#define DEV_RESTART_TASK_CORE   1
+
+/* 立即重启任务：延时后 esp_restart，让开发者选项的修改在本机生效。
+   不需要走 rescan 那套停止播放/释放资源的流程——设置项已同步写 NVS，
+   重启只重新读取，不涉及内存中的播放列表资源 */
+static void dev_restart_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "restart now to apply developer options");
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+    vTaskDelete(NULL);   /* 理论不可达 */
+}
+
+/* 立即重启生效行：点击创建重启任务 */
+static void dev_restart_row_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "developer options: restart requested");
+    if (xTaskCreatePinnedToCore(dev_restart_task, "dev_restart",
+                                DEV_RESTART_TASK_STACK, NULL,
+                                DEV_RESTART_TASK_PRIO, NULL,
+                                DEV_RESTART_TASK_CORE) != pdPASS) {
+        ESP_LOGE(TAG, "create dev restart task failed");
+    }
+}
+
+/* 构建开发者选项子页，并在关于页最下方追加入口行。
+   两个功能均为"开机检查、重启生效"的运行时开关（config_store/NVS）：
+   电池电压日志对应 battery_logger_init 是否建任务，触摸测试白点对应
+   lvgl_port_init 末尾是否创建圆点。 */
+static void dev_options_page_build(lv_obj_t *about_page)
+{
+    lv_obj_t *dev_page = lv_menu_page_create(s_menu, (char *)"开发者选项");
+    page_style_apply(dev_page);
+
+    /* 1. 电池电压日志：开关 */
+    lv_obj_t *battlog_row = menu_row_create(dev_page, NULL,
+                                            "电池电压日志", &s_dev_battlog_status);
+    lv_obj_add_flag(battlog_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(battlog_row, dev_battlog_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 2. 日志采样间隔：档位循环（1/2/3/5/10 分钟） */
+    lv_obj_t *interval_row = menu_row_create(dev_page, NULL,
+                                             "日志采样间隔", &s_dev_interval_status);
+    lv_obj_add_flag(interval_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(interval_row, dev_interval_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 3. 触摸测试白点：开关 */
+    lv_obj_t *touch_row = menu_row_create(dev_page, NULL,
+                                          "触摸测试白点", &s_dev_touch_status);
+    lv_obj_add_flag(touch_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(touch_row, dev_touch_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 4. 功能说明（小字） */
+    menu_note_row_create(dev_page,
+        "电池电压日志：定期采样电池电压写入 SD 卡\n"
+        "/sdcard/battery_log.txt，用于续航/功耗曲线分析。\n"
+        "触摸测试白点：白色圆点跟随手指，用于校准触摸区域。\n"
+        "以上修改保存到设备（NVS），重启后生效。");
+
+    /* 5. 立即重启：一键生效 */
+    lv_obj_t *restart_row = menu_row_create(dev_page, LV_SYMBOL_REFRESH,
+                                            "立即重启生效", NULL);
+    lv_obj_add_flag(restart_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(restart_row, dev_restart_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 初始刷新各状态文字（打开页面时显示当前 NVS 值） */
+    dev_refresh_battlog();
+    dev_refresh_interval();
+    dev_refresh_touch();
+
+    /* 关于页最下方：开发者选项入口（本页最后一行） */
+    lv_obj_t *dev_entry = menu_row_create(about_page, LV_SYMBOL_WARNING,
+                                          "开发者选项", NULL);
+    lv_menu_set_load_page_event(s_menu, dev_entry, dev_page);
+
+    ESP_LOGI(TAG, "developer options page built (battery log / interval / "
+                  "touch test)");
+}
+
+/* ------------------------------------------------------------------ */
 /* 页面构建                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -490,7 +655,8 @@ static void root_page_build(void)
                                      "按键帮助", NULL);
     lv_menu_set_load_page_event(s_menu, row4, help_page);
 
-    /* 5. 关于：子页作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING） */
+    /* 5. 关于：子页作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
+        最下方追加"开发者选项"入口子页（dev_options_page_build 内处理） */
     lv_obj_t *about_page = lv_menu_page_create(s_menu, (char *)"关于");
     page_style_apply(about_page);
     menu_text_row_create(about_page,
@@ -500,6 +666,8 @@ static void root_page_build(void)
     lv_obj_t *row5 = menu_row_create(s_root_page, LV_SYMBOL_SETTINGS,
                                      "关于", NULL);
     lv_menu_set_load_page_event(s_menu, row5, about_page);
+    /* 开发者选项子页：在关于页最下方挂入口行（本页最后一行） */
+    dev_options_page_build(about_page);
 
     /* 6. 重新扫描：子页确认（是=停止播放+数据无效化+重启重新扫描；
        否=返回上一级） */

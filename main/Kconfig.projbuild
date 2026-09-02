@@ -1,11 +1,8 @@
 menu "FakePodNanoNightPlayer 应用配置"
 
-    config TOUCH_TEST
-        bool "触摸区域测试（白色圆点）"
-        default y
-        help
-            启用后，显示一个 20px 白色圆点跟随手指移动，
-            抬起后 1 秒内渐变消失，用于触摸区域调试。
+    # 注：触摸区域测试（白色圆点）与电池电压采样日志已从 Kconfig 移除，改为
+    # 运行时开关：设置菜单 → 关于 → 开发者选项（config_store / NVS 持久化，
+    # 开机检查决定是否启动相关任务，修改需重启生效），不再用 Kconfig 裁剪。
 
     config PERFORMANCE_MONITOR
         bool "双核 CPU/内存性能监视（串口每 2s 输出）"
@@ -76,23 +73,8 @@ menu "FakePodNanoNightPlayer 应用配置"
             0 = 关闭该功能。⚠ 本固件暂无充电检测：充电器接入时电压被抬高
             （高于 3.2V）不会触发；若后续接入充电状态检测，应排除充电态。
 
-    config BATTERY_LOGGER_MIN
-        int "电池电压采样日志间隔（分钟，0=关闭）"
-        default 5
-        range 0 120
-        help
-            测试/功耗测量用：启用后独立任务每 N 分钟唤醒一次，在 10 秒
-            窗口内以 1s 间隔读取 10 次电池电压，去掉一个最高/最低值后求
-            平均，把"开机运行时长时间戳 + 平均电压"追加写入 SD 卡
-            /sdcard/battery_log.txt（CSV 文本，追加累积不新建；每次开机
-            先写一行会话分隔行，文件为空时自动写表头）。
-            ⚠ 设备无 RTC/网络时钟，时间戳是开机以来的运行时长（非墙上
-            时间），用于单次放电/功耗曲线分析；每 5 分钟仅写几十字节，
-            对功耗测量影响可忽略。测试完建议设 0 关闭，避免持续占用
-            SD 空间。依赖 SD 卡挂载，未插卡时任务跳过写入。
-
     config FIRMWARE_VERSION_STRING
-        string "固件版本号（显示在设置-关于页末尾）"
+        string "固件版本号（显示在设置-关于页）"
         default "0.9.0.0 alpha 1"
         help
             用户可见的固件版本标识，仅用于"关于"页展示，不影响功能。

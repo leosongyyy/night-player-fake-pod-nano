@@ -1,5 +1,5 @@
 # Debug 构建差异配置（叠加在 sdkconfig.defaults 之后，覆盖其中的默认值）
-# 用途：快速烧录调试 —— 精简字体 + 非极速版封面 + 触摸测试 + 性能监视 +
+# 用途：快速烧录调试 —— 精简字体 + 非极速版封面 + 性能监视 +
 #       FreeRTOS 运行时统计（performance_monitor 依赖）+ LVGL FPS 计数。
 # 使用：idf.py -B build/debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" build
 
@@ -11,8 +11,8 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # 非极速版封面：2bit 索引色 default_cover，省 Flash（覆盖公共默认的极速版）
 # CONFIG_UI_COVER_FLASH is not set
 
-# 触摸区域测试（20px 白点跟随手指）
-CONFIG_TOUCH_TEST=y
+# 触摸区域测试（白点）与电池电压日志已改为运行时开关（设置→关于→开发者
+# 选项，NVS 持久化，重启生效），不再属于构建配置差异。
 # 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）
 CONFIG_PERFORMANCE_MONITOR=y
 # FreeRTOS 运行时统计：performance_monitor 依赖（CPU 空闲计数器）

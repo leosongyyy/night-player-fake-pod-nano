@@ -97,12 +97,11 @@
 
 **6. 构建配置**
 
-- `main/Kconfig.projbuild`：应用配置项（menuconfig）：
-  - `CONFIG_TOUCH_TEST`（触摸区域测试，默认开）：显示 20px 白点跟随手指，抬起后 1s 渐变消失，用于触摸区域调试
+- `main/Kconfig.projbuild`：应用配置项（menuconfig）。⚠ 触摸区域测试（白点）与电池电压采样日志**已从 Kconfig 移除**，改为运行时开关：设置菜单 → 关于 → 开发者选项（config_store/NVS 持久化，**默认关**，开机检查决定是否启动相关任务，修改需重启生效），见 `core/ui/touch_test`、`core/utils/battery_logger` 与 `core/storage/config_store`
   - `CONFIG_SCREEN_OFF_STOP_CORE1`（息屏停 Core1，**默认关**，实验失败方案）：esp_cpu_stall 停核与 PSRAM/XIP 总线竞态致崩溃，勿开启，见第 6 节
 - `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.releasecandidate` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、LVGL 刷新 33ms / indev 轮询 33ms、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、LVGL 字体（12/16/20/24/28/32/48，默认 18）
 - **版本管理：配置事实源只有 `sdkconfig.defaults*` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cfg>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个 build 目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cfg>/sdkconfig` 指定）；`fullclean` 只清 `build/`，不会删 sdkconfig。改配置的正确姿势：改 `sdkconfig.defaults*` 或 `Kconfig.projbuild` 后，按第 5 节命令删对应 `build/<cfg>/sdkconfig` 再带 `-D` reconfigure（IDF 也会在 defaults 变化时自动重新合并，删了重建最干净）。
-- `partitions.csv`：`nvs`(0x9000) / `phy_init`(0xf000) / `factory`(6M，0x10000 起)。
+- `partitions.csv`（**显式静态布局**，偏移写死不随自动分配漂移）：bootloader@0x0 / 分区表@0x8000（两者由 sdkconfig 默认 `BOOTLOADER_OFFSET_IN_FLASH`、`PARTITION_TABLE_OFFSET` 控制，不在 CSV 内）→ `nvs`@0x9000(0x6000) / `phy_init`@0xf000(0x1000) / `factory`(app，6M)@0x10000 / `pldata`(data 0x40，4M)@0x610000。
 
 ### 项目内容
 
@@ -120,7 +119,7 @@
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见第 6 节；早期文档"UI Core1/播放 Core0"是停核实验分支遗留，已按当前代码修正；"息屏停 Core1"实验已失败并默认关闭）**
 - LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
 - UI：主界面（四页滑动 tab：目录/播放列表/正在播放/设置）、顶部状态栏（运行时长时钟）、下拉通知栏（电池显示 + 亮度滑块 + 底部上拉把手，**纯 LVGL 事件驱动**拖拽）
-- 工具：双核 CPU/内存性能监视（串口每 2s 输出）、触摸区域测试（Kconfig 控制）
+- 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：电池电压日志开关/采样间隔、触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效）
 
 ### 代码结构
 
@@ -128,7 +127,7 @@
 main/
   main.c                    # app_main：硬件初始化 → LVGL 移植层 → UI 组装 → 性能监视
   CMakeLists.txt
-  Kconfig.projbuild         # 应用配置项（CONFIG_TOUCH_TEST）
+  Kconfig.projbuild         # 构建级应用配置项（Kconfig；触摸测试/电池日志已移至运行时开关）
   core/
     hardware/               # 与应用无关的底层硬件驱动
       display.h/.c          # AMOLED LCD（QSPI 总线/面板）+ 屏幕尺寸配置 + 亮度控制
@@ -143,7 +142,7 @@ main/
     ui/                     # 通用 UI 基础设施（与应用无关）
       lvgl_port.h/.c        # LVGL 移植层：显示驱动、tick、任务(Core0)、互斥锁、
                             #   触摸 indev、触摸事件订阅（lvgl_port_register_touch_cb）
-      touch_test.h/.c       # 触摸区域测试（白点跟随 + 淡出，CONFIG_TOUCH_TEST）
+      touch_test.h/.c       # 触摸区域测试（白点跟随 + 淡出；运行时开关，开发者选项控制）
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
       fake_shutdown.h/.c        # 伪关机（睡眠定时器到点；A 键长按"等待断电"，深链委托 deep_worker）
@@ -151,8 +150,9 @@ main/
       power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏（AMOLED SLEEP IN +
                                 #   挂起 LVGL + esp_pm 降频 + 无操作超时自动息屏）+ 自动关机策略
                                 #   （息屏暂停超时 / 电池电压持续过低，均触发伪关机）
-      battery_logger.h/.c       # 电池电压采样日志（测试/功耗测量用，CONFIG_BATTERY_LOGGER_MIN 控制）：
-                                #   每 N 分钟 10 秒窗采样 10 次去极值平均，追加写 SD 卡
+      battery_logger.h/.c       # 电池电压采样日志（续航测量用；开发者选项运行时控制）：
+                                #   开关 + 间隔档位存 config_store/NVS（默认关，重启生效），
+                                #   开启后每 N 分钟 10 秒窗采样 10 次去极值平均，追加写 SD 卡
                                 #   /sdcard/battery_log.txt（同文件累积；每次开机写一行
                                 #   会话分隔行；时间戳=开机运行时长，无 RTC）
       deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/伪关机深调用链唯一执行者
@@ -235,17 +235,22 @@ components/
 - 内存：每 2s 打印 `heap`（默认堆）/`iram`（内部 RAM）及增量、cpu0/cpu1 百分比
 - 依赖 `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y`（已在 defaults 开启）
 
-**5. 触摸区域测试**（`core/ui/touch_test.c`，`CONFIG_TOUCH_TEST` 控制）
+**5. 触摸区域测试**（`core/ui/touch_test.c`，运行时开关：开发者选项 → 触摸测试白点）
 - 20px 白色圆点跟随手指，抬起后 1s 内 `ease_in` 渐变消失
 - 复用 `lvgl_port_register_touch_cb` 触摸数据（无独立 timer）；圆点 `HIT_TEST` 穿透，不拦截控件
-- 在 `lvgl_port_init()` 末尾初始化（Kconfig 开关）
+- 在 `lvgl_port_init()` 末尾初始化；开关为 config_store 的 touch_test（NVS，默认关），开机读取、修改需重启生效
+
+**5.1 电池电压采样日志**（`core/utils/battery_logger.c`，运行时开关：开发者选项 → 电池电压日志）
+- 独立任务（batt_log，Core1 低优先级，4KB 栈）每 N 分钟在 10 秒窗内采样 10 次电压去极值平均，追加写 `/sdcard/battery_log.txt`（CSV，会话分隔行 + 表头；时间戳=开机运行时长，无 RTC）
+- 开关 battery_log（默认关）与间隔 batt_log_min（档位 1/2/3/5/10 分钟，默认 5）均存 config_store/NVS；`battery_logger_init` 开机检查，关闭则不建任务，修改需重启生效
+- 依赖 SD 卡挂载（未插卡跳过写入）；需在 sd_card_init 之后调用
 
 **6. 任务核心布局（UI Core0 / 音频 Core1）**
 - 布局动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL）固定在 Core0**、**播放解码/封面解码固定在 Core1**，二者分核互不抢占；息屏挂起 LVGL 后 Core0 空闲（tick 停止），Core1 继续 80MHz 播放。
   ⚠ 早期文档"UI Core1/播放 Core0"是停核实验分支遗留描述，当前代码实际为 UI Core0/音频 Core1（audio.c 与各任务创建处注释一致），本文档已按代码修正。
 - **深链执行器 deep_worker**：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）与伪关机（停外设 + 提示渲染 + deepsleep）调用链深，历史导致 button/power_service/伪关机等多个任务各自扛 8KB 大栈。现统一委托 `deep_worker`（`core/utils/deep_worker.h/.c`：常驻任务，栈 8KB、prio 6、Core0，信号量驱动）串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成（浅调用，实测各调用任务栈峰值 0.7~2.4KB）。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递。
 - Core0：`LVGL`（lvgl_port_task）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0` 及系统 esp_timer 任务/ISR（sdkconfig 固定 CPU0）与全部驱动中断（app_main 于 Core0 初始化）
-- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`batt_log`（电池电压日志，仅 CONFIG_BATTERY_LOGGER_MIN>0 时建）、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）
+- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`batt_log`（电池电压日志，仅开发者选项开启时建）、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）
 - 不固定：`touch_init`（开机一次性自删）、`mem_monitor`（性能监视，CONFIG_PERFORMANCE_MONITOR 控制）
 - **任务栈现状（2026-09 按 mem_monitor 栈高水位实测收紧；perf 日志每 20s 一行 `stk: 任务名=剩余字节`，HWM 为自启动以来最小剩余）**：LVGL 6KB（峰值~3.1K）、button_svc 4KB（峰值~2.4K）、power_svc 3KB（自动息屏投递链峰值 ~1.9K；曾缩 2K 实测仅剩 116B 过紧，故定 3K；低电检查只多一次浅 ADC 读数，余量充足）、sleep_timer 4KB（渐降 I2C 链需 4K，勿缩）、deep_worker 8KB（伪关机链 deepsleep 后 HWM 清零无法实测，保持 8K）、cover_load 6KB（解码峰值~3.8K，余~2.2K）、mp3_play/out 8K/4K、player_ctrl 4KB（峰值 2.6K 偏紧勿缩）。⚠ 调栈前先看 HWM 且**必须覆盖目标路径实测**（如自动息屏/亮屏后才打印的读数），勿只信亮屏态读数；勿回到"在小任务里直接跑深链"（历史 2~3KB 爆栈记录）。release 配置另关 CONFIG_PERFORMANCE_MONITOR（省 mem_monitor 4K + cpu_coll×2 2K）。
 - 息屏（`power_service_screen_off`，状态翻转后经 deep_worker 执行）：**AMOLED SLEEP IN**（DISPOFF 0x28 + SLEEP IN 0x10，`display_sleep_enter`：驱动 IC 停 DC/DC/振荡器/扫描，显示 RAM 保留——真正的低功耗态，仅亮度 0 时 IC 仍满负荷）→ `lvgl_port_suspend`（停 tick + 挂起 LVGL/封面任务）→ 固定 80MHz（详见 SCREEN_SLEEP_AMOLED_OPTIMIZATION.md）
@@ -283,7 +288,7 @@ components/
 - 遵循当前项目已建立的分层与命名习惯（`core/` 底层 vs `ui/` 应用、snake_case、模块前缀），新增文件需同时更新 `main/CMakeLists.txt`。
 - 代码注释均使用中文，逻辑清晰，关键常量/魔法数字要有注释说明。
 - UI 功能按模块实现、逐个测试验证，不要一次性堆砌所有功能。
-- 使用 Kconfig（`main/Kconfig.projbuild`）控制可裁剪功能（如 `CONFIG_TOUCH_TEST`），参考 `..\OtoClock\main\Kconfig.projbuild` 的写法。
+- 使用 Kconfig（`main/Kconfig.projbuild`）控制可裁剪功能（如 `CONFIG_PERFORMANCE_MONITOR`），参考 `..\OtoClock\main\Kconfig.projbuild` 的写法。⚠ 需要"开机决定、运行时修改"的开关（如触摸测试、电池电压日志）不走 Kconfig，放设置 → 关于 → 开发者选项（config_store/NVS，重启生效），见 config_store 头文件注释。
 - 所有的过程文档、组件文档会放在根目录下的 ideas_and_exps 文件夹中。
 
 ### 回复/行动说明

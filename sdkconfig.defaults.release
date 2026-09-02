@@ -10,8 +10,8 @@ CONFIG_UI_SYSTEM_FONT_FULL=y
 # 极速版封面：RGB565 真彩色 default_cover_flash（与屏幕像素格式一致）
 CONFIG_UI_COVER_FLASH=y
 
-# 调试功能全部关闭
-# CONFIG_TOUCH_TEST is not set
+# 调试功能全部关闭（触摸区域测试与电池电压日志已改为运行时开关，默认关，
+# 见设置→关于→开发者选项；此处仅剩编译级调试项）
 # CONFIG_PERFORMANCE_MONITOR is not set
 # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not set
 # CONFIG_LV_USE_PERF_MONITOR is not set

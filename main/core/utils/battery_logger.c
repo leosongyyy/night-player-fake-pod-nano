@@ -4,6 +4,7 @@
 
 #include "core/hardware/battery.h"
 #include "core/hardware/sd_card.h"
+#include "core/storage/config_store.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -11,13 +12,11 @@
 
 static const char *TAG = "batt_log";
 
-/* 采样间隔（分钟）：经 Kconfig CONFIG_BATTERY_LOGGER_MIN 配置（默认 5，
-   0=关闭）。测试/功耗测量用，测试完建议关闭。 */
-#ifdef CONFIG_BATTERY_LOGGER_MIN
-#define BATT_LOG_INTERVAL_MIN  CONFIG_BATTERY_LOGGER_MIN
-#else
-#define BATT_LOG_INTERVAL_MIN  0
-#endif
+/* 采样间隔（分钟）默认值：开发者选项未设置时用 5 分钟（config_store 的
+   batt_log_min 实际默认值与此一致，此处仅作为读取失败/越界时的兜底）。
+   间隔可在设置 → 关于 → 开发者选项 中调整为 1/2/3/5/10 分钟（NVS
+   持久化，开机生效）。测试/功耗测量用，测试完建议关闭。 */
+#define BATT_LOG_INTERVAL_MIN_DEFAULT 5
 
 /* 每个采样窗口的读数次数与间隔（ms）：10 秒窗口内读 10 次（1s 一次），
    去掉一个最高/最低值后对剩余 8 个求平均——消除瞬时噪声与 ADC 抖动，
@@ -39,6 +38,10 @@ static const char *TAG = "batt_log";
 #define BATT_LOG_TASK_STACK   (4 * 1024)
 #define BATT_LOG_TASK_PRIO    1
 #define BATT_LOG_TASK_CORE    1
+
+/* 任务使用的采样间隔（分钟）：battery_logger_init 时从 config_store 读取并
+   固化（静态存储，任务创建后不再变化——修改间隔需重启生效的设计使然） */
+static uint32_t s_batt_log_interval_min = BATT_LOG_INTERVAL_MIN_DEFAULT;
 
 /* 写会话分隔行：开机即执行一次（不等首个采样周期——即使本次开机不足一个
    采样间隔，文件里也留下会话痕迹）。文件不存在时先写表头再写分隔行。 */
@@ -63,7 +66,7 @@ static void battery_logger_write_session_marker(void)
 static void battery_logger_task(void *arg)
 {
     (void)arg;
-    const uint32_t interval_ms = (uint32_t)BATT_LOG_INTERVAL_MIN * 60 * 1000;
+    const uint32_t interval_ms = s_batt_log_interval_min * 60 * 1000;
     bool sd_missing_warned = false;
 
     /* 0. 会话开始标记：开机立即写一行分隔行（SD 未挂载时 fopen 失败直接
@@ -78,8 +81,8 @@ static void battery_logger_task(void *arg)
         if (!sd_card_is_mounted()) {
             if (!sd_missing_warned) {
                 ESP_LOGW(TAG, "SD card not mounted, skip battery logging "
-                              "(will retry every %d min)",
-                         BATT_LOG_INTERVAL_MIN);
+                              "(will retry every %u min)",
+                         (unsigned)s_batt_log_interval_min);
                 sd_missing_warned = true;
             }
             continue;
@@ -87,7 +90,7 @@ static void battery_logger_task(void *arg)
         sd_missing_warned = false;
 
         /* 1. 10 秒窗口采样：读取失败（battery_read_voltage_mv 返回 <0）的
-              读数直接丢弃，不参与去极值与平均 */
+               读数直接丢弃，不参与去极值与平均 */
         float samples[BATT_LOG_SAMPLE_NUM];
         int n = 0;
         for (int i = 0; i < BATT_LOG_SAMPLE_NUM; i++) {
@@ -118,7 +121,7 @@ static void battery_logger_task(void *arg)
         float avg_mv = (sum - vmax - vmin) / (float)(n - 2);
 
         /* 3. 时间戳：无 RTC，用开机以来运行时长（esp_timer）。
-              每行 CSV：elapsed_s, HH:MM:SS, 平均电压(mV, 1 位小数) */
+               每行 CSV：elapsed_s, HH:MM:SS, 平均电压(mV, 1 位小数) */
         int64_t elapsed_us = esp_timer_get_time();
         uint32_t elapsed_s = (uint32_t)(elapsed_us / 1000000LL);
         uint32_t hh = elapsed_s / 3600;
@@ -147,11 +150,27 @@ static void battery_logger_task(void *arg)
 
 void battery_logger_init(void)
 {
-#if BATT_LOG_INTERVAL_MIN > 0
     static bool inited = false;
     if (inited) {
         return;
     }
+
+    /* 开发者选项开关（NVS，默认关）：关闭时不建任务。
+       需在 config_store_init 之后调用（main.c 初始化顺序保证） */
+    if (!config_store_get_battery_log()) {
+        ESP_LOGI(TAG, "battery logger disabled (developer option off, "
+                      "enable in Settings->About->Developer options)");
+        return;
+    }
+
+    /* 采样间隔：开机时从 config_store 读取并固化（NVS 档位 1/2/3/5/10，
+       默认 5；越界时兜底为默认值） */
+    uint32_t interval_min = config_store_get_battery_log_min();
+    if (interval_min < 1 || interval_min > 120) {
+        interval_min = BATT_LOG_INTERVAL_MIN_DEFAULT;
+    }
+    s_batt_log_interval_min = interval_min;
+
     if (xTaskCreatePinnedToCore(battery_logger_task, "batt_log",
                                 BATT_LOG_TASK_STACK, NULL,
                                 BATT_LOG_TASK_PRIO, NULL,
@@ -160,12 +179,9 @@ void battery_logger_init(void)
         return;
     }
     inited = true;
-    ESP_LOGI(TAG, "battery logger ready: every %d min, %d samples over %d s, "
+    ESP_LOGI(TAG, "battery logger ready: every %u min, %d samples over %d s, "
                   "log file %s",
-             BATT_LOG_INTERVAL_MIN, BATT_LOG_SAMPLE_NUM,
+             (unsigned)interval_min, BATT_LOG_SAMPLE_NUM,
              BATT_LOG_SAMPLE_NUM * BATT_LOG_SAMPLE_GAP_MS / 1000,
              BATT_LOG_FILE_PATH);
-#else
-    ESP_LOGI(TAG, "battery logger disabled (CONFIG_BATTERY_LOGGER_MIN=0)");
-#endif
 }

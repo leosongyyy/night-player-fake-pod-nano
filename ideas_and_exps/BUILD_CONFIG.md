@@ -33,10 +33,13 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 | `COMPILER_OPTIMIZATION` | 编译优化级别 | Performance（-O2） | Performance（-O2） | Performance（-O2，运行性能优先） |
 | `UI_SYSTEM_FONT_FULL` | 系统默认字体 | 精简版（固件小、烧录快） | **完整版** | 完整版（全量中文/日文/阿拉伯文/藏文） |
 | `UI_COVER_FLASH` | 默认封面 | 2bit 索引色版（省 Flash） | **RGB565 极速版** | RGB565 极速版（渲染快） |
-| `TOUCH_TEST` | 触摸区域测试（白点跟随） | 开 | 开 | 关 |
 | `PERFORMANCE_MONITOR` | 双核 CPU/内存监视（串口每 2s） | 开 | 开 | 关 |
 | `FREERTOS_GENERATE_RUN_TIME_STATS` | FreeRTOS 运行时统计（performance_monitor 依赖） | 开 | 开 | 关 |
 | `LV_USE_PERF_MONITOR` | LVGL FPS 计数（屏幕角落） | 开 | 开 | 关 |
+
+> ⚠ 触摸区域测试（白色圆点）与电池电压采样日志**已改为运行时开关**，不再是构建差异：
+> 设置菜单 → 关于 → 开发者选项（config_store/NVS，**默认关**，开机检查、修改需重启生效），
+> 详见 `main/core/storage/config_store`、`main/core/ui/touch_test`、`main/core/utils/battery_logger`。
 
 ## 3. 构建命令
 
@@ -124,8 +127,9 @@ Remove-Item build/debug/sdkconfig            # 删除目标构建目录的 sdkco
 
 退出：`Ctrl+]`。观察要点：
 
-- **debug / releasecandidate 版**应看到 `touch_test: Touch test created` 和每 2s 一条 `MEM: heap=... cpu0=..% cpu1=..%`（performance_monitor），屏幕角落有 LVGL FPS 计数；其中 **releasecandidate 版**的 `MEM: heap=` 数值会比 debug 版低约 2.9MB（完整字体占用的 PSRAM），正好用于观察低内存环境下的运行状况
-- **release 版**无上述日志（调试功能关闭）
+- **debug / releasecandidate 版**应看到每 2s 一条 `MEM: heap=... cpu0=..% cpu1=..%`（performance_monitor），屏幕角落有 LVGL FPS 计数；其中 **releasecandidate 版**的 `MEM: heap=` 数值会比 debug 版低约 2.9MB（完整字体占用的 PSRAM），正好用于观察低内存环境下的运行状况
+- **release 版**无上述日志（性能监视等编译级调试功能关闭）
+- 触摸测试白点 / 电池电压日志为运行时开关，**默认关闭**：开启需在设置菜单 → 关于 → 开发者选项中打开并重启（开启后可看到 `touch_test: Touch test created` 或 `batt_log: battery logger ready` 日志）
 
 ## 6. 工作原理（为什么可以多配置共存）
 
@@ -147,6 +151,6 @@ Remove-Item build/debug/sdkconfig            # 删除目标构建目录的 sdkco
 ## 8. 相关文件
 
 - 配置：`sdkconfig.defaults` / `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release`
-- 应用配置项定义：`main/Kconfig.projbuild`（`TOUCH_TEST`、`PERFORMANCE_MONITOR`、`UI_SYSTEM_FONT_FULL`、`UI_COVER_FLASH` 等）
+- 应用配置项定义：`main/Kconfig.projbuild`（`PERFORMANCE_MONITOR`、`UI_SYSTEM_FONT_FULL`、`UI_COVER_FLASH` 等；触摸测试/电池日志已移除 Kconfig，改运行时开关，见上方说明）
 - 构建产物：`build/debug/`、`build/releasecandidate/`、`build/release/`
 - 固件：`build/debug/FakePodNanoNightPlayer.bin`、`build/releasecandidate/FakePodNanoNightPlayer.bin`、`build/release/FakePodNanoNightPlayer.bin`

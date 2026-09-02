@@ -19,6 +19,9 @@ static const char *TAG = "config_store";
 #define KEY_SLEEP_DEF_ON     "sleepdefon"
 #define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
+#define KEY_BATT_LOG         "battlog"
+#define KEY_BATT_LOG_MIN     "battmin"
+#define KEY_TOUCH_TEST       "touchtest"
 #define KEY_WAS_PLAYING      "was_play"
 #define KEY_LAST_GLOBAL      "last_glob"
 #define KEY_LAST_POS         "last_pos"
@@ -44,6 +47,11 @@ static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
 static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
+/* 开发者选项（运行时开关，开机检查、重启生效）：电池电压日志（默认关）
+   及其采样间隔（分钟，默认 5）、触摸测试白点（默认关） */
+static bool     s_batt_log    = (CONFIG_STORE_BATT_LOG_DEFAULT != 0);
+static uint8_t  s_batt_log_min = CONFIG_STORE_BATT_LOG_MIN_DEFAULT;
+static bool     s_touch_test  = (CONFIG_STORE_TOUCH_TEST_DEFAULT != 0);
 /* 关机前播放状态：默认 true（无记录时开机自动播放，保持旧行为） */
 static bool     s_was_playing = true;
 static uint32_t s_last_global = 0;
@@ -204,6 +212,28 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SCREEN_OFF, &s_screen_off) != ESP_OK) {
         s_screen_off = CONFIG_STORE_SCREEN_OFF_DEFAULT;
     }
+    /* 开发者选项：无记录（首次烧录/升级）时默认关闭（见 CONFIG_STORE_*_DEFAULT） */
+    uint8_t batt_log = 0;
+    if (nvs_get_u8(s_nvs, KEY_BATT_LOG, &batt_log) != ESP_OK) {
+        s_batt_log = (CONFIG_STORE_BATT_LOG_DEFAULT != 0);
+    } else {
+        s_batt_log = (batt_log != 0);
+    }
+    if (nvs_get_u8(s_nvs, KEY_BATT_LOG_MIN, &s_batt_log_min) != ESP_OK) {
+        s_batt_log_min = CONFIG_STORE_BATT_LOG_MIN_DEFAULT;
+    }
+    /* 间隔越界防护：历史脏数据钳制到 1~120 分钟 */
+    if (s_batt_log_min < 1) {
+        s_batt_log_min = 1;
+    } else if (s_batt_log_min > CONFIG_STORE_BATT_LOG_MIN_MAX) {
+        s_batt_log_min = CONFIG_STORE_BATT_LOG_MIN_MAX;
+    }
+    uint8_t touch_test = 0;
+    if (nvs_get_u8(s_nvs, KEY_TOUCH_TEST, &touch_test) != ESP_OK) {
+        s_touch_test = (CONFIG_STORE_TOUCH_TEST_DEFAULT != 0);
+    } else {
+        s_touch_test = (touch_test != 0);
+    }
     /* 关机前播放状态：无记录（首次烧录/升级）时保持默认 true（自动播放） */
     uint8_t was_play = 1;
     if (nvs_get_u8(s_nvs, KEY_WAS_PLAYING, &was_play) != ESP_OK) {
@@ -226,10 +256,13 @@ void config_store_init(void)
 
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
-                  "sleep_def=%u min def_on=%d awake=%d screen_off=%u s was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s",
+                  "sleep_def=%u min def_on=%d awake=%d screen_off=%u s "
+                  "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
              (int)s_shuffle, (unsigned)s_sleep_def, (int)s_sleep_def_on,
              (int)s_sleep_awake, (unsigned)s_screen_off,
+             (int)s_batt_log, (unsigned)s_batt_log_min,
+             (int)s_touch_test,
              (int)s_was_playing,
              s_last_valid ? "yes" : "no",
              (unsigned)s_last_global, (unsigned)s_last_pos,
@@ -285,6 +318,21 @@ bool config_store_get_sleep_awake(void)
 uint32_t config_store_get_screen_off_s(void)
 {
     return s_screen_off;
+}
+
+bool config_store_get_battery_log(void)
+{
+    return s_batt_log;
+}
+
+uint8_t config_store_get_battery_log_min(void)
+{
+    return s_batt_log_min;
+}
+
+bool config_store_get_touch_test(void)
+{
+    return s_touch_test;
 }
 
 bool config_store_get_was_playing(void)
@@ -407,6 +455,43 @@ void config_store_set_screen_off_s(uint32_t seconds)
     s_screen_off = seconds;
     cfg_write_u32(KEY_SCREEN_OFF, seconds);
     config_notify();
+}
+
+/* 开发者选项三个 setter：只写内存 + NVS，不通知回调——两个开关与间隔都是
+   "开机检查、重启生效"的启动项，界面上无其它实时同步方（与 set_was_playing
+   的处理一致；开发选项页自身的状态文字由点击回调就地刷新）。 */
+
+void config_store_set_battery_log(bool on)
+{
+    if (on == s_batt_log) {
+        return;
+    }
+    s_batt_log = on;
+    cfg_write_u8(KEY_BATT_LOG, on ? 1 : 0);
+}
+
+void config_store_set_battery_log_min(uint8_t minutes)
+{
+    /* 收敛到 1~120 分钟（UI 档位 1/2/3/5/10，钳位仅防越界脏数据） */
+    if (minutes < 1) {
+        minutes = 1;
+    } else if (minutes > CONFIG_STORE_BATT_LOG_MIN_MAX) {
+        minutes = CONFIG_STORE_BATT_LOG_MIN_MAX;
+    }
+    if (minutes == s_batt_log_min) {
+        return;
+    }
+    s_batt_log_min = minutes;
+    cfg_write_u8(KEY_BATT_LOG_MIN, minutes);
+}
+
+void config_store_set_touch_test(bool on)
+{
+    if (on == s_touch_test) {
+        return;
+    }
+    s_touch_test = on;
+    cfg_write_u8(KEY_TOUCH_TEST, on ? 1 : 0);
 }
 
 void config_store_set_was_playing(bool playing)

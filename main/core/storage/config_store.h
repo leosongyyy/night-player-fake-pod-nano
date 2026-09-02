@@ -27,6 +27,11 @@ extern "C" {
  *     调音量等用户动作按 NightPlayer 算法折算加时（见 core/utils/sleep_timer）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调
+ *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关，
+ *     开机读取决定是否启动相关任务/创建调试对象，修改需重启生效）：
+ *     - 电池电压采样日志 battery_log（bool，默认关）+ 采样间隔
+ *       batt_log_min（分钟，默认 5，可调 1/2/3/5/10，见 core/utils/battery_logger）
+ *     - 触摸测试白点 touch_test（bool，默认关，见 core/ui/touch_test）
  *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
@@ -56,6 +61,10 @@ extern "C" {
 #define CONFIG_STORE_SLEEP_DEF_ON_DEFAULT 0u  /* 开机默认不自动开启睡眠定时 */
 #define CONFIG_STORE_SLEEP_AWAKE_DEFAULT 1u   /* 睡眠清醒感知默认开启（NightPlayer 行为） */
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
+#define CONFIG_STORE_BATT_LOG_DEFAULT     0u  /* 电池电压日志默认关（开发者选项开启） */
+#define CONFIG_STORE_BATT_LOG_MIN_DEFAULT 5u  /* 日志采样间隔默认 5 分钟 */
+#define CONFIG_STORE_BATT_LOG_MIN_MAX     120u /* 日志间隔上限（分钟，防越界） */
+#define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
 
 /** 配置变更回调（在调用 set_xxx 的线程上下文中同步执行） */
 typedef void (*config_store_cb_t)(void *ctx);
@@ -102,6 +111,15 @@ bool config_store_get_sleep_awake(void);
 /** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
 uint32_t config_store_get_screen_off_s(void);
 
+/** @brief 电池电压采样日志开关（true=开机创建 batt_log 任务；默认关） */
+bool config_store_get_battery_log(void);
+
+/** @brief 电池电压采样间隔（分钟，默认 5，可调 1/2/3/5/10） */
+uint8_t config_store_get_battery_log_min(void);
+
+/** @brief 触摸测试白点开关（true=开机创建跟随手指的白色圆点；默认关） */
+bool config_store_get_touch_test(void);
+
 /** @brief 关机前是否在播放（true=播放中，开机自动续播；false=已暂停/停止，
  *          开机只恢复现场不自动播放）。无 NVS 记录时默认 true（保持旧行为）。 */
 bool config_store_get_was_playing(void);
@@ -142,6 +160,18 @@ void config_store_set_sleep_awake(bool on);
 
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);
+
+/** @brief 设置电池电压日志开关并持久化（开发者选项；开机检查，重启生效，
+ *          仅持久化不通知回调——无 UI 需要实时同步） */
+void config_store_set_battery_log(bool on);
+
+/** @brief 设置电池电压采样间隔并持久化（分钟，自动收敛到 1~120；
+ *          与 battery_log 同属开发者选项，重启生效） */
+void config_store_set_battery_log_min(uint8_t minutes);
+
+/** @brief 设置触摸测试白点开关并持久化（开发者选项；开机检查，重启生效，
+ *          仅持久化不通知回调） */
+void config_store_set_touch_test(bool on);
 
 /** @brief 设置关机前播放状态并持久化（由 player_controller 在伪关机保存
  *          播放位置时一并调用；UI 无展示，不通知回调） */
