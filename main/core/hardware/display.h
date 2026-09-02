@@ -154,7 +154,7 @@ void display_sleep_enter(void);
  * 0x11 后等待同规格，不可省），再 esp_lcd_panel_init() 重发完整初始化
  * （MADCTL/COLMOD + display_init 的 lcd_init_cmds，含 0x51=0 全黑、0x29
  * DISPON；不含硬件 reset）。重初始化会重置显示 RAM → 调用方须随后全屏重刷
- * 并按用户配置恢复亮度（见 screen_sleep_exit：invalidate + lv_refr_now +
+ * 并按用户配置恢复亮度（见 power_service 亮屏：invalidate + lv_refr_now +
  * display_set_brightness，同开机"全黑启动防白屏"顺序）。
  *
  * ⚠ 必须在持有 lvgl_port_lock() 时调用；须在 LVGL 任务恢复（resume）之前

@@ -15,6 +15,12 @@ extern "C" {
 #define BAT_EMPTY_MV      3000
 #define BAT_FULL_MV       4200
 
+// 临界低电压（mV）：低于此值视为"电池电压过低"——开机拒绝启动
+// （ui/boot_flow.c）与运行中持续过低自动伪关机（core/utils/power_service.c）
+// 共用同一阈值。与 BAT_EMPTY_MV（0%）之间留 200mV 余量，避免显示层
+// 在临界点附近抖动。
+#define BATTERY_CRITICAL_LOW_MV 3200
+
 /**
  * @brief 初始化电池电压 ADC（单次采样 + 校准）
  */

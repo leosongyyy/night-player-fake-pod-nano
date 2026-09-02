@@ -11,7 +11,7 @@
 #include "core/music/song_meta.h"
 #include "core/player/player_controller.h"
 #include "core/ui/lvgl_port.h"
-#include "core/utils/screen_sleep.h"
+#include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/app.h"
 #include "ui/list_common.h"
@@ -242,7 +242,7 @@ void now_playing_force_show_ui(void)
 }
 
 /* 播放页挂机自动隐藏标题栏/控制栏（秒）：用户无操作（按键/触摸）超过该
-   时长，自动执行"点击封面隐藏"的同样效果。复用 screen_sleep 的空闲计时
+   时长，自动执行"点击封面隐藏"的同样效果。复用 power_service 的空闲计时
    （与自动息屏同一计时源），由本页自己的 lv_timer 每 1s 检查一次；
    LVGL 挂起（息屏）时 timer 不运行，恢复后继续，无副作用。 */
 #define NP_AUTO_HIDE_IDLE_S  10
@@ -263,7 +263,7 @@ static void np_auto_hide_timer_cb(lv_timer_t *timer)
     if (main_ui_get_current_tab() != 2) {
         return;                    /* 不在正在播放页 */
     }
-    if (screen_sleep_get_idle_sec() >= NP_AUTO_HIDE_IDLE_S) {
+    if (power_service_get_idle_sec() >= NP_AUTO_HIDE_IDLE_S) {
         ESP_LOGI(TAG, "idle %d s on now playing, auto hide bars",
                  NP_AUTO_HIDE_IDLE_S);
         np_set_ui_visible(false);

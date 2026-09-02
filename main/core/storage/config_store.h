@@ -26,7 +26,7 @@ extern "C" {
  *   - 睡眠定时清醒感知 sleep_awake（bool，默认开）：睡眠定时开启期间，切歌/
  *     调音量等用户动作按 NightPlayer 算法折算加时（见 core/utils/sleep_timer）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
- *     超过该时长后自动息屏（见 core/utils/screen_sleep），设置页可调
+ *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调
  *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）

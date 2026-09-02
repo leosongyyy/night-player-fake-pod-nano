@@ -25,7 +25,7 @@ static volatile uint32_t s_core1_usage = 0;
    （mem_monitor 打印）永远读不到空闲频率。esp_timer ISR 在 tick 中断之外
    触发、不会重新上锁，因此 ISR 采样能反映空闲期的真实频率：
    亮屏（持有 screen 锁）时恒为 240；息屏释放锁后，采样点落在空闲期即
-   读到 80，用于验证"息屏降频生效"（见 core/utils/screen_sleep）。 */
+   读到 80，用于验证"息屏降频生效"（见 core/utils/power_service）。 */
 static volatile int s_freq_isr_mhz = 0;
 
 /* esp_timer ISR 频率采样回调（中断上下文，只写一个 int，不做重活） */
@@ -60,14 +60,14 @@ static void cpu_collector_task(void *pvParameters)
    自启动以来峰值用栈的余量；本 port StackType_t=uint8_t，返回值即字节）。
    - 值越小 → 峰值用栈越接近分配值（接近爆栈）；
    - 任务不存在（未创建，如非播放态的 mp3_play；或已删除）时跳过。
-   用途：确认 deep_worker 接手深链后 button/screen_sleep 等任务的高富余，
+   用途：确认 deep_worker 接手深链后 button/power_service 等任务的高富余，
    作为后续缩栈的依据；同时监控 deep_worker 自身 8KB 栈的余量。 */
 static void mem_report_stack_hwm(void)
 {
     static const char *names[] = {
-        "deep_worker", "button_svc", "screen_sleep", "LVGL", "player_ctrl",
+        "deep_worker", "button_svc", "power_svc", "LVGL", "player_ctrl",
         "sleep_timer", "mem_monitor", "cpu_coll0", "cpu_coll1",
-        "mp3_play", "mp3_out", "cover_load",
+        "mp3_play", "mp3_out", "cover_load", "batt_log",
         "touch_init", "boot_scan", "rescan",
     };
     char buf[320];

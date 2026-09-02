@@ -148,7 +148,13 @@ main/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
       fake_shutdown.h/.c        # 伪关机（睡眠定时器到点；A 键长按"等待断电"，深链委托 deep_worker）
       sleep_timer.h/.c          # 睡眠定时器（到点触发普通伪关机）
-      screen_sleep.h/.c         # 息屏管理（AMOLED SLEEP IN + 挂起 LVGL + esp_pm 降频 + 无操作超时自动息屏）
+      power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏（AMOLED SLEEP IN +
+                                #   挂起 LVGL + esp_pm 降频 + 无操作超时自动息屏）+ 自动关机策略
+                                #   （息屏暂停超时 / 电池电压持续过低，均触发伪关机）
+      battery_logger.h/.c       # 电池电压采样日志（测试/功耗测量用，CONFIG_BATTERY_LOGGER_MIN 控制）：
+                                #   每 N 分钟 10 秒窗采样 10 次去极值平均，追加写 SD 卡
+                                #   /sdcard/battery_log.txt（同文件累积；每次开机写一行
+                                #   会话分隔行；时间戳=开机运行时长，无 RTC）
       deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/伪关机深调用链唯一执行者
   ui/                       # 应用 UI
     app.h/.c                # UI 组装入口 + 顶部状态栏（时间/音量/电量）
@@ -208,7 +214,7 @@ components/
 **1. 分层架构**（已完成）
 - `core/` 放与应用无关的底层：`core/hardware/`（显示/触摸/电池驱动）、`core/ui/`（LVGL 移植层 + 触摸测试）、`core/utils/`（性能监视）
 - `ui/` 放应用 UI：app（组装 + 状态栏）、main_ui（主界面）、notification_panel（通知栏）
-- `main.c` 只做初始化装配：`config_store_init → display_init → touch_init → battery_init → audio_init → pldata_init → button_service_init → sd_card_init → lvgl_port_init → boot_flow_run(持锁首帧+点亮) → deep_worker_init → sleep_timer_init → key_handler_init → screen_sleep_init → startPerformanceMonitor()`
+- `main.c` 只做初始化装配：`config_store_init → display_init → touch_init → battery_init → audio_init → pldata_init → button_service_init → sd_card_init → lvgl_port_init → boot_flow_run(持锁首帧+点亮) → deep_worker_init → sleep_timer_init → key_handler_init → power_service_init → battery_logger_init → startPerformanceMonitor()`
 
 **2. LVGL 移植层**（`core/ui/lvgl_port.c`，已完成）
 - 显示驱动注册（flush/rounder 回调、DMA draw buffer、2ms tick）、LVGL 任务固定 **Core0**（`xTaskCreatePinnedToCore`；UI 与播放解码/封面分核互不抢占，见第 6 节）
@@ -237,13 +243,14 @@ components/
 **6. 任务核心布局（UI Core0 / 音频 Core1）**
 - 布局动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL）固定在 Core0**、**播放解码/封面解码固定在 Core1**，二者分核互不抢占；息屏挂起 LVGL 后 Core0 空闲（tick 停止），Core1 继续 80MHz 播放。
   ⚠ 早期文档"UI Core1/播放 Core0"是停核实验分支遗留描述，当前代码实际为 UI Core0/音频 Core1（audio.c 与各任务创建处注释一致），本文档已按代码修正。
-- **深链执行器 deep_worker**：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）与伪关机（停外设 + 提示渲染 + deepsleep）调用链深，历史导致 button/screen_sleep/伪关机等多个任务各自扛 8KB 大栈。现统一委托 `deep_worker`（`core/utils/deep_worker.h/.c`：常驻任务，栈 8KB、prio 6、Core0，信号量驱动）串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成（浅调用，实测各调用任务栈峰值 0.7~2.4KB）。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递。
+- **深链执行器 deep_worker**：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）与伪关机（停外设 + 提示渲染 + deepsleep）调用链深，历史导致 button/power_service/伪关机等多个任务各自扛 8KB 大栈。现统一委托 `deep_worker`（`core/utils/deep_worker.h/.c`：常驻任务，栈 8KB、prio 6、Core0，信号量驱动）串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成（浅调用，实测各调用任务栈峰值 0.7~2.4KB）。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递。
 - Core0：`LVGL`（lvgl_port_task）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0` 及系统 esp_timer 任务/ISR（sdkconfig 固定 CPU0）与全部驱动中断（app_main 于 Core0 初始化）
-- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`screen_sleep`、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）
+- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`batt_log`（电池电压日志，仅 CONFIG_BATTERY_LOGGER_MIN>0 时建）、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）
 - 不固定：`touch_init`（开机一次性自删）、`mem_monitor`（性能监视，CONFIG_PERFORMANCE_MONITOR 控制）
-- **任务栈现状（2026-09 按 mem_monitor 栈高水位实测收紧；perf 日志每 20s 一行 `stk: 任务名=剩余字节`，HWM 为自启动以来最小剩余）**：LVGL 6KB（峰值~3.1K）、button_svc 4KB（峰值~2.4K）、screen_sleep 3KB（自动息屏投递链峰值 ~1.9K；曾缩 2K 实测仅剩 116B 过紧，故定 3K）、sleep_timer 4KB（渐降 I2C 链需 4K，勿缩）、deep_worker 8KB（伪关机链 deepsleep 后 HWM 清零无法实测，保持 8K）、cover_load 6KB（解码峰值~3.8K，余~2.2K）、mp3_play/out 8K/4K、player_ctrl 4KB（峰值 2.6K 偏紧勿缩）。⚠ 调栈前先看 HWM 且**必须覆盖目标路径实测**（如自动息屏/亮屏后才打印的读数），勿只信亮屏态读数；勿回到"在小任务里直接跑深链"（历史 2~3KB 爆栈记录）。release 配置另关 CONFIG_PERFORMANCE_MONITOR（省 mem_monitor 4K + cpu_coll×2 2K）。
-- 息屏（`screen_sleep_enter`，状态翻转后经 deep_worker 执行）：**AMOLED SLEEP IN**（DISPOFF 0x28 + SLEEP IN 0x10，`display_sleep_enter`：驱动 IC 停 DC/DC/振荡器/扫描，显示 RAM 保留——真正的低功耗态，仅亮度 0 时 IC 仍满负荷）→ `lvgl_port_suspend`（停 tick + 挂起 LVGL/封面任务）→ 固定 80MHz（详见 SCREEN_SLEEP_AMOLED_OPTIMIZATION.md）
-- 亮屏（`screen_sleep_exit`，经 deep_worker）：固定 240MHz → **持锁 `display_sleep_exit`**（SLEEP OUT 0x11 + 120ms 恢复等待 + `esp_lcd_panel_init` 重发完整 init——该面板 SLEEP OUT 后必须重初始化，仅 0x11+DISPON 不亮屏——+ 全屏 `lv_obj_invalidate`/`lv_refr_now` 黑屏中重刷）→ 恢复用户亮度 → `lvgl_port_resume`。须先于 LVGL resume（休眠中/刚唤醒面板不能接收刷屏数据）
+- **任务栈现状（2026-09 按 mem_monitor 栈高水位实测收紧；perf 日志每 20s 一行 `stk: 任务名=剩余字节`，HWM 为自启动以来最小剩余）**：LVGL 6KB（峰值~3.1K）、button_svc 4KB（峰值~2.4K）、power_svc 3KB（自动息屏投递链峰值 ~1.9K；曾缩 2K 实测仅剩 116B 过紧，故定 3K；低电检查只多一次浅 ADC 读数，余量充足）、sleep_timer 4KB（渐降 I2C 链需 4K，勿缩）、deep_worker 8KB（伪关机链 deepsleep 后 HWM 清零无法实测，保持 8K）、cover_load 6KB（解码峰值~3.8K，余~2.2K）、mp3_play/out 8K/4K、player_ctrl 4KB（峰值 2.6K 偏紧勿缩）。⚠ 调栈前先看 HWM 且**必须覆盖目标路径实测**（如自动息屏/亮屏后才打印的读数），勿只信亮屏态读数；勿回到"在小任务里直接跑深链"（历史 2~3KB 爆栈记录）。release 配置另关 CONFIG_PERFORMANCE_MONITOR（省 mem_monitor 4K + cpu_coll×2 2K）。
+- 息屏（`power_service_screen_off`，状态翻转后经 deep_worker 执行）：**AMOLED SLEEP IN**（DISPOFF 0x28 + SLEEP IN 0x10，`display_sleep_enter`：驱动 IC 停 DC/DC/振荡器/扫描，显示 RAM 保留——真正的低功耗态，仅亮度 0 时 IC 仍满负荷）→ `lvgl_port_suspend`（停 tick + 挂起 LVGL/封面任务）→ 固定 80MHz（详见 SCREEN_SLEEP_AMOLED_OPTIMIZATION.md）
+- 亮屏（`power_service_screen_on`，经 deep_worker）：固定 240MHz → **持锁 `display_sleep_exit`**（SLEEP OUT 0x11 + 120ms 恢复等待 + `esp_lcd_panel_init` 重发完整 init——该面板 SLEEP OUT 后必须重初始化，仅 0x11+DISPON 不亮屏——+ 全屏 `lv_obj_invalidate`/`lv_refr_now` 黑屏中重刷）→ 恢复用户亮度 → `lvgl_port_resume`。须先于 LVGL resume（休眠中/刚唤醒面板不能接收刷屏数据）
+- **自动关机策略（power_service 守护任务，1s tick，触发即走既有伪关机链 `fake_shutdown_enter`）**：① 息屏且暂停超时（`CONFIG_PAUSE_AUTO_SHUTDOWN_MIN`，默认 10 分钟）；② 电池电压**持续**低于 3.2V（`CONFIG_LOW_BATTERY_SHUTDOWN_SEC`，默认 60 秒，0=关闭；阈值 `BATTERY_CRITICAL_LOW_MV` 与开机拒启共用，见 battery.h）。低电检查与屏幕亮暗/播放状态无关，时间窗口兼作滤波（瞬时压降/ADC 抖动不清零即不触发，恢复立即清零重计）；⚠ 无充电检测，充电态电压被抬高不会误触发
 - ⚠ **"息屏停掉 Core1"（esp_cpu_stall，`CONFIG_SCREEN_OFF_STOP_CORE1`）已实测失败，默认关闭**：ESP32-S3 上长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态——被停核若恰在 PSRAM 总线事务上被冻结，另一核访问 PSRAM 永久等待 → INT WDT 超时（Guru Meditation "Interrupt wdt timeout on CPUx"，PC 停在解码等访问 PSRAM 的代码）。esp_cpu_stall 只适合瞬时跨核操作。代码保留供参考，**勿再开启**；真正的进一步省电方向：暂停/停止时 light sleep 或走既有伪关机
 
 ### 关键技术要点与踩坑记录（务必遵守）

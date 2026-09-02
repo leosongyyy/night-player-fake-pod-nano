@@ -28,8 +28,9 @@ static void boot_scan_task(void *arg);
 static void start_scan_btn_cb(lv_event_t *e);
 static void clear_scan_data_btn_cb(lv_event_t *e);
 
-/* 开机最低电池电压：低于此值拒绝启动（单位 mV） */
-#define BOOT_MIN_BATTERY_MV 3200u
+/* 开机最低电池电压门槛：直接引用 battery.h 的公共临界低电压常量
+   （BATTERY_CRITICAL_LOW_MV，3.2V）——与运行中低电自动伪关机（power_service）
+   共用同一阈值，改动只在 battery.h 一处。 */
 
 /* 扫描进度界面刷新周期（ms） */
 #define BOOT_PROGRESS_TIMER_MS 300u
@@ -392,9 +393,9 @@ void boot_flow_run(void)
 {
     /* 1. 电池电压检查：低于阈值拒绝启动 */
     float vbat = battery_read_voltage_mv();
-    if (vbat >= 0 && vbat < (float)BOOT_MIN_BATTERY_MV) {
+    if (vbat >= 0 && vbat < (float)BATTERY_CRITICAL_LOW_MV) {
         ESP_LOGW(TAG, "battery too low (%.0f mV < %u mV), refuse to boot",
-                 (double)vbat, BOOT_MIN_BATTERY_MV);
+                 (double)vbat, BATTERY_CRITICAL_LOW_MV);
         boot_show_low_battery();
         return;
     }

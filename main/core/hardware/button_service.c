@@ -46,7 +46,7 @@ static const char *TAG = "button";
    调用链（esp_pm_configure + AMOLED 唤醒重初始化 + lv_refr_now 全屏重刷 +
    停外设）已委托给 deep_worker 大栈任务（见 core/utils/deep_worker.h），
    本任务只做浅投递 + 等待完成，实测栈高水位峰值约 2KB（历史 3KB 爆栈是
-   因为直接内跑 screen_sleep_exit 深链，勿回到那种写法），4KB 留足余量。
+   因为直接内跑 power_service 亮屏深链，勿回到那种写法），4KB 留足余量。
    轮询周期 5ms、去抖 3 采样，4KB 栈的常驻开销小。 */
 #define BUTTON_TASK_STACK   (4 * 1024)
 #define BUTTON_TASK_PRIO    4        /* 高于 LVGL(2)/性能监视(2)，低于音频(8) */

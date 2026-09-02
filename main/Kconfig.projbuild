@@ -13,7 +13,7 @@ menu "FakePodNanoNightPlayer 应用配置"
         help
             启用后启动 mem_monitor 后台任务，每 2 秒在串口打印：默认堆/内部
             RAM 剩余及增量、双核 CPU 使用率、当前与空闲期 CPU 频率（用于
-            验证息屏降频生效，见 core/utils/screen_sleep）。依赖
+            验证息屏降频生效，见 core/utils/power_service）。依赖
             CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS（已在 sdkconfig.defaults 开启）。
             关闭可减小固件并省掉监视任务占用的内存（约 5KB 任务栈）。
 
@@ -62,6 +62,34 @@ menu "FakePodNanoNightPlayer 应用配置"
             屏幕随时会操作）。伪关机前会记录播放状态（config_store 的
             was_playing），开机按记忆恢复：关机前在播放 → 开机自动播放；
             关机前已暂停 → 开机停在暂停态不自动出声。0 = 关闭该功能。
+
+    config LOW_BATTERY_SHUTDOWN_SEC
+        int "电池电压持续过低自动伪关机（秒，0=关闭）"
+        default 60
+        range 0 600
+        help
+            运行中（无论屏幕亮暗、是否播放）电池电压**持续**低于临界值
+            3.2V（BATTERY_CRITICAL_LOW_MV，与开机拒启同一阈值，见
+            core/hardware/battery.h）超过该时长，自动伪关机防过放
+            （deepsleep，B 键唤醒重启）。时间窗口兼作滤波，滤除播放瞬时
+            大电流压降与 ADC 抖动；期间任一采样恢复即清零重计。
+            0 = 关闭该功能。⚠ 本固件暂无充电检测：充电器接入时电压被抬高
+            （高于 3.2V）不会触发；若后续接入充电状态检测，应排除充电态。
+
+    config BATTERY_LOGGER_MIN
+        int "电池电压采样日志间隔（分钟，0=关闭）"
+        default 5
+        range 0 120
+        help
+            测试/功耗测量用：启用后独立任务每 N 分钟唤醒一次，在 10 秒
+            窗口内以 1s 间隔读取 10 次电池电压，去掉一个最高/最低值后求
+            平均，把"开机运行时长时间戳 + 平均电压"追加写入 SD 卡
+            /sdcard/battery_log.txt（CSV 文本，追加累积不新建；每次开机
+            先写一行会话分隔行，文件为空时自动写表头）。
+            ⚠ 设备无 RTC/网络时钟，时间戳是开机以来的运行时长（非墙上
+            时间），用于单次放电/功耗曲线分析；每 5 分钟仅写几十字节，
+            对功耗测量影响可忽略。测试完建议设 0 关闭，避免持续占用
+            SD 空间。依赖 SD 卡挂载，未插卡时任务跳过写入。
 
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页末尾）"

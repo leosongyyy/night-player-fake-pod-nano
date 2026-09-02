@@ -18,7 +18,7 @@ typedef void (*deep_worker_fn_t)(void *arg);
  *
  * 背景：息屏/亮屏（esp_pm_configure + AMOLED 重新初始化 + lv_refr_now
  * 全屏重刷）与伪关机（停外设 + LVGL 提示渲染 + deepsleep）的调用链很深，
- * 历史上导致 button/screen_sleep/fake_shutdown 等任务各自加大栈（8KB），
+ * 历史上导致 button/power_service/fake_shutdown 等任务各自加大栈（8KB），
  * 内部 RAM 被多份重复大栈吃紧。本模块把这些深链收敛到唯一一个常驻大栈
  * 任务：业务任务调用 deep_worker_call() 只做"投递 + 等待完成"（浅调用），
  * 自身栈可按需收紧。

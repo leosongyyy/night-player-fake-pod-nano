@@ -6,7 +6,7 @@
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/fake_shutdown.h"
-#include "core/utils/screen_sleep.h"
+#include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
 
 #include "esp_log.h"
@@ -66,9 +66,9 @@ static void on_button_event(button_event_t event, void *ctx)
     }
 
     /* 任何按键事件都算一次用户活动（刷新自动息屏计时） */
-    screen_sleep_note_activity();
+    power_service_note_activity();
 
-    const bool sleeping = screen_sleep_is_sleeping();
+    const bool sleeping = power_service_is_screen_off();
     switch (event) {
     case BUTTON_EVENT_A_SHORT:
         if (sleeping) {
@@ -95,7 +95,7 @@ static void on_button_event(button_event_t event, void *ctx)
         if (sleeping) {
             /* 息屏：先亮屏（恢复屏幕/LVGL/亮度），再走"等待断电"伪关机，
                让用户看到保存/关机提示画面（计划第 6 点要求） */
-            screen_sleep_exit();
+            power_service_screen_on();
         }
         /* A 键（电源键，与 3 秒关机芯片复用）长按：固件先保存配置并停外设，
            定格提示后 deepsleep；继续按住满 3s 即硬件断电（真正关机） */
@@ -113,7 +113,7 @@ static void on_button_event(button_event_t event, void *ctx)
         break;
     case BUTTON_EVENT_BOTH:
         /* 双键同时按下：息屏/亮屏切换（计划第 5 点：双按不再是伪关机） */
-        screen_sleep_toggle();
+        power_service_screen_toggle();
         break;
     default:
         break;

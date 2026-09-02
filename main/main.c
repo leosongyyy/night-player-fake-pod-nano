@@ -19,9 +19,10 @@
 #include "core/hardware/touch.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/battery_logger.h"
 #include "core/utils/deep_worker.h"
 #include "core/utils/performance_monitor.h"
-#include "core/utils/screen_sleep.h"
+#include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
 #include "ui/key_handler.h"
@@ -116,7 +117,7 @@ void app_main(void)
 
     // 深路径执行器（常驻大栈任务，Core0）：息屏/亮屏/伪关机的深调用链
     // （esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷 + 停外设）
-    // 集中到该任务执行，button/screen_sleep 等业务任务只做浅投递（见
+    // 集中到该任务执行，button/power_service 等业务任务只做浅投递（见
     // core/utils/deep_worker.h）。必须在任何投递方（睡眠定时器/息屏/按键）
     // 可能动作之前初始化。
     deep_worker_init();
@@ -139,9 +140,15 @@ void app_main(void)
     // 放在 LVGL 初始化之后，注册 button_service 事件回调。
     key_handler_init();
 
-    // 息屏管理：esp_pm 动态调频（亮屏 240MHz/息屏空闲自动降频）+ 触摸活动
-    // 订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）。需在 LVGL 之后。
-    screen_sleep_init();
+    // 电源服务（power_service）：esp_pm 固定频率（亮屏 240MHz/息屏 80MHz）+
+    // 触摸活动订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）+ 自动关机
+    // 策略（息屏暂停超时 / 电池电压持续过低，见 Kconfig）。需在 LVGL 之后。
+    power_service_init();
+
+    // 电池电压采样日志（测试/功耗测量用，CONFIG_BATTERY_LOGGER_MIN 控制，
+    // 0=关闭）：独立任务每 N 分钟把"运行时长 + 平均电压"写入 SD 卡。
+    // 需在 sd_card_init 之后（SD 未挂载时任务自行跳过）。
+    battery_logger_init();
 
     // 启动性能监视（内存 + 双核 CPU 使用率），Kconfig CONFIG_PERFORMANCE_MONITOR 控制
 #ifdef CONFIG_PERFORMANCE_MONITOR

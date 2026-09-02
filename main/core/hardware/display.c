@@ -212,8 +212,8 @@ void display_sleep_exit(void)
           扩展命令可能无效，0x11 是 MIPI 标准命令，保证能唤醒；
        2. 再 esp_lcd_panel_init() 重发完整 init（MADCTL/COLMOD + display_init
           的 lcd_init_cmds，含 0x51=0 全黑、0x29 DISPON；不含硬件 reset）。
-          面板 RAM 随之重置为黑——调用方须随后全屏重刷（screen_sleep_exit
-          中 lv_obj_invalidate + lv_refr_now），再按用户配置恢复亮度
+          面板 RAM 随之重置为黑——调用方须随后全屏重刷（power_service 亮屏
+          时 lv_obj_invalidate + lv_refr_now），再按用户配置恢复亮度
           （与开机"全黑启动防白屏"的点亮顺序一致）。 */
     esp_lcd_panel_disp_sleep(s_panel_handle, false);   /* 0x11 SLEEP OUT */
     vTaskDelay(pdMS_TO_TICKS(120));                    /* 规格书恢复时间，不可省 */
