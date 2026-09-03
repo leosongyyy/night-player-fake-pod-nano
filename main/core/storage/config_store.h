@@ -180,6 +180,12 @@ void config_store_set_was_playing(bool playing);
 /** @brief 保存上次播放位置并持久化（由 player_controller 调用） */
 void config_store_set_last_song(uint32_t global, uint32_t pos_s);
 
+/** @brief 清除"上次播放位置"与"随机播放位置"记录（failsafe 界面"重置歌曲位置"
+ *          按钮用）：内存标志置无效并写回 NVS（valid 标志=0），下次开机视为
+ *          无位置记录 → 从第一首顺序播放 / 随机模式重新生成随机起点。
+ *          不清除音量/循环模式等其它用户配置。 */
+void config_store_reset_position(void);
+
 /**
  * @brief 注册配置变更回调（最多 4 个，重复注册会覆盖同名项）
  *

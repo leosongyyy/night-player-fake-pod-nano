@@ -516,6 +516,26 @@ void config_store_set_last_song(uint32_t global, uint32_t pos_s)
     cfg_write_u8(KEY_LAST_VALID, 1);
 }
 
+void config_store_reset_position(void)
+{
+    /* 内存标志全部置"无记录"，下次开机走"从第一首/重新随机"分支。
+       位置类记录无 UI 展示，不通知变更回调 */
+    s_last_valid = false;
+    s_last_global = 0;
+    s_last_pos = 0;
+    s_shuf_pos_valid = false;
+    s_shuf_pos_hi = 0;
+    s_shuf_pos_lo = 0;
+    if (s_nvs == 0) {
+        return;
+    }
+    /* 只把 valid 标志写 0：与 config_store_init 的读取逻辑一致（valid=0 即无
+       记录），无需 erase 键值；保留旧值可在误操作后人工找回，不影响行为 */
+    cfg_write_u8(KEY_LAST_VALID, 0);
+    cfg_write_u8(KEY_SHUFFLE_POS_VAL, 0);
+    ESP_LOGI(TAG, "position reset: last song & shuffle pos cleared");
+}
+
 void config_store_register_cb(config_store_cb_t cb, void *ctx)
 {
     if (cb == NULL || s_cb_count >= CONFIG_STORE_MAX_CB) {

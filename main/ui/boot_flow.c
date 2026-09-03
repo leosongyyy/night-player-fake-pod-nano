@@ -27,6 +27,7 @@ static void boot_progress_timer_cb(lv_timer_t *timer);
 static void boot_scan_task(void *arg);
 static void start_scan_btn_cb(lv_event_t *e);
 static void clear_scan_data_btn_cb(lv_event_t *e);
+static void reset_position_btn_cb(lv_event_t *e);
 
 /* 开机最低电池电压门槛：直接引用 battery.h 的公共临界低电压常量
    （BATTERY_CRITICAL_LOW_MV，3.2V）——与运行中低电自动伪关机（power_service）
@@ -170,21 +171,30 @@ static void boot_show_low_battery(void)
              (double)(vbat < 0 ? 0 : vbat));
 }
 
-/* 2. 未插入 SD 卡：提示 + "清除扫描数据"（failsafe）按钮，停在此屏 */
+/* 2. 未插入 SD 卡：提示 + failsafe 按钮组（重置歌曲位置 / 清除扫描数据），
+      停在此屏。内容整体相对屏幕中心上移（基准偏移 -30），视觉居中偏上，
+      给底部留白（460px 屏去掉标题与两按钮后仍不显拥挤） */
 static void boot_show_no_sd(void)
 {
     s_state = BOOT_ST_NO_SD;
     lv_obj_t *root = boot_root_create();
 
     lv_obj_t *title = boot_make_title(root, LV_SYMBOL_SD_CARD " 未插入 SD 卡");
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -100);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -130);
 
     s_status_label = boot_make_hint(root, "请插入 SD 卡后重启设备");
-    lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -30);
 
-    /* failsafe：清除内部扫描数据（擦除 pldata 头部，使分区无效） */
-    lv_obj_t *btn = boot_make_button(root, "清除扫描数据", clear_scan_data_btn_cb);
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 130);
+    /* failsafe 按钮组（上下排布，避开中央提示文字）：
+       - 重置歌曲位置：清 NVS 里"上次播放歌曲/随机位置"记录 → 下次插卡开机
+         从第一首开始（不恢复可能已损坏/随卡丢失的现场，见
+         config_store_reset_position）
+       - 清除扫描数据：擦除 pldata 头部，使内部扫描数据分区无效 */
+    lv_obj_t *btn_reset = boot_make_button(root, "重置歌曲位置", reset_position_btn_cb);
+    lv_obj_align(btn_reset, LV_ALIGN_CENTER, 0, 55);
+
+    lv_obj_t *btn_clear = boot_make_button(root, "清除扫描数据", clear_scan_data_btn_cb);
+    lv_obj_align(btn_clear, LV_ALIGN_CENTER, 0, 145);
 
     /* 进入 failsafe 界面即把亮度拉满（255）并持久化到 NVS：
        无卡场景可能带着上次的低亮度（甚至全黑）开机，拉满便于看清界面/
@@ -382,6 +392,19 @@ static void clear_scan_data_btn_cb(lv_event_t *e)
     if (s_status_label != NULL) {
         lv_label_set_text(s_status_label,
                           ret == ESP_OK ? "已清除扫描数据" : "清除失败，请重试");
+    }
+}
+
+/* "重置歌曲位置"（failsafe）：清掉 NVS 里上次播放歌曲与随机播放位置记录，
+   供"换卡/歌曲缺失/上次现场引用了损坏文件"等场景从干净状态重新开始；
+   下次插卡开机会从第一首播放（随机模式重新生成起点），界面停留并提示 */
+static void reset_position_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "reset position button pressed");
+    config_store_reset_position();
+    if (s_status_label != NULL) {
+        lv_label_set_text(s_status_label, "已重置歌曲位置");
     }
 }
 
