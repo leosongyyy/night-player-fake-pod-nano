@@ -50,15 +50,31 @@ static void main_tabs_sync(void)
              (unsigned)act, is_list_page ? "on" : "off");
 }
 
-/* 程序化切换到指定页面（无动画直接切换，等同 ViewPager 瞬移）。
-   手指滑动翻页的惯性/回弹动画不受影响（由 LVGL 手势控制）。 */
-void main_ui_switch_tab(uint8_t tab)
+/* 程序化切页核心：anim 决定是否带横向滚动动画。tab_cur 在 set_act 内立即
+   更新为目标页（动画期间即已切换），lv_tabview_set_act 编程切换不触发
+   VALUE_CHANGED（见 main_tabs_sync 注释），因此两种模式都需手动同步
+   状态栏/跑马灯。 */
+static void main_ui_switch_tab_inner(uint8_t tab, bool anim)
 {
     if (s_tv == NULL) {
         return;
     }
-    lv_tabview_set_act(s_tv, tab, LV_ANIM_OFF);
+    lv_tabview_set_act(s_tv, tab, anim ? LV_ANIM_ON : LV_ANIM_OFF);
     main_tabs_sync();   /* set_act 不发 VALUE_CHANGED，需手动同步状态栏/跑马灯 */
+}
+
+/* 程序化切换到指定页面（无动画直接切换，等同 ViewPager 瞬移）。
+   手指滑动翻页的惯性/回弹动画不受影响（由 LVGL 手势控制）。 */
+void main_ui_switch_tab(uint8_t tab)
+{
+    main_ui_switch_tab_inner(tab, false);
+}
+
+/* 程序化切换到指定页面（带动画，等同 ViewPager 翻页）。
+   用户可感知的翻页操作（点击当前歌曲跳正在播放页、点击目录进歌曲列表）使用。 */
+void main_ui_switch_tab_anim(uint8_t tab)
+{
+    main_ui_switch_tab_inner(tab, true);
 }
 
 /* 获取当前页面下标（供状态栏等晚于主界面创建的部分初始化时同步） */

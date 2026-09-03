@@ -27,10 +27,21 @@ extern "C" {
 void main_ui_create(void);
 
 /**
- * @brief 切换到指定页面（带动画，等同 ViewPager 翻页）
+ * @brief 切换到指定页面（无动画直接瞬移，等同 ViewPager 瞬移）
  * @param tab tab 下标（0~3，越界自动收敛）
+ *
+ * 供开机定位等不需要过渡动画的编程切换使用。
  */
 void main_ui_switch_tab(uint8_t tab);
+
+/**
+ * @brief 切换到指定页面（带横向滚动动画，等同 ViewPager 翻页）
+ * @param tab tab 下标（0~3，越界自动收敛）
+ *
+ * 供"点击当前播放歌曲→跳转正在播放页"、"点击目录→进入歌曲列表"等
+ * 用户可见的翻页操作使用。
+ */
+void main_ui_switch_tab_anim(uint8_t tab);
 
 /**
  * @brief 获取当前页面下标

@@ -10,6 +10,7 @@
 #include "core/ui/virtual_list.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/list_common.h"
+#include "ui/main_ui.h"
 #include "ui/player_ticker.h"
 
 #include "esp_log.h"
@@ -57,11 +58,31 @@ static void song_bind_cb(lv_obj_t *cell, uint32_t index,
         is_cur ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
 }
 
-/* 选中回调：点击歌曲 → 直接播放该曲（全局下标） */
+/* 选中回调：点击歌曲 →
+   - 点击的是**当前曲目**（正在播放/已暂停）：不重启播放，若已暂停先恢复
+     播放，再带动画跳转到正在播放页（用户想回看封面/进度等）；
+   - 点击其它歌曲：直接播放该曲（全局下标）。 */
 static void song_selected_cb(uint32_t index, void *user_data)
 {
     uint32_t song_start = (uint32_t)(uintptr_t)user_data;
     uint32_t global = song_start + index;
+
+    player_controller_status_t st;
+    player_controller_get_status(&st);
+    if (st.has_song && st.cur_global == global) {
+        /* 点的是当前曲目：恢复播放（暂停中 resume，未播则从头播当前曲），
+           随后带动画跳转到正在播放页 */
+        ESP_LOGI(TAG, "tap current song #%u (state=%d) -> now playing%s",
+                 (unsigned)global, (int)st.playing,
+                 st.playing != MP3_STATE_PLAYING ? " (start play)" : "");
+        if (st.playing != MP3_STATE_PLAYING) {
+            player_controller_play();
+        }
+        sleep_timer_note_activity();   /* 点击同样属于"用户动作"：清醒感知加时 */
+        main_ui_switch_tab_anim(2);    /* 正在播放页（tab 2） */
+        return;
+    }
+
     ESP_LOGI(TAG, "play song: index=%u global=%u",
              (unsigned)index, (unsigned)global);
     player_controller_play_song(global);

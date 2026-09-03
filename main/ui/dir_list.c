@@ -64,7 +64,7 @@ static void dir_selected_cb(uint32_t index, void *user_data)
     (void)user_data;
     ESP_LOGI(TAG, "dir selected: %u", (unsigned)index);
     playlist_page_show_dir(index);
-    main_ui_switch_tab(1);   /* 切到播放列表页（tab 1） */
+    main_ui_switch_tab_anim(1);   /* 带动画切到播放列表页（tab 1） */
 }
 
 /* 目录变化刷新（共享 player_ticker 周期调用）：正在播放的目录切换后，把

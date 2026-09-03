@@ -281,13 +281,13 @@ static void cover_click_cb(lv_event_t *e)
     np_set_ui_visible(!s_ui_visible);
 }
 
-/* 点击标题栏：播放列表更新为正在播放的目录，并跳转到播放列表页 */
+/* 点击标题栏：播放列表更新为正在播放的目录，并带动画跳转到播放列表页 */
 static void title_bar_click_cb(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "title bar clicked, go to playlist");
     playlist_page_show_current();
-    main_ui_switch_tab(1);
+    main_ui_switch_tab_anim(1);
 }
 
 /* 控制按钮 */
