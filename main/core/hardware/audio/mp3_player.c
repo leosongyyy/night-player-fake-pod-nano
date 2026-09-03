@@ -1,5 +1,6 @@
 #include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/audio/audio.h"
+#include "core/hardware/audio/eq.h"
 
 #include <fcntl.h>
 #include <stdbool.h>
@@ -721,6 +722,12 @@ esp_err_t mp3_player_play(const char *path)
        audio_set_replay_gain），旧曲停止是异步的，停止等待期间旧曲残留
        PCM 仍会被送进 I2S，造成"旧歌内容用新歌增益播放"的音量突变 */
     audio_set_replay_gain(s_pending_gain);
+
+    /* 同一静止点重置 EQ 滤波器状态（参数不变，仅清历史）：旧曲残留的
+       滤波状态（x1/x2/y1/y2）不带入新歌，避免衔接处瞬态；
+       EQ 系数在首帧解码出采样率后由 audio_pcm_start → audio_configure_fs
+       按需重算（eq_notify_sample_rate），此处无需处理采样率 */
+    eq_reset_state();
 
     /* 重建暂停信号量：mp3_player_stop() 会 give 一次以唤醒暂停中的任务，
        播放中停止时该信号量会残留，删除重建避免新任务暂停时被立即误唤醒 */

@@ -1,7 +1,10 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#include "core/hardware/audio/eq.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +38,10 @@ extern "C" {
  *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
+ *   - EQ 预设选择 eq_name + eq_data（.eq 文件名 + 解析参数，无 EQ 时名字为空：
+ *     用户在播放设置页第 7 格选择 /sdcard/.musicfx 下的 EQ 文件后，把解析
+ *     得到的参数数据一并存入 NVS，开机直接恢复 DSP 状态，不依赖 SD 卡上
+ *     的 .eq 文件仍存在，见 FUTURE_PLAN 第 10 点 / core/hardware/audio/eq）
  *   - 上次播放位置（歌曲全局下标 + 秒），由 player_controller 在暂停/切歌/
  *     关机时保存，开机读取跳转恢复
  *
@@ -131,6 +138,28 @@ bool config_store_get_was_playing(void);
  * @return true 有记录（NVS 中存在有效的上次播放记录）；false 无记录
  */
 bool config_store_get_last_song(uint32_t *global, uint32_t *pos_s);
+
+/**
+ * @brief 读取当前 EQ 预设选择（.eq 文件名 + 解析参数，NVS 持久化）
+ *
+ * 无 EQ 记录时返回 false，name 置空串。对应 FUTURE_PLAN 第 10 点：
+ * 参数数据随文件名一并入 NVS，开机恢复 DSP 无需再读 SD 卡。
+ *
+ * @param[out] name        .eq 文件名缓冲（EQ_FILE_NAME_MAX 字节；可 NULL）
+ * @param[in]  name_size   name 缓冲大小
+ * @param[out] preset_out  解析参数（可 NULL）；有记录时填充
+ * @return true 当前选择了 EQ；false 无 EQ（name 置空）
+ */
+bool config_store_get_eq(char *name, size_t name_size, eq_preset_t *preset_out);
+
+/**
+ * @brief 设置当前 EQ 预设选择并持久化（触发变更回调，设置页 EQ 格同步）
+ *
+ * @param name   .eq 文件名（不含路径，长度须 < EQ_FILE_NAME_MAX）
+ * @param preset 解析参数（band_count 有效）；name 或 preset 为 NULL 时清除
+ *               （无 EQ）
+ */
+void config_store_set_eq(const char *name, const eq_preset_t *preset);
 
 /* ---------- 写入（更新内存 + 写 NVS + 通知变更回调） ---------- */
 

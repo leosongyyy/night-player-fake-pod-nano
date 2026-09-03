@@ -1,5 +1,8 @@
 #include "core/storage/config_store.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -26,6 +29,8 @@ static const char *TAG = "config_store";
 #define KEY_LAST_GLOBAL      "last_glob"
 #define KEY_LAST_POS         "last_pos"
 #define KEY_LAST_VALID       "last_valid"
+#define KEY_EQ_NAME          "eqname"
+#define KEY_EQ_DATA          "eqdata"
 
 /* 变更回调容量（设置页 + 通知栏等，够用） */
 #define CONFIG_STORE_MAX_CB  4
@@ -57,6 +62,12 @@ static bool     s_was_playing = true;
 static uint32_t s_last_global = 0;
 static uint32_t s_last_pos    = 0;
 static bool     s_last_valid  = false;
+
+/* EQ 预设选择（FUTURE_PLAN 第 10 点）：文件名 + 解析参数，开机直接恢复
+   DSP 状态（不依赖 SD 卡上的 .eq 文件仍存在）；无 EQ 时 s_eq_name[0] = 0 */
+static char        s_eq_name[EQ_FILE_NAME_MAX] = "";
+static bool        s_eq_data_valid = false;
+static eq_preset_t s_eq_data;   /* 仅在 s_eq_data_valid 时有意义 */
 
 /* 变更回调表 */
 typedef struct {
@@ -102,6 +113,53 @@ static void cfg_write_u32(const char *key, uint32_t value)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
     }
+}
+
+/* 字符串/blob 写辅助（EQ 预设选择用）；key 不存在时 erase 返回
+   ESP_ERR_NVS_NOT_FOUND，属正常情况，忽略 */
+static void cfg_write_str(const char *key, const char *value)
+{
+    if (s_nvs == 0) {
+        return;
+    }
+    esp_err_t err = nvs_set_str(s_nvs, key, value);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_str(%s) failed: %s", key, esp_err_to_name(err));
+        return;
+    }
+    err = nvs_commit(s_nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
+    }
+}
+
+static void cfg_write_blob(const char *key, const void *data, size_t len)
+{
+    if (s_nvs == 0) {
+        return;
+    }
+    esp_err_t err = nvs_set_blob(s_nvs, key, data, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob(%s) failed: %s", key, esp_err_to_name(err));
+        return;
+    }
+    err = nvs_commit(s_nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
+    }
+}
+
+static void cfg_erase_key(const char *key)
+{
+    if (s_nvs == 0) {
+        return;
+    }
+    esp_err_t err = nvs_erase_key(s_nvs, key);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "nvs_erase_key(%s) failed: %s", key, esp_err_to_name(err));
+        return;
+    }
+    nvs_commit(s_nvs);
 }
 
 /* 通知所有已注册的变更回调（在调用者线程上下文同步执行） */
@@ -254,10 +312,28 @@ void config_store_init(void)
         }
     }
 
+    /* EQ 预设选择：文件名 + 参数 blob 成对读取；只有一边（半写/手动改坏）
+       视为无记录（后续用户重选会覆盖，不阻塞启动） */
+    s_eq_name[0] = '\0';
+    s_eq_data_valid = false;
+    size_t len = EQ_FILE_NAME_MAX;
+    if (nvs_get_str(s_nvs, KEY_EQ_NAME, s_eq_name, &len) == ESP_OK &&
+        s_eq_name[0] != '\0') {
+        size_t dlen = sizeof(s_eq_data);
+        if (nvs_get_blob(s_nvs, KEY_EQ_DATA, &s_eq_data, &dlen) == ESP_OK &&
+            dlen == sizeof(s_eq_data) && s_eq_data.band_count <= EQ_MAX_BANDS) {
+            s_eq_data_valid = true;
+        } else {
+            s_eq_name[0] = '\0';   /* 数据缺失/长度不符：视为无 EQ */
+        }
+    } else {
+        s_eq_name[0] = '\0';
+    }
+
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
                   "sleep_def=%u min def_on=%d awake=%d screen_off=%u s "
-                  "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s",
+                  "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s eq=%s(%u bands)",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
              (int)s_shuffle, (unsigned)s_sleep_def, (int)s_sleep_def_on,
              (int)s_sleep_awake, (unsigned)s_screen_off,
@@ -266,7 +342,9 @@ void config_store_init(void)
              (int)s_was_playing,
              s_last_valid ? "yes" : "no",
              (unsigned)s_last_global, (unsigned)s_last_pos,
-             s_shuf_pos_valid ? "yes" : "no");
+             s_shuf_pos_valid ? "yes" : "no",
+             s_eq_data_valid ? s_eq_name : "none",
+             s_eq_data_valid ? (unsigned)s_eq_data.band_count : 0u);
 }
 
 uint8_t config_store_get_volume(void)
@@ -514,6 +592,60 @@ void config_store_set_last_song(uint32_t global, uint32_t pos_s)
     cfg_write_u32(KEY_LAST_GLOBAL, global);
     cfg_write_u32(KEY_LAST_POS, pos_s);
     cfg_write_u8(KEY_LAST_VALID, 1);
+}
+
+bool config_store_get_eq(char *name, size_t name_size, eq_preset_t *preset_out)
+{
+    if (name != NULL && name_size > 0) {
+        snprintf(name, name_size, "%s", s_eq_name);
+    }
+    if (preset_out != NULL) {
+        if (s_eq_data_valid) {
+            *preset_out = s_eq_data;
+        } else {
+            memset(preset_out, 0, sizeof(*preset_out));
+        }
+    }
+    return s_eq_data_valid;
+}
+
+void config_store_set_eq(const char *name, const eq_preset_t *preset)
+{
+    /* 无 EQ 语义：name 空/NULL 或预设为空（band_count=0）→ 清除记录 */
+    if (preset == NULL || preset->band_count == 0 || name == NULL ||
+        name[0] == '\0') {
+        bool had = s_eq_data_valid;
+        s_eq_name[0] = '\0';
+        s_eq_data_valid = false;
+        memset(&s_eq_data, 0, sizeof(s_eq_data));
+        cfg_erase_key(KEY_EQ_NAME);
+        cfg_erase_key(KEY_EQ_DATA);
+        if (had) {
+            ESP_LOGI(TAG, "EQ cleared");
+            config_notify();
+        }
+        return;
+    }
+
+    /* 截断超长文件名（防御：UI 扫描已保证 ≤ EQ_FILE_NAME_MAX-1） */
+    char name_buf[EQ_FILE_NAME_MAX];
+    snprintf(name_buf, sizeof(name_buf), "%s", name);
+
+    bool changed = !s_eq_data_valid ||
+                   strcmp(s_eq_name, name_buf) != 0 ||
+                   memcmp(&s_eq_data, preset, sizeof(s_eq_data)) != 0;
+
+    snprintf(s_eq_name, sizeof(s_eq_name), "%s", name_buf);
+    s_eq_data = *preset;
+    s_eq_data_valid = true;
+
+    cfg_write_str(KEY_EQ_NAME, s_eq_name);
+    cfg_write_blob(KEY_EQ_DATA, &s_eq_data, sizeof(s_eq_data));
+    if (changed) {
+        ESP_LOGI(TAG, "EQ set: %s (%u bands)", s_eq_name,
+                 (unsigned)s_eq_data.band_count);
+        config_notify();
+    }
 }
 
 void config_store_reset_position(void)

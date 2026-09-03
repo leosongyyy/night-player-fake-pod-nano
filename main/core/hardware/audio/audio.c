@@ -1,6 +1,8 @@
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/audio/cs43131.h"
+#include "core/hardware/audio/eq.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "driver/i2s_std.h"
@@ -40,16 +42,41 @@ static bool i2s_enabled = false;   /* I2S 通道是否已 enable（避免重复 
 static audio_fs_t cur_fs = AUDIO_FS_48000;
 static uint8_t volume_level = AUDIO_VOL_LEVEL_DEFAULT;
 
-/* 回放增益（16.16 定点线性系数，65536 = 0dB）：由上层按歌曲元数据设置，
-   应用于 audio_pcm_write 的 int16→int32 转换 */
+/* 回放增益（16.16 定点线性系数，65536 = 0dB）：由上层按歌曲元数据设置。
+   uint32 原子读（32bit 平台），consumer 每块读一次转 float 使用 */
 static uint32_t replay_gain = AUDIO_REPLAY_GAIN_UNITY;
 
 /* 静音冲刷缓冲：覆盖整条 I2S DMA 链（6×240×2 个 32bit 样本 = 11520 字节），
    放静态区（BSS），不占播放任务栈 */
 static int32_t silence_flush[I2S_DMA_FLUSH_SAMPLES];
 
-/* PCM 转换缓冲：int16 交织 → int32 左对齐，分块转换（512 帧 × 2ch × 4B = 4KB） */
+/* PCM 转换缓冲：float 处理结果 → int32 左对齐，分块转换（512 帧 × 2ch × 4B = 4KB） */
 static int32_t pcm_buf[AUDIO_BUF_FRAMES * 2];
+
+/* EQ 运行时（BSS，全零 = 直通且 ver=0 与内部一致）：consumer 侧持续持有，
+   滤波器状态在块间演化延续（勿让任何"每块复制"覆盖它，否则周期瞬态）；
+   eq_snapshot 仅在参数版本变化时整体重载（见 eq.h） */
+static eq_runtime_t s_eq_rt;
+
+/* float 归一化常量：int16 满幅 32768 → ±1.0 */
+#define AUDIO_INV_32768    (1.0f / 32768.0f)
+
+/* 输出缩放：归一化样本 × 2^31 即 16bit 内容左移 16 位后的 int32 域
+   （x = ±1.0 → ±0x80000000，与旧整数路径 s×q16 满幅语义一致） */
+#define AUDIO_S32_SCALE    2147483648.0f   /* 2^31，float 可精确表示 */
+
+/* float → int32 左对齐样本：先 Clamp 到 int32 值域再转换（越界 float→int
+   转换在 C 中是未定义行为；Clamp 同时防止 EQ/增益叠加超幅回绕爆音） */
+static inline int32_t audio_f32_to_s32(float v)
+{
+    if (v >= AUDIO_S32_SCALE) {
+        return INT32_MAX;
+    }
+    if (v <= -AUDIO_S32_SCALE) {
+        return INT32_MIN;
+    }
+    return (int32_t)v;
+}
 
 /* ------------------------------------------------------------------ */
 /* I2S 初始化                                                          */
@@ -157,6 +184,10 @@ static esp_err_t audio_configure_fs(audio_fs_t fs)
 
     cs43131_set_mute(false);
 
+    /* EQ 滤波器系数依赖采样率：采样率变化时按当前激活预设重算（调用点在
+       consumer 启动前，无样本处理并发） */
+    eq_notify_sample_rate((uint32_t)fs);
+
     cur_fs = fs;
     return ESP_OK;
 }
@@ -176,22 +207,29 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* 回放增益 float（uint32 原子读）：q16 → 线性（注意无符号增益 × 有符号
+       样本的符号转换统一在 float 域完成，见 audio.h 处理链路说明） */
+    const float gain_f = (float)replay_gain * (1.0f / 65536.0f);
+
     const int16_t *src = samples;
     size_t remain = frames;
     while (remain > 0) {
         size_t chunk = remain > AUDIO_BUF_FRAMES ? AUDIO_BUF_FRAMES : remain;
-        /* 16bit 交织 → 32bit slot 左对齐（MSB 对齐，匹配 CS43131 32bit slot）。
-           ⚠ 回放增益直接在 32bit 域一步完成：int16 → int32 左对齐本身就是
-           ×65536（<<16），增益 g（16.16 定点）与之合成后等于样本 ×g，
-           无需（也不允许）先截回 int16 再左移——截回会丢失增益<1 时低
-           16 位的小数精度，且增益>1 时截回会削成方波。int64 中间量防
-           int32 乘法溢出 UB；增益>1 导致的 32bit 饱和/回绕不做钳位
-           （元数据增益以 ≤0dB 为主，正常音量不会溢出） */
+        /* EQ 快照对齐（版本一致时零拷贝）：保证本块使用一致参数；滤波器
+           状态在 s_eq_rt 内跨块延续（eq_apply/切歌等参数版本变化时才会
+           整体重载并清零状态） */
+        eq_snapshot(&s_eq_rt);
+
+        /* 统一浮点路径（EQ 关闭时 band_count=0，eq_process_sample 直通）：
+           int16 → float 归一化 → EQ（预增益+级联）→ ×回放增益 → Clamp →
+           int32 左对齐。EQ/增益叠加超幅的样本在此被 Clamp 而非回绕 */
         for (size_t i = 0; i < chunk; i++) {
-            int32_t l = (int32_t)((int64_t)src[2 * i] * (int64_t)replay_gain);
-            int32_t r = (int32_t)((int64_t)src[2 * i + 1] * (int64_t)replay_gain);
-            pcm_buf[2 * i]     = l;
-            pcm_buf[2 * i + 1] = r;
+            float xl = eq_process_sample(&s_eq_rt, 0,
+                                         (float)src[2 * i] * AUDIO_INV_32768);
+            float xr = eq_process_sample(&s_eq_rt, 1,
+                                         (float)src[2 * i + 1] * AUDIO_INV_32768);
+            pcm_buf[2 * i]     = audio_f32_to_s32(xl * gain_f * AUDIO_S32_SCALE);
+            pcm_buf[2 * i + 1] = audio_f32_to_s32(xr * gain_f * AUDIO_S32_SCALE);
         }
         size_t bytes = chunk * 2 * sizeof(int32_t);
         size_t written = 0;

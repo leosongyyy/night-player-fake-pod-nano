@@ -1,10 +1,12 @@
 #include "ui/settings_page.h"
 
 #include "core/fonts/system_font.h"
+#include "core/hardware/audio/eq.h"
 #include "core/hardware/display.h"
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/utils/sleep_timer.h"
+#include "ui/eq_popup.h"
 #include "ui/list_common.h"
 #include "ui/toast.h"
 
@@ -40,6 +42,10 @@ static lv_obj_t *s_loop_status   = NULL;   /* 播放模式文字（当前循环�
 static lv_obj_t *s_shuffle_icon  = NULL;   /* 顺序/随机图标 */
 static lv_obj_t *s_shuffle_status = NULL;  /* 顺序播放/随机播放 */
 static lv_obj_t *s_sleep_status  = NULL;   /* 睡眠定时：OFF / 剩余 MM:SS */
+static lv_obj_t *s_eq_status     = NULL;   /* EQ：当前 .eq 文件名 / 无 EQ */
+
+/* 本页 tab 对象（EQ 弹窗挂载锚点，点击回调使用） */
+static lv_obj_t *s_settings_page = NULL;
 
 /* 上次显示的剩余秒数：文本未变时跳过刷新，避免每秒无谓重绘 */
 static uint32_t s_sleep_last_s = 0;
@@ -112,6 +118,21 @@ static void settings_refresh_sleep(void)
     }
 }
 
+/* EQ 状态文字：有生效 EQ 显示文件名，否则"无 EQ"（config_store 为数据源，
+   选择弹窗应用后经变更回调同步到这里） */
+static void settings_refresh_eq(void)
+{
+    if (s_eq_status == NULL) {
+        return;
+    }
+    char name[EQ_FILE_NAME_MAX];
+    if (config_store_get_eq(name, sizeof(name), NULL)) {
+        lv_label_set_text(s_eq_status, name);
+    } else {
+        lv_label_set_text(s_eq_status, "无 EQ");
+    }
+}
+
 /* 自动息屏超时（config_store 配置）：不在此页展示，后续放独立的不常用
    设置页（见 FUTURE_PLAN 第 5 点），此处仅保留配置存取。 */
 
@@ -122,6 +143,7 @@ static void settings_config_changed_cb(void *ctx)
     settings_refresh_loop();
     settings_refresh_shuffle();
     settings_refresh_sleep();
+    settings_refresh_eq();
 }
 
 /* 每秒刷新睡眠剩余时间 */
@@ -225,6 +247,16 @@ static void sleep_cell_cb(lv_event_t *e)
     }
 }
 
+/* EQ 格子：点击打开预设选择弹窗（无 EQ + 扫描 .musicfx 的 .eq 文件）。
+   选择/解析/Toast 反馈均在弹窗模块内完成（见 ui/eq_popup.c） */
+static void eq_cell_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    eq_popup_toggle(s_settings_page);
+}
+
 /* ------------------------------------------------------------------ */
 /* 格子构建辅助                                                        */
 /* ------------------------------------------------------------------ */
@@ -284,6 +316,7 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
 {
     lv_obj_t *page = lv_tabview_add_tab(tv, "");
     ui_page_style(page);
+    s_settings_page = page;
 
     /* 九宫格容器：3 列 × 3 行 flex 换行。
        内容区 460×460，顶部让出状态栏（UI_STATUS_BAR_H）再留 24 边距，
@@ -334,9 +367,21 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     lv_obj_add_event_cb(sleep_cell, sleep_cell_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(sleep_cell, sleep_cell_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* 其余 6 格：预留空位（保持九宫格结构，无内容无交互；
-       自动息屏超时设置项后续放独立的不常用设置页，见 FUTURE_PLAN 第 5 点） */
-    for (int i = 0; i < 6; i++) {
+    /* 格子 4~6：预留空位 */
+    for (int i = 0; i < 3; i++) {
+        settings_cell_create(grid);
+    }
+
+    /* 格子 7（左下角）：EQ 预设选择（FUTURE_PLAN 第 10 点）。
+       图标固定 "EQ" 字样；点击弹出选择列表（无 EQ / 扫描 .musicfx） */
+    lv_obj_t *eq_cell = settings_cell_create(grid);
+    settings_icon_label_create(eq_cell, "EQ");
+    s_eq_status = settings_status_label_create(eq_cell, false);
+    settings_refresh_eq();
+    lv_obj_add_event_cb(eq_cell, eq_cell_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 格子 8~9：预留空位 */
+    for (int i = 0; i < 2; i++) {
         settings_cell_create(grid);
     }
 
@@ -346,6 +391,6 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     /* 订阅配置变更：其它入口修改配置（如通知栏亮度）时同步本页显示 */
     config_store_register_cb(settings_config_changed_cb, NULL);
 
-    ESP_LOGI(TAG, "settings page created (grid: loop/shuffle/sleep timer)");
+    ESP_LOGI(TAG, "settings page created (grid: loop/shuffle/sleep timer/EQ)");
     return page;
 }

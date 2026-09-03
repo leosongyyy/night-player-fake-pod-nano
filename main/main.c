@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "core/hardware/audio/audio.h"
+#include "core/hardware/audio/eq.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/button_service.h"
 #include "core/hardware/display.h"
@@ -77,6 +78,20 @@ void app_main(void)
 
     /* 应用用户音量配置（NVS 持久化，档位 0~30；audio_init 内部先按默认档初始化 DAC） */
     audio_set_volume_level(config_store_get_volume());
+
+    /* 恢复用户 EQ 预设（NVS 持久化，FUTURE_PLAN 第 10 点）：参数数据已随
+       文件名存入 NVS，直接应用 DSP 状态（未配置采样率时只保存参数，
+       首次播放 audio_pcm_start → audio_configure_fs 时生成滤波器系数）；
+       无记录则 EQ 保持默认关闭 */
+    {
+        char eq_name[EQ_FILE_NAME_MAX];
+        eq_preset_t eq_preset;
+        if (config_store_get_eq(eq_name, sizeof(eq_name), &eq_preset)) {
+            eq_apply(&eq_preset);
+            ESP_LOGI(TAG, "Restore EQ preset: %s (%u bands)", eq_name,
+                     (unsigned)eq_preset.band_count);
+        }
+    }
 
     ESP_LOGI(TAG, "Initialize pldata partition (播放列表数据)");
     if (pldata_init() != ESP_OK) {
