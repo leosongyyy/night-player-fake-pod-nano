@@ -40,7 +40,8 @@ set(MAIN_SRCS
     "ui/player_ticker.c"
     "ui/playlist_page.c"
     "ui/settings_menu.c"
-    "ui/settings_page.c")
+    "ui/settings_page.c"
+    "ui/toast.c")
 
 # 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR
 # 开启时编译；关闭可减小固件并省掉监视任务的内存开销（依赖

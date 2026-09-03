@@ -6,6 +6,7 @@
 #include "core/storage/config_store.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/list_common.h"
+#include "ui/toast.h"
 
 #include <stdio.h>
 
@@ -166,6 +167,7 @@ static void shuffle_cell_cb(lv_event_t *e)
    - 点击：在档位（15/30/45/60/90/120/180/240 分钟）间轮换，并保存为
      默认睡眠时长（NVS）；当前关闭时从第一档（15 分钟）开始；
    - 长按：当前开启 → 关闭；当前关闭 → 切到默认睡眠时长（初始 45 分钟）。
+     长按属"开关"操作，用 Toast 弹反馈（已关闭 / XX分钟后停止播放）。
    ⚠ 长按后松开 LVGL 仍会发送 CLICKED，需用 s_sleep_long_pressed 忽略。 */
 static void sleep_cell_cb(lv_event_t *e)
 {
@@ -182,11 +184,17 @@ static void sleep_cell_cb(lv_event_t *e)
         if (sleep_timer_is_active()) {
             sleep_timer_set(0);                      /* 长按：关闭 */
             ESP_LOGI(TAG, "sleep timer off (long press)");
+            /* Toast 反馈：关闭成功 */
+            ui_toast_show("已关闭睡眠定时器");
         } else {
             uint32_t def = config_store_get_sleep_default_min();
             sleep_timer_set(def);                    /* 长按：切到默认时长 */
             ESP_LOGI(TAG, "sleep timer -> default %u min (long press)",
                      (unsigned)def);
+            /* Toast 反馈：开启成功，提示几分钟后停止播放 */
+            char buf[48];
+            snprintf(buf, sizeof(buf), "%u分钟后停止播放", (unsigned)def);
+            ui_toast_show(buf);
         }
         settings_refresh_sleep();
         return;
