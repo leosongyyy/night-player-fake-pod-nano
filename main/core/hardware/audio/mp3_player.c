@@ -105,10 +105,77 @@ static void mp3_skip_id3v2(FILE *f)
             skip += 10;
         }
         ESP_LOGI(TAG, "skip ID3v2 tag (%u bytes)", (unsigned)skip);
+        /* ⚠ 防御截断/损坏文件：跳过量不得超过文件实际大小。
+           fseek 越过 EOF 本身不报错，但会使调用方按
+           "文件长度 - data_offset" 计算音频长度时下溢成巨大值
+           （损坏文件常见：ID3v2 头声明了远超实际长度的标签）。 */
+        fseek(f, 0, SEEK_END);
+        long fsize = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if ((long)skip > fsize) {
+            ESP_LOGW(TAG, "ID3v2 tag larger than file (%u > %ld B), clamp",
+                     (unsigned)skip, fsize);
+            skip = (uint32_t)(fsize < 0 ? 0 : fsize);
+        }
         fseek(f, (long)skip, SEEK_SET);
     } else {
         fseek(f, 0, SEEK_SET);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* 首帧有效性门禁（防御损坏/伪造文件进入解码器）                          */
+/* ------------------------------------------------------------------ */
+
+/* 校验 b 处是否为结构合法的 MPEG Layer3 帧头；合法返回该帧字节长度，否则 0。
+   版本/表索引约定与 mp3_read_xing_duration 一致：verIdx=3(MPEG1)→ver=0、
+   verIdx=2(MPEG2)→ver=1、verIdx=0(MPEG2.5)→ver=2（samplerateTab 等按此序）。 */
+static uint32_t mp3_frame_header_len(const uint8_t *b)
+{
+    if (b[0] != 0xFF || (b[1] & 0xE0) != 0xE0) {
+        return 0;   /* 无同步字 0xFF Ex */
+    }
+    int verIdx = (b[1] >> 3) & 3;
+    if (verIdx == 1) {
+        return 0;   /* 保留版本 */
+    }
+    int ver = (verIdx == 0) ? 2 : ((verIdx & 1) ? 0 : 1);   /* 0=MPEG1 1=MPEG2 2=MPEG2.5 */
+    int layer = 4 - ((b[1] >> 1) & 3);
+    int brIdx = (b[2] >> 4) & 15;
+    int srIdx = (b[2] >> 2) & 3;
+    if (layer != 3 || brIdx == 0 || brIdx == 15 || srIdx == 3) {
+        return 0;   /* 非 Layer3 / 自由码率 / 保留码率 / 保留采样率 */
+    }
+    int samprate = samplerateTab[ver][srIdx];
+    int bitrate_kbps = bitrateTab[ver][layer - 1][brIdx];
+    if (samprate <= 0 || bitrate_kbps <= 0) {
+        return 0;
+    }
+    /* 帧长：MPEG1(ver=0) Layer3 = 144×码率/采样率，MPEG2/2.5(ver=1/2) = 72×码率/采样率 */
+    uint32_t len = (ver == 0)
+                   ? (144u * (uint32_t)bitrate_kbps * 1000u) / (uint32_t)samprate
+                   : (72u * (uint32_t)bitrate_kbps * 1000u) / (uint32_t)samprate;
+    return len + ((b[2] >> 1) & 1);   /* + padding 位 */
+}
+
+/* 在 buf[0..len) 中寻找"连续两个结构合法帧"的起点，找不到返回 -1。
+   双帧连续性要求可排除随机数据的误判：坏文件（假 ID3v2 头 + 大段 0 +
+   混杂其它文件字节）几乎不可能凑出两帧连续合法。 */
+static int mp3_find_valid_frame_start(const uint8_t *buf, int len)
+{
+    for (int i = 0; i + 4 <= len; i++) {
+        uint32_t flen = mp3_frame_header_len(buf + i);
+        if (flen == 0) {
+            continue;
+        }
+        if (flen > (uint32_t)(len - i)) {
+            continue;   /* 首帧超出探测窗：无法验证第二帧，放弃该候选 */
+        }
+        if (mp3_frame_header_len(buf + i + (int)flen) != 0) {
+            return i;   /* 两帧连续合法：确认真实音频数据起点 */
+        }
+    }
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -147,6 +214,12 @@ static uint32_t mp3_read_xing_duration(const char *path)
         uint32_t size = ((uint32_t)hdr[6] << 21) | ((uint32_t)hdr[7] << 14) |
                         ((uint32_t)hdr[8] << 7) | (uint32_t)hdr[9];
         offset = 10 + size + ((hdr[5] & 0x10) ? 10 : 0);
+        /* 钳制到文件实际大小（防御声明过大的损坏标签） */
+        long fsz = lseek(fd, 0, SEEK_END);
+        lseek(fd, 0, SEEK_SET);
+        if (fsz >= 0 && (long)offset > fsz) {
+            offset = (uint32_t)fsz;
+        }
     }
     lseek(fd, (off_t)offset, SEEK_SET);
 
@@ -362,10 +435,61 @@ static void play_task(void *arg)
     mp3_skip_id3v2(f);
     uint32_t data_offset = (uint32_t)ftell(f);
 
-    /* 音频数据长度（seek 字节映射与 CBR 兜底用） */
+    /* 音频数据长度（seek 字节映射与 CBR 兜底用）。
+       ⚠ 防御截断/损坏文件：跳过量已钳制，此处再防 data_offset 落在 EOF 之后
+       （文件比声明的 ID3v2 标签还短）时 uint32 下溢成巨大值 → 置 0 */
     fseek(f, 0, SEEK_END);
-    uint32_t data_size = (uint32_t)ftell(f) - data_offset;
+    long fend = ftell(f);
+    uint32_t data_size = (fend > (long)data_offset)
+                         ? (uint32_t)(fend - data_offset) : 0;
     fseek(f, (long)data_offset, SEEK_SET);
+
+    /* 标签后没有任何音频数据（整文件就是损坏内容/只剩个假 ID3v2 头）：
+       直接走"自然播完"收尾 → 控制器自动跳下一曲，避免对空数据解码 */
+    if (data_size == 0) {
+        ESP_LOGW(TAG, "no audio data after tag (%s), treat as damaged, skip",
+                 s_path);
+        fclose(f);
+        mp3_player_finish();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* ---- 首帧有效性门禁 ----
+       真实 MP3 在 ID3 之后必然很快出现连续合法的音频帧；损坏文件（假 ID3v2、
+       大段 0 填充、混杂其它文件数据的"伪文件"）几乎不可能凑出两个连续合法帧。
+       在把数据交给 Helix 解码器之前先做结构性验证——实测此类坏曲直接进入
+       解码会在解码出任何有效帧之前就破坏堆内存（UI 侧 LVGL 对象读到被
+       FreeRTOS 栈填充字节 0xA5 覆盖的悬垂内存 → Core0 崩溃），门禁直接跳过
+       该文件可彻底避免坏数据进入解码器。 */
+    {
+        int probe_len = (int)fread(read_buf, 1, sizeof(read_buf), f);
+        if (probe_len <= 0) {
+            ESP_LOGW(TAG, "read probe failed (%s), treat as damaged, skip",
+                     s_path);
+            fclose(f);
+            mp3_player_finish();
+            vTaskDelete(NULL);
+            return;
+        }
+        int frame_off = mp3_find_valid_frame_start(read_buf, probe_len);
+        if (frame_off < 0) {
+            ESP_LOGW(TAG, "no valid mp3 frame at start (%s), damaged, skip",
+                     s_path);
+            fclose(f);
+            mp3_player_finish();
+            vTaskDelete(NULL);
+            return;
+        }
+        if (frame_off > 0) {
+            /* 首帧前有杂散字节（极少见）：从首帧位置开始（时长估算/seek 一致） */
+            ESP_LOGW(TAG, "%d bytes junk before first frame, skip them",
+                     frame_off);
+        }
+        data_offset += (uint32_t)frame_off;
+        data_size -= (uint32_t)frame_off;
+        fseek(f, (long)data_offset, SEEK_SET);   /* 解码循环从首帧处重新读 */
+    }
 
     HMP3Decoder dec = MP3InitDecoder();
     if (dec == NULL) {
@@ -461,6 +585,7 @@ static void play_task(void *arg)
         /* ---- 解码一帧（保存位置，错误时回退跳过假同步字） ---- */
         unsigned char *frame_ptr = read_ptr;
         int frame_bytes = bytes_left;
+        int bytes_before = bytes_left;   /* 记录调用前输入余量，检测"无进展" */
         int err = MP3Decode(dec, &read_ptr, &bytes_left, out_buf, 0);
 
         if (err == ERR_MP3_NONE) {
@@ -508,7 +633,21 @@ static void play_task(void *arg)
         } else if (err == ERR_MP3_INDATA_UNDERFLOW) {
             break;
         } else if (err == ERR_MP3_MAINDATA_UNDERFLOW) {
-            continue;
+            /* 主数据不足：正常时 MP3Decode 已吃掉帧头/side info（bytes_left 减少），
+               继续循环取更多数据即可；但坏文件/假同步字可能出现反复 UNDERFLOW
+               且输入完全不被消耗（bytes_left 不变）→ 无限空转，此时按坏帧处理，
+               跳过该同步字后重新找同步。 */
+            if (bytes_left < bytes_before) {
+                continue;
+            }
+            /* fallthrough：无进展的 UNDERFLOW，同解码失败回退逻辑 */
+            if (frame_bytes > 1) {
+                read_ptr = frame_ptr + 1;
+                bytes_left = frame_bytes - 1;
+            } else {
+                read_ptr = read_buf;
+                bytes_left = 0;
+            }
         } else {
             /* 解码失败（坏帧/假同步字）。MP3Decode 失败时 inbuf/bytesLeft 状态
                不一致：INVALID_FRAMEHEADER 不前进 inbuf（会在同一同步字死循环，

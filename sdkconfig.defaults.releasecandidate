@@ -18,3 +18,10 @@ CONFIG_UI_COVER_FLASH=y
 CONFIG_PERFORMANCE_MONITOR=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_LV_USE_PERF_MONITOR=y
+
+# Comprehensive 堆毒化（与 debug 一致）：越界写在释放时立即报 CORRUPT HEAP 并
+# 打印写入者调用栈；预发布版用于在低内存环境下抓取堆破坏类崩溃（曾用于定位
+# 坏曲播放导致的 LVGL 悬垂对象崩溃）。性能有少量开销，release 版不启用。
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+# CONFIG_HEAP_POISONING_DISABLED is not set
+# CONFIG_HEAP_POISONING_LIGHT is not set

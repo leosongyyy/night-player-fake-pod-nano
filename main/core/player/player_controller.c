@@ -25,6 +25,13 @@ static const char *TAG = "player_ctrl";
 #define PLAYER_TASK_PRIO  5
 #define PLAYER_TASK_CORE  0
 
+/* 连续"无有效音频"自动跳过保护：坏曲（解不出任何音频帧、总时长为 0）自然
+   播完时自动切下一曲；若连续达到上限（如整目录/整卡文件系统损坏）则停止
+   自动续播，避免在只有坏曲的目录里原地无限重播空转（也顺带避免快速切歌
+   风暴反复触发 UI 封面/标签刷新） */
+#define PLAYER_BAD_SKIP_LIMIT 16u
+static volatile uint32_t s_bad_skip_count = 0;   /* 连续坏曲计数（控制器任务上下文读写） */
+
 /* 命令队列长度（控制命令都很短，队列够深避免高频点按丢弃） */
 #define PLAYER_QUEUE_LEN 8
 
@@ -524,7 +531,29 @@ static void player_task(void *arg)
             break;
         }
         case CMD_SET_SHUFFLE: player_cmd_set_shuffle(msg.arg != 0); break;
-        case CMD_FINISHED:   player_play_global(player_auto_next()); player_save_new_song(); break;
+        case CMD_FINISHED:
+            /* 自然播完续播。⚠ 坏曲（解不出首帧 → 总时长 0，几乎立刻"播完"）
+               自动跳过切下一曲；正常文件首帧即会估算出总时长，不会误判。
+               连续坏曲达到上限 → 停止自动续播（整目录/整卡损坏防无限空转），
+               并记"关机前未在播放"，下次开机不再自动播放进坏区。 */
+            if (mp3_player_get_duration_s() == 0) {
+                if (++s_bad_skip_count >= PLAYER_BAD_SKIP_LIMIT) {
+                    s_bad_skip_count = 0;
+                    ESP_LOGE(TAG, "%u 首连续无有效音频，疑似整目录/整卡文件"
+                                  "损坏，停止自动续播",
+                             (unsigned)PLAYER_BAD_SKIP_LIMIT);
+                    config_store_set_was_playing(false);
+                    break;   /* 保持 IDLE，不再续播 */
+                }
+                ESP_LOGW(TAG, "bad track (0 s duration), auto skip next (#%u/%u)",
+                         (unsigned)s_bad_skip_count,
+                         (unsigned)PLAYER_BAD_SKIP_LIMIT);
+            } else {
+                s_bad_skip_count = 0;
+            }
+            player_play_global(player_auto_next());
+            player_save_new_song();
+            break;
         case CMD_STOP:
             /* 停止前保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置）；
                随机模式下同步保存随机位置 */
@@ -594,6 +623,7 @@ esp_err_t player_controller_init(void)
     }
 
     s_ready = true;
+    s_bad_skip_count = 0;   /* 每次初始化清空坏曲计数 */
 
     /* 读取上次播放歌曲（NVS 持久化），供恢复随机列表目录 / 恢复播放用。
        ⚠ NightPlayer 原版机制：只记忆歌曲，不记忆秒数位置（开机从歌曲
