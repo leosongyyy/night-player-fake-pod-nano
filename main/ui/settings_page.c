@@ -21,10 +21,22 @@ static const char *TAG = "settings_page";
 /* 九宫格布局参数                                                       */
 /* ------------------------------------------------------------------ */
 
-/* 格子尺寸：内容区 460 宽 × (460-46 状态栏) 高，左右/上下边距 24、
-   格间距 16 → 每格 126 × 111（见 settings_page_create 注释） */
-#define SETTINGS_CELL_W  126
-#define SETTINGS_CELL_H  111
+/* 设置页整体放在一张深灰圆角卡片上（周围黑色留边）：左右/下边距 15px
+   （列表页同款留白）、上边距 6px（用户查看后定终值） */
+#define SETTINGS_CARD_GAP_TOP   6                  /* 与状态栏下缘的间距 */
+#define SETTINGS_CARD_GAP_SIDE  UI_CARD_MARGIN_X    /* 左右/下黑边 = 15px */
+#define SETTINGS_CARD_RADIUS    30                 /* 卡片圆角（与列表页一致） */
+
+/* 卡片内网格参数：3 列等宽 + 上下留白（顶部留白收小让格子更靠上） */
+#define SETTINGS_CELL_W         ((SETTINGS_CARD_W - 2 * 24 - 2 * 16) / 3)
+#define SETTINGS_CARD_X         SETTINGS_CARD_GAP_SIDE
+#define SETTINGS_CARD_Y         (UI_STATUS_BAR_H + SETTINGS_CARD_GAP_TOP)
+#define SETTINGS_CARD_W         (EXAMPLE_LCD_H_RES - 2 * SETTINGS_CARD_GAP_SIDE)
+#define SETTINGS_CARD_H         (EXAMPLE_LCD_V_RES - SETTINGS_CARD_Y \
+                                 - SETTINGS_CARD_GAP_SIDE)
+#define SETTINGS_CELL_H         ((SETTINGS_CARD_H - 24 - 24 - 2 * 16) / 3)
+#define SETTINGS_GRID_PAD_TOP   24                 /* 顶部留白 */
+#define SETTINGS_GRID_PAD_BOT   24
 
 /* 按下（pressed）时的黄色背景：默认无边框无背景，仅按压瞬间高亮 */
 #define SETTINGS_PRESS_COLOR  lv_color_hex(0xFFC000)
@@ -318,13 +330,25 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     ui_page_style(page);
     s_settings_page = page;
 
-    /* 九宫格容器：3 列 × 3 行 flex 换行。
-       内容区 460×460，顶部让出状态栏（UI_STATUS_BAR_H）再留 24 边距，
-       左右/底部 24 边距，行列间距 16：
-         宽 = (460 - 24*2 - 16*2) / 3 = 126
-         高 = (460 - 46 - 24*2 - 16*2) / 3 = 111 */
-    lv_obj_t *grid = lv_obj_create(page);
-    lv_obj_set_size(grid, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    /* 深灰圆角卡片（周围黑色留边）：九宫格格子全部放在卡片内。
+       上边距收小（SETTINGS_CARD_GAP_TOP = 6px，与状态栏贴近） */
+    lv_obj_t *card = lv_obj_create(page);
+    lv_obj_set_pos(card, SETTINGS_CARD_X, SETTINGS_CARD_Y);
+    lv_obj_set_size(card, SETTINGS_CARD_W, SETTINGS_CARD_H);
+    lv_obj_set_style_bg_color(card, UI_CARD_COLOR, 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, SETTINGS_CARD_RADIUS, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);
+
+    /* 九宫格容器：3 列 × 3 行 flex 换行，填满卡片：
+         宽 = (430 - 24*2 - 16*2) / 3 = 116
+         高 = (393 - 24 - 24 - 16*2) / 3 = 104 */
+    lv_obj_t *grid = lv_obj_create(card);
+    lv_obj_set_size(grid, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(grid, 0, 0);
     lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(grid, 0, 0);
@@ -336,8 +360,8 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
                           LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_left(grid, 24, 0);
     lv_obj_set_style_pad_right(grid, 24, 0);
-    lv_obj_set_style_pad_top(grid, UI_STATUS_BAR_H + 24, 0);
-    lv_obj_set_style_pad_bottom(grid, 24, 0);
+    lv_obj_set_style_pad_top(grid, SETTINGS_GRID_PAD_TOP, 0);
+    lv_obj_set_style_pad_bottom(grid, SETTINGS_GRID_PAD_BOT, 0);
     lv_obj_set_style_pad_row(grid, 16, 0);
     lv_obj_set_style_pad_column(grid, 16, 0);
 

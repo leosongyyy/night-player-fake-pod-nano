@@ -18,17 +18,26 @@
 
 static const char *TAG = "playlist_page";
 
-/* 页面容器撑满全屏（由 main_ui 的 tabview 决定），内容需避开顶部状态栏区 */
-#define PLIST_STATUS_Y    UI_STATUS_BAR_H                     /* 标题栏顶部 y */
-#define PLIST_PAGE_W      EXAMPLE_LCD_H_RES
-#define PLIST_PAGE_H      (EXAMPLE_LCD_V_RES - UI_STATUS_BAR_H) /* 内容区总高 */
+/* 歌曲列表同样放在一张深灰卡片上（上圆下直、左右 UI_CARD_MARGIN_X px
+   黑边），顶部为目录名标题栏 + 歌曲数，下方为歌曲虚拟列表（行左侧
+   AUDIO 图标） */
+#define PLIST_CARD_X     UI_CARD_MARGIN_X
+#define PLIST_CARD_Y     UI_STATUS_BAR_H
+#define PLIST_CARD_W     (EXAMPLE_LCD_H_RES - 2 * UI_CARD_MARGIN_X)
+#define PLIST_CARD_H     (EXAMPLE_LCD_V_RES - UI_STATUS_BAR_H)
+#define PLIST_CORNER     30                 /* 卡片顶部圆角半径 */
+
+/* 虚拟列表位置与尺寸：卡片内、标题栏下方、贴卡片底部（底部直角） */
+#define PLIST_LIST_X     UI_CARD_MARGIN_X
+#define PLIST_LIST_Y     (UI_STATUS_BAR_H + UI_TITLE_BAR_H)
+#define PLIST_LIST_H     (PLIST_CARD_H - UI_TITLE_BAR_H)
 
 /* 歌曲行固定高度：完整字体 line_height=33，内容区 44px 足够（56-12=44，
    见 VIRTUAL_LIST_USAGE.md 踩坑 5） */
-#define PLIST_ITEM_H      56
+#define PLIST_ITEM_H     56
 
 /* 等待播放器就绪的轮询周期（ms） */
-#define PLIST_REFRESH_MS  300
+#define PLIST_REFRESH_MS 300
 
 static lv_obj_t   *s_page        = NULL;  /* tab 页容器 */
 static lv_obj_t   *s_list        = NULL;  /* 虚拟列表句柄 */
@@ -42,20 +51,24 @@ static uint32_t   s_last_global  = 0xFFFFFFFFu; /* 上次刷新时的歌曲全�
 /* 虚拟列表回调                                                          */
 /* ------------------------------------------------------------------ */
 
-/* 绑定回调：设置歌曲文件名；当前播放歌曲文字黄色高亮，其余白色。
+/* 绑定回调：左侧固定 AUDIO 图标 + 歌曲文件名；当前播放歌曲文字黄色
+   高亮，其余白色。
    user_data = 该列表第一首歌的全局下标（song_start），用于判断当前播放 */
-static void song_bind_cb(lv_obj_t *cell, uint32_t index,
+static void song_bind_cb(virtual_list_cell_t *cell, uint32_t index,
                          const void *item, void *user_data)
 {
     const playlist_song_entry_t *song = (const playlist_song_entry_t *)item;
-    lv_label_set_text(cell, playlist_get_string(song->name_str));
+    lv_label_set_text(cell->text, playlist_get_string(song->name_str));
+    lv_label_set_text(cell->icon, LV_SYMBOL_AUDIO);
 
     uint32_t song_start = (uint32_t)(uintptr_t)user_data;
     player_controller_status_t st;
     player_controller_get_status(&st);
     bool is_cur = st.has_song && (st.cur_global == song_start + index);
-    lv_obj_set_style_text_color(cell,
-        is_cur ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
+    lv_color_t color = is_cur ? lv_palette_main(LV_PALETTE_YELLOW)
+                              : lv_color_white();
+    lv_obj_set_style_text_color(cell->text, color, 0);
+    lv_obj_set_style_text_color(cell->icon, color, 0);
 }
 
 /* 选中回调：点击歌曲 →
@@ -124,7 +137,7 @@ static void playlist_page_show_hint(const char *text)
 /* 对外接口                                                             */
 /* ------------------------------------------------------------------ */
 
-/* 曲目变化刷新（共享 player_ticker 周期调用）：曲目切换后把可见 cell 全部
+/* 曲目变化刷新（共享 player_ticker 周期调用）：曲目切换后把可见行全部
    重绑一次（类似 Android ListAdapter.notifyDataSetChanged），让 song_bind_cb
    重新判定"正在播放"的黄色高亮。不重建列表、不切换目录、不滚动位置。 */
 static void plist_track_cb(const player_controller_status_t *st, void *ctx)
@@ -169,8 +182,8 @@ void playlist_page_show_dir(uint32_t dir_index)
     /* 歌曲数据：8 字节条目，首地址 = 该目录第一首歌 */
     uint32_t song_start = dir->song_start;
     const playlist_song_entry_t *songs = playlist_song_at(song_start);
-    s_list = virtual_list_create(s_page, PLIST_PAGE_W,
-                                 PLIST_PAGE_H - UI_TITLE_BAR_H, PLIST_ITEM_H,
+    s_list = virtual_list_create(s_page, PLIST_CARD_W, PLIST_LIST_H,
+                                 PLIST_ITEM_H,
                                  dir->song_count, songs,
                                  sizeof(playlist_song_entry_t),
                                  song_bind_cb, (void *)(uintptr_t)song_start);
@@ -178,7 +191,7 @@ void playlist_page_show_dir(uint32_t dir_index)
         ESP_LOGE(TAG, "create song virtual list failed");
         return;
     }
-    lv_obj_set_pos(s_list, 0, PLIST_STATUS_Y + UI_TITLE_BAR_H);
+    lv_obj_set_pos(s_list, PLIST_LIST_X, PLIST_LIST_Y);
     virtual_list_set_selected_cb(s_list, song_selected_cb);
 
     /* 若展示的正是正在播放的目录：定位到当前歌曲（"正在播放"由绑定回调
@@ -229,9 +242,14 @@ lv_obj_t *playlist_page_create(lv_obj_t *tv)
     s_page = lv_tabview_add_tab(tv, "");
     ui_page_style(s_page);
 
+    /* 深灰卡片背景（上圆下直，左右 10px 黑边），标题栏/列表叠于其上 */
+    ui_card_bg_create(s_page, PLIST_CARD_X, PLIST_CARD_Y, PLIST_CARD_W,
+                      PLIST_CARD_H, PLIST_CORNER);
+
     s_title_bar = ui_title_bar_create(s_page, "播放列表", NULL);
+    lv_obj_set_size(s_title_bar, PLIST_CARD_W, UI_TITLE_BAR_H);
     /* 标题栏整体下移避开顶部状态栏区（ui_title_bar_create 内部默认 y=0） */
-    lv_obj_set_pos(s_title_bar, 0, PLIST_STATUS_Y);
+    lv_obj_set_pos(s_title_bar, PLIST_CARD_X, PLIST_CARD_Y);
     s_list = NULL;
     s_loading = NULL;
 
@@ -243,7 +261,7 @@ lv_obj_t *playlist_page_create(lv_obj_t *tv)
         playlist_page_show_current();
     }
 
-    /* 订阅共享 player_ticker：曲目变化时重绑可见 cell 更新"正在播放"高亮 */
+    /* 订阅共享 player_ticker：曲目变化时重绑可见行更新"正在播放"高亮 */
     player_ticker_subscribe(plist_track_cb, NULL);
 
     ESP_LOGI(TAG, "playlist page created");
