@@ -248,8 +248,8 @@ static void notif_apply_volume(uint8_t level)
     sleep_timer_fade_cancel();
     audio_set_volume_level(level);          /* 先写硬件（回调读到的即新值） */
     config_store_set_volume(level);         /* 后持久化 + 通知回调（持锁安全） */
-    /* 音量调节属于"用户动作"：睡眠定时清醒感知加时 */
-    sleep_timer_note_activity();
+    /* ⚠ 音量调节不触发睡眠定时清醒感知加时（只有切歌/播放控制/点歌等
+       算"用户动作"，见 sleep_timer_note_activity 注释） */
 }
 
 /* ------------------------------------------------------------------ */

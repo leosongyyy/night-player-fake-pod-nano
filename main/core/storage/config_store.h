@@ -27,7 +27,8 @@ extern "C" {
  *   - 开机默认开启睡眠定时 sleep_def_on（bool，默认关）：开机自动用默认时长
  *     开启睡眠定时器（在 main.c 的 sleep_timer_init 之后应用）
  *   - 睡眠定时清醒感知 sleep_awake（bool，默认开）：睡眠定时开启期间，切歌/
- *     调音量等用户动作按 NightPlayer 算法折算加时（见 core/utils/sleep_timer）
+ *     播放控制/点歌等用户动作按 NightPlayer 算法折算加时（见 core/utils/
+ *     sleep_timer；音量调节不再加时）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调
  *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关，

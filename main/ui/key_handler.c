@@ -74,22 +74,24 @@ static void on_button_event(button_event_t event, void *ctx)
         if (sleeping) {
             /* 息屏：播放/暂停（黑屏盲操作，不亮屏） */
             player_controller_toggle();
+            /* 息屏播放控制属于"用户动作"：清醒感知加时
+               （音量调节不再加时，见 sleep_timer_note_activity 注释） */
+            sleep_timer_note_activity();
         } else {
             /* 亮屏：音量 + */
             key_adjust_volume(VOL_STEP_SHORT);
         }
-        /* 播放控制/音量调节属于"用户动作"：睡眠定时清醒感知加时 */
-        sleep_timer_note_activity();
         break;
     case BUTTON_EVENT_B_SHORT:
         if (sleeping) {
             /* 息屏：下一曲 */
             player_controller_next();
+            /* 息屏切歌属于"用户动作"：清醒感知加时 */
+            sleep_timer_note_activity();
         } else {
             /* 亮屏：音量 - */
             key_adjust_volume(-VOL_STEP_SHORT);
         }
-        sleep_timer_note_activity();
         break;
     case BUTTON_EVENT_A_LONG:
         if (sleeping) {
@@ -105,11 +107,12 @@ static void on_button_event(button_event_t event, void *ctx)
         if (sleeping) {
             /* 息屏：上一曲（B 键 GPIO0 可安全长按） */
             player_controller_prev();
+            /* 息屏切歌属于"用户动作"：清醒感知加时 */
+            sleep_timer_note_activity();
         } else {
             /* 亮屏：音量一次性 -10 */
             key_adjust_volume(-VOL_STEP_LONG_B);
         }
-        sleep_timer_note_activity();
         break;
     case BUTTON_EVENT_BOTH:
         /* 双键同时按下：息屏/亮屏切换（计划第 5 点：双按不再是伪关机） */
