@@ -120,7 +120,14 @@ static void cover_show_default(void)
 
 /* 封面加载任务：等待通知 → 读取 .npd → JPEG 解码 → 持锁更新封面。
    路径在任务开头快照（player_controller 的路径缓冲会被后续切歌覆盖）；
-   解码完成后校验"当前歌曲未变"才应用，避免快速切歌显示错封面。 */
+   解码完成后校验"当前歌曲未变"才应用，避免快速切歌显示错封面。
+   ⚠ Bug 20 修复：本任务自带完整的 .npd 解析结果（song_meta_t 含标题/
+   副标题），在换封面的同一时机把标题/副标题标签纠正为元数据——UI 侧
+   500ms 轮询（np_refresh_cb）切歌瞬间可能恰在 player_controller 读 .npd
+   的阻塞窗口内，读到"新歌 + 空元数据"快照并把标题一次性写成 fallback
+   （文件名/目录名）且之后不再刷新；封面由本任务独立加载不受该窗口影响，
+   因此"封面解码完成"正好是"元数据必已就绪"的可靠时机，借此把标题收回
+   正确值（无该字段时回退文件名/目录名）。 */
 static void cover_load_task(void *arg)
 {
     (void)arg;
@@ -136,37 +143,75 @@ static void cover_load_task(void *arg)
         snprintf(path, sizeof(path), "%s", cur);
 
         song_meta_t meta;
-        if (song_meta_load(path, &meta) != ESP_OK ||
-            meta.jpeg_data == NULL || meta.jpeg_len == 0) {
+        if (song_meta_load(path, &meta) != ESP_OK) {
             song_meta_free(&meta);
-            cover_show_default();
+            cover_show_default();   /* 无 .npd：标题本就回退文件名，无需补 */
             continue;
         }
 
-        lv_img_dsc_t img;
-        esp_err_t r = cover_jpeg_decode(meta.jpeg_data, meta.jpeg_len, &img);
-        song_meta_free(&meta);
-        if (r != ESP_OK) {
-            cover_show_default();
-            continue;
-        }
-
-        /* 解码完成：确认还是这首歌才应用 */
+        /* 解码前先校验歌曲未变（快速切歌时省掉无谓的解码） */
         player_controller_status_t st;
         player_controller_get_status(&st);
         if (st.cur_global != target) {
-            cover_jpeg_free(&img);
+            song_meta_free(&meta);
             continue;
         }
 
-        lvgl_port_lock(-1);
-        if (s_cover_owned) {
-            cover_jpeg_free(&s_cover_img);
+        /* 解码封面（.npd 无封面数据则跳过，走默认封面） */
+        lv_img_dsc_t img = { 0 };
+        bool have_cover = false;
+        if (meta.jpeg_data != NULL && meta.jpeg_len > 0 &&
+            cover_jpeg_decode(meta.jpeg_data, meta.jpeg_len, &img) == ESP_OK) {
+            have_cover = true;
         }
-        s_cover_img = img;
-        s_cover_owned = true;
-        lv_img_set_src(s_cover, &s_cover_img);
+
+        /* 解码完成：再确认一次还是这首歌才应用（解码 100~300ms 内可能又切歌） */
+        player_controller_get_status(&st);
+        if (st.cur_global != target) {
+            if (have_cover) {
+                cover_jpeg_free(&img);
+            }
+            song_meta_free(&meta);
+            continue;
+        }
+
+        /* 标题/副标题：meta 优先，无字段回退文件名/目录名（st 已校验为新歌） */
+        const char *title = (meta.title != NULL && meta.title[0] != '\0')
+                            ? meta.title : st.song_name;
+        const char *subtitle = (meta.subtitle != NULL && meta.subtitle[0] != '\0')
+                               ? meta.subtitle : st.dir_name;
+
+        lvgl_port_lock(-1);
+        /* 换封面：成功用解码图（含释放上一首封面），无封面/解码失败回默认 */
+        if (have_cover) {
+            if (s_cover_owned) {
+                cover_jpeg_free(&s_cover_img);
+            }
+            s_cover_img = img;
+            s_cover_owned = true;
+        } else {
+            if (s_cover_owned) {
+                cover_jpeg_free(&s_cover_img);
+                s_cover_owned = false;
+            }
+        }
+        if (s_cover != NULL) {
+            if (have_cover) {
+                lv_img_set_src(s_cover, &s_cover_img);
+            } else {
+                lv_img_set_src(s_cover, DEFAULT_COVER_IMG);
+            }
+        }
+        /* Bug 20：换封面同一时机补写标题/副标题（见函数头注释） */
+        if (s_title_label != NULL) {
+            lv_label_set_text(s_title_label, title);
+        }
+        if (s_sub_label != NULL) {
+            lv_label_set_text(s_sub_label, subtitle);
+        }
         lvgl_port_unlock();
+
+        song_meta_free(&meta);
     }
 }
 

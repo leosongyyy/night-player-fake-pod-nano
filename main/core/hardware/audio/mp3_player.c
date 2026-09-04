@@ -794,7 +794,14 @@ esp_err_t mp3_player_seek(uint32_t target_s)
     }
     s_seek_target_s = target_s;
     s_seek_requested = true;
-    xSemaphoreGive(s_resume_sem);
+    /* ⚠ 仅在暂停态（播放任务正阻塞在 resume_sem 上等待唤醒）才 give：
+       播放中 seek 由解码循环轮询 s_seek_requested 自行处理，无需唤醒。
+       若此处无条件 give，播放中 seek 会让二进制信号量残留为"满"，
+       下一次暂停时暂停分支的 xSemaphoreTake 立即成功 → 暂停被瞬即恢复，
+       表现为"拖动进度后点暂停无效，必须再点一次才暂停"（FUTURE_PLAN Bug 19）。 */
+    if (s_state == MP3_STATE_PAUSED) {
+        xSemaphoreGive(s_resume_sem);
+    }
     return ESP_OK;
 }
 
