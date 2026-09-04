@@ -9,6 +9,7 @@
 #include "core/storage/config_store.h"
 #include "core/storage/playlist.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -25,12 +26,39 @@ static const char *TAG = "player_ctrl";
 #define PLAYER_TASK_PRIO  5
 #define PLAYER_TASK_CORE  0
 
-/* 连续"无有效音频"自动跳过保护：坏曲（解不出任何音频帧、总时长为 0）自然
+/* 连续坏曲自动跳过保护：坏曲（文件不存在/数据损坏/格式不支持）自然
    播完时自动切下一曲；若连续达到上限（如整目录/整卡文件系统损坏）则停止
    自动续播，避免在只有坏曲的目录里原地无限重播空转（也顺带避免快速切歌
-   风暴反复触发 UI 封面/标签刷新） */
+   风暴反复触发 UI 封面/标签刷新），并向 UI 上报 PLAYER_EVENT_TOO_MANY_BAD */
 #define PLAYER_BAD_SKIP_LIMIT 16u
 static volatile uint32_t s_bad_skip_count = 0;   /* 连续坏曲计数（控制器任务上下文读写） */
+
+/* 坏曲事件槽（UI 轮询拉取）：单槽、后写覆盖前写、拉取即清空。
+   ⚠ 跨任务共享：写方=控制器任务（Core0）、读方=LVGL 任务（Core0 的
+   player_ticker timer），用临界区保护（含 64 位时间戳的非原子读写） */
+static portMUX_TYPE s_event_mux = portMUX_INITIALIZER_UNLOCKED;
+static player_event_type_t s_bad_event = PLAYER_EVENT_NONE;   /* 当前待拉取事件 */
+static int64_t s_bad_event_time_us = 0;                       /* 事件发生时刻（esp_timer us） */
+
+/* 写入坏曲事件（后写覆盖前写；控制器任务上下文调用） */
+static void player_set_bad_event(player_event_type_t ev)
+{
+    taskENTER_CRITICAL(&s_event_mux);
+    s_bad_event = ev;
+    s_bad_event_time_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_event_mux);
+}
+
+/* 停止原因 → 坏曲事件类型（mp3_player 内部错误原因与 UI 展示类别对应） */
+static player_event_type_t player_reason_to_event(mp3_player_stop_reason_t reason)
+{
+    switch (reason) {
+    case MP3_STOP_FILE_MISSING:       return PLAYER_EVENT_FILE_MISSING;
+    case MP3_STOP_FORMAT_UNSUPPORTED: return PLAYER_EVENT_FORMAT_UNSUPPORTED;
+    case MP3_STOP_DATA_CORRUPT:
+    default:                          return PLAYER_EVENT_DATA_CORRUPT;
+    }
+}
 
 /* 命令队列长度（控制命令都很短，队列够深避免高频点按丢弃） */
 #define PLAYER_QUEUE_LEN 8
@@ -48,7 +76,7 @@ typedef enum {
     CMD_PLAY_SONG_RANDOM, /* 随机模式按指定随机位置播放（arg64=位置，不重新生成；
                              用于开机恢复随机序列现场） */
     CMD_SET_SHUFFLE,/* 设置随机播放开关（arg=0/1） */
-    CMD_FINISHED,   /* 当前曲自然播完 → 按循环模式自动续播 */
+    CMD_FINISHED,   /* 播放结束（自然播完/坏曲/无法播放，arg=mp3_player_stop_reason_t） */
     CMD_STOP,       /* 停止 */
 } player_cmd_t;
 
@@ -396,15 +424,16 @@ static void player_post_cmd64(player_cmd_t cmd, uint64_t arg64)
 }
 
 /* 播放停止回调（在播放任务 Core1 上下文执行）：
-   仅当"自然播完"（is_from_user=false）时才通知控制器自动续播；
-   用户主动切换（下一曲/上一曲/选曲/停止）触发的停止由已投递的命令处理，
-   这里忽略，避免重复跳曲。 */
-static void player_stopped_cb(bool is_from_user)
+   - USER（用户主动停止/切歌触发的停止）：忽略，切歌命令已在队列中，避免重复跳曲；
+   - NATURAL（自然播完）：通知控制器按循环模式自动续播；
+   - FILE_MISSING / DATA_CORRUPT / FORMAT_UNSUPPORTED（坏曲/无法播放）：
+     同样投递 CMD_FINISHED，控制器在 arg 里读到原因，做坏曲跳过与事件上报。 */
+static void player_stopped_cb(mp3_player_stop_reason_t reason)
 {
-    if (is_from_user) {
+    if (reason == MP3_STOP_USER) {
         return;
     }
-    player_post_cmd(CMD_FINISHED, 0);
+    player_post_cmd(CMD_FINISHED, (uint32_t)reason);
 }
 
 static void player_cmd_play(void)
@@ -531,29 +560,47 @@ static void player_task(void *arg)
             break;
         }
         case CMD_SET_SHUFFLE: player_cmd_set_shuffle(msg.arg != 0); break;
-        case CMD_FINISHED:
-            /* 自然播完续播。⚠ 坏曲（解不出首帧 → 总时长 0，几乎立刻"播完"）
-               自动跳过切下一曲；正常文件首帧即会估算出总时长，不会误判。
-               连续坏曲达到上限 → 停止自动续播（整目录/整卡损坏防无限空转），
-               并记"关机前未在播放"，下次开机不再自动播放进坏区。 */
-            if (mp3_player_get_duration_s() == 0) {
-                if (++s_bad_skip_count >= PLAYER_BAD_SKIP_LIMIT) {
-                    s_bad_skip_count = 0;
-                    ESP_LOGE(TAG, "%u 首连续无有效音频，疑似整目录/整卡文件"
-                                  "损坏，停止自动续播",
-                             (unsigned)PLAYER_BAD_SKIP_LIMIT);
-                    config_store_set_was_playing(false);
-                    break;   /* 保持 IDLE，不再续播 */
-                }
-                ESP_LOGW(TAG, "bad track (0 s duration), auto skip next (#%u/%u)",
-                         (unsigned)s_bad_skip_count,
-                         (unsigned)PLAYER_BAD_SKIP_LIMIT);
-            } else {
-                s_bad_skip_count = 0;
+        case CMD_FINISHED: {
+            /* 播放结束收口（arg = mp3_player_stop_reason_t）：
+               - NATURAL：正常自然播完 → 按循环模式自动续播，清空连续坏曲计数；
+               - FILE_MISSING / DATA_CORRUPT / FORMAT_UNSUPPORTED：坏曲/无法播放
+                 → 上报对应事件（UI 拉取弹 toast）并自动跳过切下一曲；
+                 连续坏曲达到上限 → 停止自动续播（整目录/整卡损坏防无限空转），
+                 上报 PLAYER_EVENT_TOO_MANY_BAD（覆盖此前单曲事件），并记
+                 "关机前未在播放"，下次开机不再自动播放进坏区。 */
+            mp3_player_stop_reason_t reason = (mp3_player_stop_reason_t)msg.arg;
+            /* 兜底：报"自然播完"但从未解码出任何音频（总时长仍为 0，如
+               门禁后数据不足的残废文件）→ 仍按数据损坏处理，防单曲循环
+               下原地无限重试（正常能播放的歌 started 后必有时长） */
+            if (reason == MP3_STOP_NATURAL && mp3_player_get_duration_s() == 0) {
+                reason = MP3_STOP_DATA_CORRUPT;
             }
+            if (reason == MP3_STOP_NATURAL) {
+                s_bad_skip_count = 0;
+                player_play_global(player_auto_next());
+                player_save_new_song();
+                break;
+            }
+            /* 坏曲：上报事件（后写覆盖前写；UI 每 500ms 拉取一次并展示，
+               拉取即清空 → 用户看到的是最近一次坏曲类别） */
+            player_set_bad_event(player_reason_to_event(reason));
+            if (++s_bad_skip_count >= PLAYER_BAD_SKIP_LIMIT) {
+                s_bad_skip_count = 0;
+                ESP_LOGE(TAG, "%u 首连续坏曲，疑似整目录/整卡文件损坏，"
+                              "停止自动续播（reason=%d）",
+                         (unsigned)PLAYER_BAD_SKIP_LIMIT, (int)reason);
+                /* 覆盖为"连续坏曲过多"事件：无论何时被 UI 拉取都提示 */
+                player_set_bad_event(PLAYER_EVENT_TOO_MANY_BAD);
+                config_store_set_was_playing(false);
+                break;   /* 保持 IDLE，不再续播 */
+            }
+            ESP_LOGW(TAG, "bad track (reason=%d), auto skip next (#%u/%u)",
+                     (int)reason, (unsigned)s_bad_skip_count,
+                     (unsigned)PLAYER_BAD_SKIP_LIMIT);
             player_play_global(player_auto_next());
             player_save_new_song();
             break;
+        }
         case CMD_STOP:
             /* 停止前保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置）；
                随机模式下同步保存随机位置 */
@@ -876,4 +923,20 @@ void player_controller_get_status(player_controller_status_t *out)
 const char *player_controller_get_current_path(void)
 {
     return s_path_buf;
+}
+
+bool player_controller_take_event(player_event_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    taskENTER_CRITICAL(&s_event_mux);
+    const bool has = (s_bad_event != PLAYER_EVENT_NONE);
+    if (has) {
+        out->type = s_bad_event;
+        out->time_us = s_bad_event_time_us;
+        s_bad_event = PLAYER_EVENT_NONE;   /* 拉取即清空（单槽） */
+    }
+    taskEXIT_CRITICAL(&s_event_mux);
+    return has;
 }

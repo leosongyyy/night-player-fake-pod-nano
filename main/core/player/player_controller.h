@@ -159,6 +159,33 @@ void player_controller_get_status(player_controller_status_t *out);
  */
 const char *player_controller_get_current_path(void);
 
+/** 播放器需要用户知晓的坏曲/异常事件（UI 轮询拉取展示 toast） */
+typedef enum {
+    PLAYER_EVENT_NONE = 0,           /* 无事件 */
+    PLAYER_EVENT_FILE_MISSING,       /* 歌曲文件不存在 */
+    PLAYER_EVENT_DATA_CORRUPT,       /* 歌曲数据损坏 */
+    PLAYER_EVENT_FORMAT_UNSUPPORTED, /* 歌曲格式不支持 */
+    PLAYER_EVENT_TOO_MANY_BAD,       /* 连续坏曲过多导致停止（请检查SD卡） */
+} player_event_type_t;
+
+/** 拉取到的事件：类型 + 发生时刻（esp_timer 单调微秒） */
+typedef struct {
+    player_event_type_t type;   /* 事件类型 */
+    int64_t time_us;            /* 事件发生时刻（esp_timer_get_time，us） */
+} player_event_t;
+
+/**
+ * @brief 拉取最新坏曲事件（单槽，后写覆盖前写；拉取即清空）
+ *
+ * 控制器遇到坏曲/格式不支持/文件不存在/连续坏曲停止时写入事件槽；
+ * UI 侧周期性调用本接口取走事件并展示。带发生时刻供 UI 判断"是否在
+ * 近 15 秒内"（锁屏期间 LVGL 冻结、解锁后补拉时用于过滤过时消息）。
+ *
+ * @param out 输出事件（类型 + 发生时刻）；无事件时不修改
+ * @return true = 取到事件（槽已清空）；false = 无事件
+ */
+bool player_controller_take_event(player_event_t *out);
+
 #ifdef __cplusplus
 }
 #endif

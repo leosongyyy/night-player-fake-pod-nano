@@ -23,11 +23,22 @@ typedef enum {
     MP3_STATE_PAUSED,       /* 已暂停 */
 } mp3_player_state_t;
 
+/** 播放停止原因（供上层区分用户停止 / 自然播完 / 坏曲类别） */
+typedef enum {
+    MP3_STOP_USER = 0,             /* 用户主动停止（手动切歌/暂停后停止） */
+    MP3_STOP_NATURAL,              /* 自然播完 */
+    MP3_STOP_FILE_MISSING,         /* 文件不存在/打开失败 */
+    MP3_STOP_DATA_CORRUPT,         /* 音频数据损坏（无有效帧/无音频数据/读取失败） */
+    MP3_STOP_FORMAT_UNSUPPORTED,   /* 音频格式不支持（采样率不在支持表等） */
+} mp3_player_stop_reason_t;
+
 /**
  * @brief 播放停止回调（在播放任务上下文调用，用于自动播放下一曲等）
- * @param is_from_user true = 用户主动停止；false = 自然播完
+ * @param reason 停止原因：USER=用户主动停止（控制器应忽略，切歌命令已就绪）；
+ *               NATURAL=自然播完；FILE_MISSING/DATA_CORRUPT/FORMAT_UNSUPPORTED
+ *               =坏曲（无法播放，供上层跳过并提示）
  */
-typedef void (*mp3_player_stopped_cb_t)(bool is_from_user);
+typedef void (*mp3_player_stopped_cb_t)(mp3_player_stop_reason_t reason);
 
 /**
  * @brief 开始播放指定 MP3（Core1 后台任务，非阻塞）

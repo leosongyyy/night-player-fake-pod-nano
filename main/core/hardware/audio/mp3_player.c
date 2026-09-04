@@ -70,9 +70,9 @@ static volatile bool s_seek_requested = false;
 static volatile uint32_t s_seek_target_s = 0;
 static SemaphoreHandle_t s_resume_sem = NULL;
 
-/* 播放停止回调与停止来源标记 */
+/* 播放停止回调与停止原因标记（play_task 各退出路径先设置再 finish） */
 static mp3_player_stopped_cb_t s_stopped_cb = NULL;
-static volatile bool s_stopped_by_user = false;   /* true=用户停止，false=自然播完 */
+static volatile mp3_player_stop_reason_t s_stop_reason = MP3_STOP_NATURAL;
 
 /* 进度跟踪（基于系统时钟，毫秒精度；32bit 原子读，免锁） */
 static volatile uint32_t s_played_ms = 0;
@@ -294,13 +294,14 @@ static uint32_t mp3_read_xing_duration(const char *path)
 }
 
 /* 播放结束统一收尾：置 IDLE 并触发停止回调（此时 s_state 已是 IDLE，
-   回调里可直接 mp3_player_play 续播下一曲） */
+   回调里可直接 mp3_player_play 续播下一曲）。停止原因由各退出路径在
+   调用前写入 s_stop_reason */
 static void mp3_player_finish(void)
 {
     s_state = MP3_STATE_IDLE;
     mp3_player_stopped_cb_t cb = s_stopped_cb;
     if (cb != NULL) {
-        cb(s_stopped_by_user);
+        cb(s_stop_reason);
     }
 }
 
@@ -428,6 +429,7 @@ static void play_task(void *arg)
     FILE *f = fopen(s_path, "rb");
     if (f == NULL) {
         ESP_LOGE(TAG, "open %s failed", s_path);
+        s_stop_reason = MP3_STOP_FILE_MISSING;   /* 文件打不开：按"文件不存在"上报 */
         mp3_player_finish();
         vTaskDelete(NULL);
         return;
@@ -451,6 +453,7 @@ static void play_task(void *arg)
         ESP_LOGW(TAG, "no audio data after tag (%s), treat as damaged, skip",
                  s_path);
         fclose(f);
+        s_stop_reason = MP3_STOP_DATA_CORRUPT;   /* 空音频数据：数据损坏 */
         mp3_player_finish();
         vTaskDelete(NULL);
         return;
@@ -469,6 +472,7 @@ static void play_task(void *arg)
             ESP_LOGW(TAG, "read probe failed (%s), treat as damaged, skip",
                      s_path);
             fclose(f);
+            s_stop_reason = MP3_STOP_DATA_CORRUPT;   /* 读取失败：数据损坏 */
             mp3_player_finish();
             vTaskDelete(NULL);
             return;
@@ -478,6 +482,7 @@ static void play_task(void *arg)
             ESP_LOGW(TAG, "no valid mp3 frame at start (%s), damaged, skip",
                      s_path);
             fclose(f);
+            s_stop_reason = MP3_STOP_DATA_CORRUPT;   /* 无有效帧：数据损坏 */
             mp3_player_finish();
             vTaskDelete(NULL);
             return;
@@ -597,6 +602,7 @@ static void play_task(void *arg)
                 uint32_t fs = mp3_map_samprate(fi.samprate);
                 if (fs == 0) {
                     ESP_LOGE(TAG, "unsupported sample rate %d Hz", fi.samprate);
+                    s_stop_reason = MP3_STOP_FORMAT_UNSUPPORTED;  /* 采样率不支持：格式不支持 */
                     break;
                 }
                 s_fs = (audio_fs_t)fs;
@@ -665,9 +671,17 @@ static void play_task(void *arg)
         }
     }
 
+    /* 兜底归类：解码循环从未成功解出任何一帧就结束（非用户停止）——
+       门禁虽找到连续合法帧头，但文件在解码中途读取出错/数据损坏，
+       导致从未真正开始播放。此类按数据损坏上报（正常文件首帧必成功） */
+    if (s_stop_reason == MP3_STOP_NATURAL && !started) {
+        s_stop_reason = MP3_STOP_DATA_CORRUPT;
+        ESP_LOGW(TAG, "decode never started (%s), treat as damaged", s_path);
+    }
+
     /* 自然播完（非用户停止）时，先等 consumer 把 ringbuf 播空，避免截断结尾
        （ringbuf 里可能还攒着最多 ~400ms 的已解码 PCM）；用户主动停止则立即中断 */
-    if (!s_stopped_by_user && s_out_running) {
+    if (s_stop_reason != MP3_STOP_USER && s_out_running) {
         while (!ringbuf_is_empty() && !s_stop_requested) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -745,7 +759,7 @@ esp_err_t mp3_player_play(const char *path)
     s_seek_requested = false;
     s_played_ms = 0;
     s_duration_s = 0;
-    s_stopped_by_user = false;
+    s_stop_reason = MP3_STOP_NATURAL;   /* 新曲默认预期自然播完（坏曲路径会改写） */
 
     BaseType_t created = xTaskCreatePinnedToCore(play_task, "mp3_play",
                                                  MP3_PLAY_TASK_STACK, NULL,
@@ -781,7 +795,7 @@ esp_err_t mp3_player_stop(void)
     if (s_state == MP3_STATE_IDLE) {
         return ESP_OK;
     }
-    s_stopped_by_user = true;   /* 标记用户主动停止，回调据此区分 */
+    s_stop_reason = MP3_STOP_USER;   /* 用户主动停止，回调据此区分 */
     s_stop_requested = true;
     xSemaphoreGive(s_resume_sem);
     return ESP_OK;

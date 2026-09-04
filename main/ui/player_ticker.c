@@ -1,12 +1,21 @@
 #include "ui/player_ticker.h"
 
+#include "ui/toast.h"
+
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lvgl.h"
 
 static const char *TAG = "player_ticker";
 
 /* 轮询周期（ms）：与播放页刷新周期一致，兼顾标题/进度刷新与开销 */
 #define PLAYER_TICKER_MS   500
+
+/* 坏曲事件"新鲜窗口"（us）：前三种单曲坏曲事件仅在发生后 15 秒内被拉取
+   才弹 toast（锁屏期间 LVGL timer 冻结、解锁后补拉时用于过滤过时消息——
+   锁屏时单首坏曲已被自动跳过且不影响播放，无需解锁后再打扰用户）；
+   PLAYER_EVENT_TOO_MANY_BAD（连续坏曲过多已停止续播）无条件提示。 */
+#define BAD_EVENT_FRESH_US (15 * 1000 * 1000LL)
 
 /* 订阅者上限：当前正在播放页 + 播放列表页，预留目录列表等后续接入 */
 #define PLAYER_TICKER_MAX  4
@@ -25,6 +34,39 @@ static uint32_t              s_sub_count = 0;  /* 已注册订阅数 */
 static void ticker_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    /* 拉取坏曲事件（单槽，拉取即清空，后写覆盖前写）：把最近一次
+       "文件不存在/数据损坏/格式不支持"或"连续坏曲过多"转成 toast。
+       展示规则（见 BAD_EVENT_FRESH_US）：前三种仅 15 秒内发生才提示；
+       "连续坏曲过多导致停止"无条件提示。在 LVGL timer 上下文执行
+       （天然持 LVGL 锁），可直接操作 UI。 */
+    player_event_t ev;
+    if (player_controller_take_event(&ev)) {
+        const int64_t age_us = esp_timer_get_time() - ev.time_us;
+        const char *msg = NULL;
+        switch (ev.type) {
+        case PLAYER_EVENT_FILE_MISSING:
+            if (age_us <= BAD_EVENT_FRESH_US) msg = "歌曲文件不存在";
+            break;
+        case PLAYER_EVENT_DATA_CORRUPT:
+            if (age_us <= BAD_EVENT_FRESH_US) msg = "歌曲数据损坏";
+            break;
+        case PLAYER_EVENT_FORMAT_UNSUPPORTED:
+            if (age_us <= BAD_EVENT_FRESH_US) msg = "歌曲格式不支持";
+            break;
+        case PLAYER_EVENT_TOO_MANY_BAD:
+            msg = "请检查SD卡";   /* 无条件：自动续播已停止，必须告知用户 */
+            break;
+        default:
+            break;
+        }
+        if (msg != NULL) {
+            ui_toast_show(msg);
+        } else {
+            ESP_LOGI(TAG, "drop stale bad event (%d, age %lld us)",
+                     (int)ev.type, (long long)age_us);
+        }
+    }
 
     player_controller_status_t st;
     player_controller_get_status(&st);
