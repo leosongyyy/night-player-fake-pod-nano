@@ -70,3 +70,4 @@ Lhear = Lout - 0.03 * Rout
   失败则刷屏阻塞 → 任务看门狗复位）；调这个值前必须同时看帧率与
   `heap_caps_get_free_size(MALLOC_CAP_DMA)`。
 
+## 35. ClickWheel按钮的图层跑到下拉控制中心的上方了，需要修改此问题。
