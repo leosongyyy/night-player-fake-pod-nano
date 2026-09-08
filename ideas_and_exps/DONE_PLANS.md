@@ -605,4 +605,231 @@ LV_SYMBOL_DOWN）：
   "开启「开机默认开启」后，每次开机会自动开启并在进入主界面时弹出提示
   提醒您（不需要时可在播放设置页长按睡眠定时格子关闭）"。
 
+## 24. 大列表速滑交互模式（虚拟 ClickWheel）✅ 已完成
+
+长列表（目录/歌曲）右下角悬浮一个黄色圆形按钮：按住后在屏幕上画圈即可
+快速翻页，顺时针向下滚、逆时针向上滚，转满一圈滚动内容总高度的 10%；
+直接点击则弹出使用说明。按钮仅在列表超过 10 页（72 条）时显示。
+
+实现要点（2026-09 完成，设计细节见 `CLICK_WHEEL_USAGE.md`）：
+- **新组件 `core/ui/click_wheel.{c,h}`**（通用 UI 基础设施，与具体页面无关）：
+  全局单例，`click_wheel_create()` 在 `main_ui_create()` 中调用一次，
+  之后由 `click_wheel_set_list(tab, list, count)` / `click_wheel_set_tab(tab)`
+  / `click_wheel_set_overlay(bool)` 驱动显隐与滚动目标。
+- ⚠ **按钮必须创建在 `lv_layer_top()`（顶层）并清除自身滚动链**：第一版放在
+  tab 页容器里，从按钮起手拖动会被 LVGL 滚动链找到可横向滚动的 tabview →
+  判定为翻页 → 按钮收到 `PRESS_LOST`，画圈失效（表现为"拖动变成页面
+  左右滑动"）。放顶层 + 清 `SCROLL_CHAIN_HOR/VER` 后事件不再外泄；
+  代价是显隐需由切页/覆盖层事件显式驱动。
+- **角度算法**：圆心取**屏幕中心**（非按钮中心），`atan2f(y-cy, x-cx)` 得
+  屏幕坐标系角度（x 右 y 下，顺时针为正）；每帧角度差归一化到 (-180,180]
+  处理跨 0°/360° 跳变；滚动量 = 角度差 × (内容高度 × 0.1 / 360) px，
+  单帧钳制 ±400px 防坐标跳变乱飞，用 `lv_obj_scroll_by_bounded` 自动限位。
+- **触摸坐标来源**：按钮的 LVGL 事件不带坐标，故复用 `lvgl_port` 的触摸
+  订阅（与 LVGL 输入设备同一份数据、同一份 29/30 校准），按住期间手指可
+  移出按钮画大圈；按坐标过滤多点串扰（另一根手指在列表上滑动时不响应）。
+- **点击 vs 画圈**：按下记起始角度，按住期间若有任何角度变化则标记"转过"；
+  松开时未转过 → `ui_toast_show_ms` 弹三行使用说明（4 秒）。
+- **接入**：`main_ui.c`（创建 + 切页通知）、`ui/dir_list.c`（tab 0 目标）、
+  `ui/playlist_page.c`（tab 1 目标）、`ui/settings_menu.c`（覆盖层开合）；
+  `lvgl_port_unregister_touch_cb` 签名补上 `user_ctx` 以便精确注销。
+- 顺带修复一个**既有隐患**：`power_service` 守护任务原先用内部 RAM 建 3KB
+  栈，开机末期内部 RAM 已近耗尽（实测内部空闲约 4.5KB、DMA 空闲约 2KB），
+  任务创建失败 → 自动息屏/低电关机/暂停关机全部失效（日志
+  `create power service task failed`）。改为从 PSRAM 分配任务栈后恢复正常。
+- **功能开关（后续补充）**：新增 NVS 配置 `click_wheel`（键 `clkwheel`，
+  默认 **开**），设置菜单根页面新增「虚拟 ClickWheel」行（图标
+  `LV_SYMBOL_REFRESH`，右侧状态 开/关），点击切换并持久化、**立即生效**
+  （`click_wheel_set_enabled()` 直接隐藏/显示按钮，无需重启）。
+  ⚠ 根页面因此变成 6 行，内容高度超出可视区（实测 357px 可视 / 426px 需求）
+  → 根页面出现滚动条（用户确认可接受）。
+- ⚠ 调试版（精简字体）缺「你点击的是 ClickWheel／按住该按钮并在屏幕上画圈
+  可以快速翻页」中的中文字，Toast 会显示方块；发布版（完整字体）正常。
+
+## 28. 内部 RAM 耗尽：非实时任务栈迁到 PSRAM ✅ 已完成
+
+**问题**（长期潜伏，非某次改动引入）：开机末期内部 RAM 仅剩约 4~5KB、
+最大连续块约 8.6KB，任何新建任务都会失败。已观察到的症状：
+`create power service task failed`（自动息屏/低电关机全失效）、设置菜单
+"重新扫描"点了没反应（无法分配栈内存）、`performance_monitor` 的
+`mem_monitor`/`cpu_coll0`/`cpu_coll1` 起不来（串口不再打印 MEM 行）。
+
+**根因**（实测数据见 `PSRAM_TASK_STACK.md`）：`SPIRAM_USE_MALLOC=y` +
+`SPIRAM_MALLOC_ALWAYSINTERNAL=16384` 下**小于 16KB 的分配优先走内部 RAM**，
+而 LVGL（`LV_MEM_CUSTOM=stdlib`）的控件/样式/缓存单次分配都很小，于是
+222KB 内部 RAM 被大量小对象瓜分（启动 273KB → 开机完成约 19KB），PSRAM
+反而用不上。与 0.9.0.0 alpha 3 对比确认该状况在 alpha 3 就已存在
+（当时 performance_monitor 已经起不来），并非新引入。
+
+**方案**（2026-09 完成）：
+- 新增 `core/utils/task_psram.{c,h}` 的 `task_create_psram_stack()`：
+  先 `xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM)`，失败自动
+  回退内部 RAM（调用方无需分支）；TCB 仍在内部 RAM（约 100B/任务）。
+- `sdkconfig.defaults` 显式加 `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`。
+- 迁移清单（常驻净省约 12KB）：`mem_monitor`、`cpu_coll0/1`、`batt_log`、
+  `rescan`(4KB)、`dev_restart`、`cover_load`、`power_svc`、`touch_init`。
+- 保持内部 RAM：`LVGL`、`mp3_play`/`mp3_out`、`button_svc`、
+  `player_ctrl`/`deep_worker`/`sleep_timer`（实时/低延迟/主路径）、
+  `boot_scan`(32KB，扫描要擦写分区 → munmap 关缓存，PSRAM 栈会 assert；
+  开机早期内部 RAM 尚有约 130KB，内部栈可分配）。
+- 实测：内部空闲 4.5KB → **16~17KB**；MEM 行恢复输出，stk 行可见
+  `mem_monitor=1968 cpu_coll0=348 cpu_coll1=376`（HWM 余量正常）；
+  自动息屏/重新扫描/封面加载/触摸初始化均正常。
+- 后续新建后台任务**默认用 `task_create_psram_stack`**；判断"是否又紧张"
+  看 `MEM:` 行的 `iram=` 列与最大连续块（详见 `PSRAM_TASK_STACK.md`）。
+
+## 29. 重新扫描崩溃 + 任务无法创建 ✅ 已完成
+
+**两个连锁问题**（均由第 28 点的迁移暴露/引入）：
+
+1. **崩溃**：`rescan` 任务栈迁到 PSRAM 后，点"重新扫描"立刻 panic：
+   ```
+   assert failed: esp_cache_freeze_caches_disable_interrupts esp_cache_utils.c:96
+   (s_task_stack_is_sane_when_cache_frozen())
+   ...
+   pldata_munmap → esp_partition_munmap → esp_mmu_unmap → 关缓存
+   ```
+   根因：卸载 pldata mmap 会**关闭外部内存缓存**，此时 PSRAM 不可访问，
+   IDF 要求当前任务栈必须在内部 RAM（`esp_cache_utils.c` 的断言）。
+
+2. **任务创建失败**：改用内部栈后 `create rescan task failed`——实测
+   内部空闲约 21KB 但**最大连续块只有 8180 B < 8KB 栈需求**（差 12 字节），
+   先释放 cover_load/sleep_timer 也腾不出更大连续块（日志实测 8180 → 8180）。
+
+**方案**：
+- `rescan` 任务栈仍放 **PSRAM**（4KB，`task_create_psram_stack`）；
+- **关缓存的那段委托给 deep_worker**（内部栈）执行：
+  `deep_worker_call(rescan_do_deinit)` → `player_controller_deinit()`
+  （停播放 + playlist_deinit → munmap）+ `playlist_store_invalidate()`
+  （擦列表头）；
+- deep_worker 栈 **8KB → 12KB**（原 HWM 7436/8192 余量不足以叠加该链；
+  实测新 HWM 11520/12288）；
+  ⚠ **该 12KB 改动已在第 31 点回退为 8KB**（12KB 内部栈在开机末期碎片化下
+  创建静默失败，反而导致息屏/亮屏延迟 5 秒）——此处保留当时的记录。
+- 确认重扫时仍释放 `cover_load`（`now_playing_release_cover_task`）与
+  `sleep_timer`（`sleep_timer_release_task`）——它们马上要重启、职责已无意义，
+  顺带避免重扫途中睡眠定时误触发；
+- 显式约束写入文档/注释：**凡调用链含 mmap/munmap、esp_flash 擦写、
+  pldata_write/erase 的任务，栈必须在内部 RAM**（见 `PSRAM_TASK_STACK.md` 2.4）。
+
+**实测**（COM5 全流程）：确认重扫 → 释放两任务 → 挂起 LVGL →
+`player controller released (... playlist unmapped)` → `playlist invalidated
+(ESP_OK)` → 重启 → `playlist data invalid, prompt to scan` → 重新扫描成功
+（`dirs=171 songs=8816 ret=ESP_OK`），无断言、无崩溃。
+
+## 30. 排查"为何 release 版从未出现内部 RAM 紧张" ✅ 已定位
+
+用户反馈 release 版（alpha 3 起）从未出现内部 RAM 不足，怀疑与 debug 的
+堆毒化有关。同代码同设备 A/B 实测（每次只改一个配置项，测量点：
+`app_main` 开机完成时 + 性能监视稳态）：
+
+| 配置 | 开机完成 internal | 最大连续块 | 稳态 iram |
+|---|---|---|---|
+| debug（`HEAP_POISONING_COMPREHENSIVE=y`） | 25,299 B | 14,836 B | 13,679 B |
+| debug（同配置，仅毒化改 `DISABLED`） | 50,239 B | 31,744 B | 39,547 B |
+| release（毒化 `DISABLED`） | 51,351 B | 31,744 B | ≈39 KB |
+
+**结论**：`CONFIG_HEAP_POISONING_COMPREHENSIVE`（debug 独有）一项就占掉
+约 **26KB** 内部 RAM，并把最大连续块从 31.7KB 压到 14.8KB。机制是该模式
+给每个分配加带调用栈的元数据头、且**禁止空闲块合并**——LVGL 的成千上万
+个小对象把这个代价放大成十几 KB 碎片。所以不是版本差异，而是**堆毒化
+配置差异**；debug 是日常烧录配置，第 28/29 点的迁移仍然必要（迁移后
+debug 稳态约 13.7KB 够用，关毒化则约 39KB 很宽裕）。
+
+保留 Comprehensive 毒化的理由：它曾在"坏曲播放导致 LVGL 对象崩溃"
+（DONE_PLANS 第 16 点）中定位到堆破坏写入者。
+
+**处理（2026-09）**：按用户要求 **debug 默认移除堆毒化**——
+`sdkconfig.defaults.debug` 改为 `CONFIG_HEAP_POISONING_DISABLED=y`，
+文件内保留注释写明"需要抓堆破坏时临时改回 Comprehensive 再构建"。
+第 28/29 点的 PSRAM 栈迁移保留：它让内部 RAM 与毒化开关解耦，
+开/关都有余量（关毒化 debug 稳态约 39KB，开毒化约 13.7KB）。
+
+## 31. deep_worker 任务创建静默失败 → 息屏/亮屏延迟 5 秒 ✅ 已修复
+
+**现象**（用户报告）：按键锁屏/解锁有明显延迟，日志
+`E deep_worker: deep call timed out after 5000 ms (executor stuck?)`。
+
+**定位**（诊断日志给出决定性线索）：执行器**从未开始执行**任何 fn
+（`exec_busy=0`），且超时时 dump 的任务表里**根本没有 `deep_worker` 任务**
+——即任务创建失败但代码没检查返回值，仍打了 "deep worker ready"。
+
+**根因**：第 29 点为给"重新扫描"的关缓存段留余量，把 deep_worker 栈从
+8KB 提到 **12KB**；而它在 `boot_flow` 之后创建，此时内部 RAM 已高度碎片化
+（最大连续块约 8.6KB），12KB 内部栈分配失败 → 任务不存在 → 每次
+`deep_worker_call` 都等满 5s 超时后由调用方就地兜底执行（所以功能还能用，
+只是慢 5 秒）。
+
+**修复**：
+1. 栈回到 **8KB**（实测 HWM 7436/8192 够用）；
+2. `deep_worker_init()` 提前到 `app_main` 早期（config_store 之后、硬件
+   初始化之前）——此时内部 RAM 充裕（约 240KB 空闲），8KB 必定成功；
+3. 检查 `xTaskCreatePinnedToCore` 返回值，失败打 ERROR 并记 NULL；
+4. `deep_worker_call` 发现 `s_exec_task == NULL` 立即返回 false（调用方就地
+   兜底），不再白等 5 秒；
+5. 超时时用 `uxTaskGetSystemState` dump 全部任务状态（名称/状态/优先级），
+   便于以后定位"谁堵住了执行器"；
+6. 修正 `deep_worker_call` 的槽位清理：只有确实收到完成信号才清空
+   `s_pending_fn`，避免超时后"正在跑的执行器"读到下一次投递的函数。
+
+**实测**：`call → exec begin → exec end` 连续出现，息屏 **33ms** 完成
+（原 5s）、亮屏 **335ms**（含面板 120ms 唤醒等待）。
+
+## 32. 开机先播一秒旧歌再跳走（DMA 池被 LVGL 绘制缓冲挤干）✅ 已修复
+
+**现象**（用户报告）：开启随机模式后，每次开机都会**先播放约一秒上次记住的
+音乐，然后随机跳到另一个队列**里去。
+
+**定位**：随机播放逻辑无缺陷。日志关键行是
+`E sdmmc_cmd: allocate_dma_buf: not enough mem, err=0x101`——SD 卡**每次读**
+的 DMA 缓冲（512B）都分配不出来 → 解码器从未真正启动 → `mp3_player` 按
+"解码从未开始"判为 `MP3_STOP_DATA_CORRUPT` → 坏曲自动跳过下一首（随机模式
+下即"跳到另一个队列"）。"先播一秒"是上一首的音频残留在 I2S/解码缓冲里。
+
+**根因**：`lvgl_port.c` 的 `EXAMPLE_LVGL_BUF_HEIGHT = EXAMPLE_LCD_V_RES / 10`
+→ 460×46×2B ≈ 42.3KB × 双缓冲 ≈ **84.6KB DMA**，把 DMA 池压到不足 3KB。
+
+**DMA 池实测分布**（V_RES/20 那次测量，详见 `PSRAM_TASK_STACK.md` 第 4 节）：
+启动 263KB → display 246KB → audio 233KB → SD 227KB → **LVGL 后 171KB** →
+开机完成 **45KB**（boot_flow 的封面/JPEG 解码又吃掉 126KB）。⚠ 不能按"启动
+瞬间还剩 263KB"估算，必须给开机流程留余量。
+
+**修复**：`EXAMPLE_LVGL_BUF_HEIGHT` 改为 **`V_RES / 12`**（双缓冲 ≈ 70KB
+DMA，稳态余量约 15KB，帧率接近原 30fps）。试过 V_RES/20（≈42KB，DMA 很
+宽裕但帧率掉到约 20fps，用户反馈"原本满 30 帧现在掉到 20 帧左右"），故
+取 /12 折中。
+
+**顺带记录的失败尝试**：把绘制缓冲改成**非 DMA** 以省 DMA 池 → SPI 驱动为
+每次传输分配 bounce 缓冲（`setup_dma_priv_buffer`）同样吃 DMA 池 →
+`panel_io_spi_tx_color failed` / `Failed to allocate priv TX buffer` → 刷屏
+阻塞 → 任务看门狗复位。**结论：绘制缓冲必须保持 `MALLOC_CAP_DMA`，只能调
+高度**；调高度时必须同时看帧率与 `heap_caps_get_free_size(MALLOC_CAP_DMA)`。
+
+**实测**（release 版，COM5）：开机不再有 `allocate_dma_buf` 失败，无坏曲
+误判，随机模式开机直接进入随机队列；滚动/翻页流畅。
+
+## 33. 设置菜单说明文字按段落拆分（睡眠定时器页滚动卡顿）✅ 已完成
+
+**现象**（用户反馈）：设置菜单里「睡眠定时器」子页滚动时有卡顿，怀疑是
+"过长的文本写进了同一个条目"。
+
+**根因**：该页的整段说明（4 段、约 250 字）写成了**一个**
+`LV_LABEL_LONG_WRAP` 标签，标签高度数百像素。LVGL 的失效区域按**对象整体**
+计算——滚动时只要有一行文字落在视口内，整个大标签都会被重绘（含视口外的
+部分），换行计算 + 字形渲染集中在同一帧，帧率被拖垮。
+
+**修复**：说明文字**按段落拆成多张独立行卡片**（每段一张卡）：
+
+- 睡眠定时器页：原来的 1 张超长卡 → 3 张段落卡；
+- 开发者选项页：同样的 1 张长卡 → 3 张段落卡（同一模式的预防性修复）。
+
+拆分后每帧只有与失效区域相交的卡片重绘，滚动明显顺畅。
+
+**约定（写入 `settings_menu.c` 注释）**：本菜单的说明文字一律"**一段一卡**"，
+不要再把多段文字写进单个标签。
+
+**顺带修正**：睡眠说明里的错别字「同时按下两个按键**既**可唤醒」→「**即**可」。
+
+**实测**：release 版 COM5 烧录后菜单开合、睡眠定时器页滚动正常，无报错。
+
 

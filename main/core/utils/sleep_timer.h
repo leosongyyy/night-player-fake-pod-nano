@@ -103,6 +103,16 @@ void sleep_timer_fade_cancel(void);
  */
 void sleep_timer_note_activity(void);
 
+/**
+ * @brief 释放睡眠定时任务（仅"重新扫描/重启前腾内部 RAM"场景使用）
+ *
+ * 删除守护任务并清空句柄，释放约 4KB 内部 RAM 栈。调用后本模块的
+ * 定时/渐降/加时功能全部失效，仅适用于**马上要 esp_restart** 的路径
+ * （如设置菜单"重新扫描"，见 ui/settings_menu.c 的 rescan_release_tasks）。
+ * 幂等：任务已释放或从未创建时安全返回。
+ */
+void sleep_timer_release_task(void);
+
 #ifdef __cplusplus
 }
 #endif

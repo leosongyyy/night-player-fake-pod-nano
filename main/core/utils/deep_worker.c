@@ -1,7 +1,9 @@
 #include "core/utils/deep_worker.h"
 
 #include <assert.h>
+#include <stdio.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -10,10 +12,17 @@
 static const char *TAG = "deep_worker";
 
 /* 执行器任务参数
-   ⚠ 栈 8KB：本任务执行所有"深调用链"（息屏/亮屏的 esp_pm_configure +
-   AMOLED 重新初始化 + lv_refr_now 全屏重刷、伪关机停外设/渲染提示等）。
-   历史实测这些链在 8KB 栈上可安全运行——button/fake_shutdown 任务曾各自
-   用 8KB 扛同类链（3KB/2KB 时曾爆栈）。实测栈高水位后可按需下调。
+   ⚠ 栈 8KB（**不能再加大**）：本任务执行所有"深调用链"（息屏/亮屏的
+   esp_pm_configure + AMOLED 重新初始化 + lv_refr_now 全屏重刷、伪关机
+   停外设/渲染提示等），以及设置菜单"重新扫描"的关缓存段
+   （player_controller_deinit → playlist_deinit → pldata_munmap →
+   esp_partition_munmap：关缓存要求当前任务栈在内部 RAM）。
+   ⚠ **曾把栈提到 12KB 导致任务创建静默失败**：内部 RAM 在开机末期高度
+   碎片化（最大连续块约 8.6KB），12KB 内部栈分配不出来，而当时未检查
+   xTaskCreatePinnedToCore 返回值 → 任务根本不存在 → 每次 deep_worker_call
+   都等满 5s 超时（表现为"按键息屏/亮屏明显延迟 5 秒"）。
+   8KB 实测 HWM 约 7.4KB，够用；需要更大栈时**不能加大本任务**，
+   而应把新链拆到独立任务（栈从 PSRAM 分配，见 core/utils/task_psram.h）。
    ⚠ 优先级 6（沿用原伪关机任务参数）：高于 LVGL(2)/按键(4)，保证息屏/
    关机动作不被拖延；低于音频(8)，不会饿死解码。
    ⚠ 固定 Core0（与原伪关机任务一致；app_main 于 Core0 初始化全部驱动
@@ -39,6 +48,43 @@ static SemaphoreHandle_t s_mux = NULL;
 
 static deep_worker_fn_t s_pending_fn = NULL;
 static void *s_pending_arg = NULL;
+static TaskHandle_t s_exec_task = NULL;   /* 执行器任务句柄（诊断用） */
+static volatile bool s_exec_busy = false; /* 执行器是否正在跑 fn（诊断用） */
+
+/* ---- 诊断辅助：超时时打印所有任务状态，定位"谁把执行器堵住了" ----
+   ⚠ 依赖 CONFIG_FREERTOS_USE_TRACE_FACILITY（uxTaskGetSystemState）；
+   release 配置未开启该选项，故条件编译掉（超时日志本身仍保留）。 */
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+static const char *dw_task_state_str(eTaskState st)
+{
+    switch (st) {
+    case eRunning:   return "RUN";
+    case eReady:     return "READY";
+    case eBlocked:   return "BLOCKED";
+    case eSuspended: return "SUSP";
+    case eDeleted:   return "DEL";
+    default:         return "?";
+    }
+}
+
+/* 打印所有任务的状态与优先级（诊断：谁把执行器堵住了） */
+static void dw_dump_tasks(void)
+{
+    static TaskStatus_t arr[24];
+    UBaseType_t n = uxTaskGetSystemState(arr, 24, NULL);
+    char buf[384];
+    size_t pos = 0;
+    for (UBaseType_t i = 0; i < n && pos < sizeof(buf) - 24; i++) {
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, " %s=%s/%u",
+                                arr[i].pcTaskName,
+                                dw_task_state_str(arr[i].eCurrentState),
+                                (unsigned)arr[i].uxCurrentPriority);
+    }
+    ESP_LOGW(TAG, "tasks:%s", buf);
+}
+#else
+static void dw_dump_tasks(void) { }
+#endif
 
 /* 执行器任务：等待请求 → 执行 fn → 通知完成，循环往复 */
 static void deep_worker_task(void *arg)
@@ -51,7 +97,13 @@ static void deep_worker_task(void *arg)
         s_pending_fn = NULL;
         s_pending_arg = NULL;
         if (fn != NULL) {
-            fn(a);   /* 深链在 8KB 大栈上执行 */
+            /* 诊断日志：证明执行器确实取到并执行了 fn（历史上曾因任务创建
+               失败而永远收不到请求，只有这两行能区分"没执行"与"执行慢"） */
+            ESP_LOGI(TAG, "exec begin fn=%p", (void *)fn);
+            s_exec_busy = true;
+            fn(a);   /* 深链在大栈上执行 */
+            s_exec_busy = false;
+            ESP_LOGI(TAG, "exec end fn=%p", (void *)fn);
         }
         xSemaphoreGive(s_done);                 /* 通知投递者已完成 */
     }
@@ -64,10 +116,23 @@ void deep_worker_init(void)
     s_mux = xSemaphoreCreateMutex();
     assert(s_req != NULL && s_done != NULL && s_mux != NULL);
 
-    xTaskCreatePinnedToCore(deep_worker_task, "deep_worker",
-                            DEEP_WORKER_TASK_STACK, NULL,
-                            DEEP_WORKER_TASK_PRIO, NULL,
-                            DEEP_WORKER_TASK_CORE);
+    /* ⚠ 必须检查返回值：内部 RAM 碎片化时 8KB 内部栈也可能分配失败，
+       失败后若不报错，任务不存在 → 每次 deep_worker_call 都等满超时
+       （历史事故：栈被改成 12KB 后静默失败，息屏/亮屏延迟 5 秒）。 */
+    BaseType_t ret = xTaskCreatePinnedToCore(deep_worker_task, "deep_worker",
+                                             DEEP_WORKER_TASK_STACK, NULL,
+                                             DEEP_WORKER_TASK_PRIO,
+                                             &s_exec_task,
+                                             DEEP_WORKER_TASK_CORE);
+    if (ret != pdPASS) {
+        s_exec_task = NULL;
+        ESP_LOGE(TAG, "create deep worker task FAILED (stack=%d B, internal "
+                      "free=%u largest=%u) — deep calls will time out!",
+                 DEEP_WORKER_TASK_STACK,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        return;
+    }
     ESP_LOGI(TAG, "deep worker ready: stack=%d B prio=%d core=%d",
              DEEP_WORKER_TASK_STACK, DEEP_WORKER_TASK_PRIO, DEEP_WORKER_TASK_CORE);
 }
@@ -81,6 +146,12 @@ bool deep_worker_call(deep_worker_fn_t fn, void *arg)
     if (fn == NULL) {
         return false;
     }
+    /* 执行器任务未创建（init 时内部 RAM 不足）：直接返回 false，
+       由调用方就地兜底执行，不要白等 5 秒超时 */
+    if (s_exec_task == NULL) {
+        ESP_LOGE(TAG, "executor task missing, running inline");
+        return false;
+    }
 
     /* 串行化投递：持有 s_mux 直到本次执行完成，后续投递排队等待 */
     xSemaphoreTake(s_mux, portMAX_DELAY);
@@ -89,12 +160,18 @@ bool deep_worker_call(deep_worker_fn_t fn, void *arg)
     xSemaphoreTake(s_done, 0);                  /* 清可能残留的完成信号（防御） */
     xSemaphoreGive(s_req);
     const bool ok = (xSemaphoreTake(s_done, pdMS_TO_TICKS(DEEP_WORKER_TIMEOUT_MS)) == pdTRUE);
-    s_pending_fn = NULL;
-    s_pending_arg = NULL;
+    /* ⚠ 只有确实收到完成信号才清空槽位：超时时执行器可能仍在跑 fn，
+       此时清空槽位会让"下一次投递"的函数被这个正在跑的执行器读到并执行
+       （错配 + 后续 done 信号被误消费）。 */
+    if (ok) {
+        s_pending_fn = NULL;
+        s_pending_arg = NULL;
+    }
     xSemaphoreGive(s_mux);
     if (!ok) {
-        ESP_LOGE(TAG, "deep call timed out after %d ms (executor stuck?)",
-                 DEEP_WORKER_TIMEOUT_MS);
+        ESP_LOGE(TAG, "deep call timed out after %d ms (executor stuck? busy=%d)",
+                 DEEP_WORKER_TIMEOUT_MS, (int)s_exec_busy);
+        dw_dump_tasks();
     }
     return ok;
 }

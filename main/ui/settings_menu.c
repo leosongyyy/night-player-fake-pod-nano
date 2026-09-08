@@ -6,12 +6,18 @@
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/storage/playlist_store.h"
+#include "core/ui/click_wheel.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/deep_worker.h"
+#include "core/utils/sleep_timer.h"
+#include "core/utils/task_psram.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
+#include "ui/now_playing.h"
 
 #include <stdio.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -74,6 +80,7 @@ static lv_point_t s_bg_press_point = { 0, 0 };
 static lv_obj_t *s_sleep_def_on_status = NULL;   /* 睡眠定时器（开机默认开启） */
 static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
 static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
+static lv_obj_t *s_click_wheel_status  = NULL;   /* 虚拟 ClickWheel（开/关） */
 
 /* 息屏档位子页的行对象（选中项高亮刷新用） */
 static lv_obj_t *s_screen_off_rows[SCREEN_OFF_STEP_COUNT] = { NULL };
@@ -250,6 +257,10 @@ static void menu_refresh_root(void)
         screen_off_format(config_store_get_screen_off_s(), buf, sizeof(buf));
         lv_label_set_text(s_screen_off_status, buf);
     }
+    if (s_click_wheel_status != NULL) {
+        lv_label_set_text(s_click_wheel_status,
+                          config_store_get_click_wheel() ? "开" : "关");
+    }
 }
 
 /* 刷新息屏档位子页的选中高亮（进入子页/切换档位后调用）。
@@ -293,6 +304,19 @@ static void awake_row_cb(lv_event_t *e)
     menu_refresh_root();
 }
 
+/* 虚拟 ClickWheel 开关：点击切换并持久化（NVS），**立即生效**——
+   config_store 写完后直接驱动 click_wheel 隐藏/显示速滑按钮，
+   不需要像开发者选项那样重启（见 core/ui/click_wheel.h） */
+static void click_wheel_row_cb(lv_event_t *e)
+{
+    (void)e;
+    bool on = !config_store_get_click_wheel();
+    config_store_set_click_wheel(on);
+    click_wheel_set_enabled(on);
+    menu_refresh_root();
+    ESP_LOGI(TAG, "virtual click wheel -> %d", (int)on);
+}
+
 /* 息屏档位行：点击设置并返回根页面。
    ⚠ 不能直接 lv_menu_set_page(root)：lv_menu 会把 root 也压入历史
    （cur_depth 增长），返回按钮会"先回子页再回根"；先 clear_history
@@ -324,22 +348,52 @@ static void back_btn_cb(lv_event_t *e)
 /* ------------------------------------------------------------------ */
 
 /* 重新扫描任务参数：流程含 mp3_player_stop 的等待（解码任务退出、释放
-   文件句柄/I2S，最多 1s），放独立高栈任务执行，避免阻塞 LVGL/按键任务 */
-#define RESCAN_TASK_STACK  (8 * 1024)
+   文件句柄/I2S，最多 1s），放独立任务执行，避免阻塞 LVGL/按键任务。
+   ⚠ 栈放 **PSRAM**（task_create_psram_stack）：触发时内部 RAM 已被 LVGL
+   堆吃满（实测仅剩约 22KB，而**最大连续块只有 8180 B < 8KB 栈需求**，
+   内部分配必然失败——历史症状"无法分配栈内存/点了没反应"）。
+   ⚠ 但"关缓存"的那段必须跑在**内部栈**上：本流程要 unmap pldata 分区
+   （player_controller_deinit → playlist_deinit → pldata_munmap →
+   esp_partition_munmap → esp_mmu_unmap），关缓存期间 PSRAM 不可访问，
+   栈在 PSRAM 会命中 esp_cache_freeze_caches_disable_interrupts 的断言
+   s_task_stack_is_sane_when_cache_frozen() 直接崩溃。故这段委托给
+   deep_worker（内部大栈，见 rescan_do_deinit）。 */
+#define RESCAN_TASK_STACK  (4 * 1024)
 #define RESCAN_TASK_PRIO   6
 #define RESCAN_TASK_CORE   1
 
-/* 重新扫描任务：停止所有播放事务 → 释放资源（含 playlist mmap）→ 使已存
-   播放列表数据无效 → 重启。重启后 boot_flow 检测到分区无效，进入"需要
-   扫描音乐"界面，用户确认后重新扫描 SD 卡（完整闭环，无需本任务做扫描）。
+/* 释放"重扫前可丢"的任务：用户已确认重扫（马上 esp_restart），这些任务的
+   职责不再有意义，顺带停掉它们避免重扫过程中被误触发（如睡眠定时到点渐降）：
+   - cover_load（6KB，Core1，阻塞在通知上）：不再需要换封面；
+   - sleep_timer（4KB，Core1，1s 轮询）：不再需要睡眠定时/音量渐降。
+   两个模块内部都会把句柄置空，避免残留野句柄被后续唤醒/通知使用。 */
+static void rescan_release_tasks(void)
+{
+    now_playing_release_cover_task();
+    sleep_timer_release_task();
+}
+
+/* 关缓存段（在 deep_worker 内部栈上执行）：停止播放控制器 → 卸载播放列表
+   mmap → 擦除列表头使数据失效。
+   ⚠ 必须在内部栈执行（见 RESCAN_TASK_STACK 注释）；fn 内禁止再调
+   deep_worker_call（会持锁等自身死锁）。 */
+static void rescan_do_deinit(void *arg)
+{
+    (void)arg;
+    player_controller_deinit();
+    esp_err_t ret = playlist_store_invalidate();
+    ESP_LOGI(TAG, "playlist invalidated (%s)", esp_err_to_name(ret));
+}
+
+/* 重新扫描任务（PSRAM 栈）：挂起 LVGL → 委托 deep_worker 停播放/卸载映射/
+   使数据失效 → 重启。重启后 boot_flow 检测到分区无效，进入"需要扫描音乐"
+   界面，用户确认后重新扫描 SD 卡（完整闭环，无需本任务做扫描）。
 
    ⚠ 顺序不可颠倒（内存安全关键）：
    1. 先挂起 LVGL：player_ticker/列表刷新/正在播放页等都在 LVGL 任务上下文
       读 playlist 指针，不先挂起的话，playlist 卸载后它们会访问失效映射；
-   2. player_controller_deinit()：停播放 → 停控制器任务 → 删队列 →
-      playlist_deinit()（munmap + 清空 playlist 指针）；
-   3. playlist_store_invalidate()：擦头部扇区（此刻已无任何任务访问
-      playlist 数据，pldata 层也会在擦除前自动 unmap，双重保险）。 */
+   2. rescan_do_deinit（deep_worker）：停播放 → 停控制器任务 → 删队列 →
+      playlist_deinit()（munmap + 清空 playlist 指针）→ 擦头使数据失效。 */
 static void rescan_task(void *arg)
 {
     (void)arg;
@@ -350,31 +404,36 @@ static void rescan_task(void *arg)
     lvgl_port_suspend();
     ESP_LOGI(TAG, "LVGL suspended");
 
-    /* 2. 停止播放 + 释放播放列表映射（停止控制器任务后才安全 unmap） */
-    player_controller_deinit();
+    /* 2. 停播放 + 卸载播放列表映射 + 使数据失效：必须跑在内部栈
+          （deep_worker），本任务是 PSRAM 栈，直接做 munmap 会触发关缓存断言 */
+    if (!deep_worker_call(rescan_do_deinit, NULL)) {
+        ESP_LOGW(TAG, "deep_worker unavailable, run deinit on this task "
+                      "(PSRAM stack: munmap may assert)");
+        rescan_do_deinit(NULL);
+    }
 
-    /* 3. 使已存播放列表数据无效（只擦头部扇区，数据区保留）：
-          重启后 playlist_store_is_valid() == false → boot_flow 提示重新扫描 */
-    esp_err_t ret = playlist_store_invalidate();
-    ESP_LOGI(TAG, "playlist invalidated (%s), restarting to rescan",
-             esp_err_to_name(ret));
-
-    /* 4. 等待日志刷出后重启 */
+    /* 3. 等待日志刷出后重启 */
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
     vTaskDelete(NULL);   /* 理论不可达 */
 }
 
-/* 重新扫描确认（"是"）：创建独立任务执行停止→无效化→重启 */
+/* 重新扫描确认（"是"）：释放可丢任务 → 创建 PSRAM 栈重扫任务 */
 static void rescan_confirm_cb(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "rescan confirmed, start rescan task");
-    if (xTaskCreatePinnedToCore(rescan_task, "rescan",
+    rescan_release_tasks();
+
+    /* ⚠ 栈放 PSRAM（内部 RAM 最大连续块不足 8KB，见 RESCAN_TASK_STACK
+       注释）；关缓存段由 rescan_task 内部委托 deep_worker 执行 */
+    if (task_create_psram_stack(rescan_task, "rescan",
                                 RESCAN_TASK_STACK, NULL,
                                 RESCAN_TASK_PRIO, NULL,
                                 RESCAN_TASK_CORE) != pdPASS) {
-        ESP_LOGE(TAG, "create rescan task failed");
+        ESP_LOGE(TAG, "create rescan task failed (internal free=%u, largest=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     }
 }
 
@@ -557,11 +616,13 @@ static void dev_options_page_build(lv_obj_t *about_page)
     lv_obj_add_flag(touch_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(touch_row, dev_touch_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 4. 功能说明（小字） */
+    /* 4. 功能说明（小字）：同样按段落拆成多张卡片（滚动性能，见睡眠定时器页注释） */
     menu_note_row_create(dev_page,
-        "电池电压日志：定期采样电池电压写入 SD 卡\n"
-        "/sdcard/battery_log.txt，用于续航/功耗曲线分析。\n"
-        "触摸测试白点：白色圆点跟随手指，用于校准触摸区域。\n"
+        "电池电压日志：定期采样电池电压写入 SD 卡 /sdcard/battery_log.txt，"
+        "用于续航/功耗曲线分析。");
+    menu_note_row_create(dev_page,
+        "触摸测试白点：白色圆点跟随手指，用于校准触摸区域。");
+    menu_note_row_create(dev_page,
         "以上修改保存到设备（NVS），重启后生效。");
 
     /* 5. 立即重启：一键生效 */
@@ -588,7 +649,10 @@ static void dev_options_page_build(lv_obj_t *about_page)
 /* 页面构建                                                             */
 /* ------------------------------------------------------------------ */
 
-/* 根页面：5 个功能行 */
+/* 根页面：6 个功能行（睡眠定时器 / 屏幕自动息屏 / 虚拟 ClickWheel /
+   按键帮助 / 关于 / 重新扫描）。
+   ⚠ 行数增加后根页面内容高度超过可视区（实测 6 行需 426px、可视 357px），
+   页面会出现滚动条——这是预期行为，不再压缩行距。 */
 static void root_page_build(void)
 {
     /* ⚠ lv_menu_page_create 的 title 是 char*（非 const），内部会拷贝，
@@ -613,16 +677,24 @@ static void root_page_build(void)
     lv_obj_add_flag(awake_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(awake_toggle, awake_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 底部说明 1：开机默认开启的提醒机制 + 清醒感知（用户文案）+ 倒计时即将
-       结束时音量逐渐减小（NightPlayer 原版机制） */
+    /* 底部说明：按**段落拆成多条**独立行卡片（每段一张卡）。
+       ⚠ 性能原因（实测本页滚动卡顿）：原先整页说明写成**一个**超长
+       `LV_LABEL_LONG_WRAP` 标签，标签高度数百像素；LVGL 的失效区域按
+       **对象整体**计算，滚动时只要有一行文字在视口内，整个大标签都会被
+       重绘（含视口外的部分），换行计算与字形渲染都在同一帧里做。
+       拆成多张卡片后，每帧只有与失效区域相交的卡片重绘，滚动明显顺畅。
+       ⚠ 后续给本菜单加说明文字时，请沿用"一段一卡"，不要写回单个长标签。 */
     menu_note_row_create(sleep_page,
         "功能说明：\n"
-        "开启「开机默认开启」后，每次开机会自动开启睡眠定时器，并在进入主界面时弹出提示"
-        "提醒您（不需要时可在播放设置页长按睡眠定时格子关闭）。\n"
-        "开启清醒感知后，若在睡眠定时器期间进行操作，"
-        "剩余时间会按照一定比例增加。让您在入梦前音乐不断。倒计时即将结束时，音量会逐渐减小，让音乐自然淡出。\n"
-        "睡眠定时到点后，播放器只进入休眠状态（所有外设关闭，低功耗待机，同时按下两个按键既可唤醒）"
-        "这是硬件的限制。如果要彻底关机省电，请在第二天早上长按3秒上键手动关机。");
+        "开启「开机默认开启」后，每次开机会自动开启睡眠定时器，并在进入主界面时"
+        "弹出提示提醒您（不需要时可在播放设置页长按睡眠定时格子关闭）。");
+    menu_note_row_create(sleep_page,
+        "开启清醒感知后，若在睡眠定时器期间进行操作，剩余时间会按照一定比例增加，"
+        "让您在入梦前音乐不断；倒计时即将结束时，音量会逐渐减小，让音乐自然淡出。");
+    menu_note_row_create(sleep_page,
+        "睡眠定时到点后，播放器只进入休眠状态（所有外设关闭，低功耗待机，"
+        "同时按下两个按键即可唤醒），这是硬件的限制。"
+        "如果要彻底关机省电，请在第二天早上长按 3 秒上键手动关机。");
     lv_obj_t *row1 = menu_row_create(s_root_page, LV_SYMBOL_POWER,
                                      "睡眠定时器", NULL);
     lv_menu_set_load_page_event(s_menu, row1, sleep_page);
@@ -642,6 +714,13 @@ static void root_page_build(void)
     lv_obj_t *row3 = menu_row_create(s_root_page, LV_SYMBOL_EYE_CLOSE,
                                      "屏幕自动息屏", &s_screen_off_status);
     lv_menu_set_load_page_event(s_menu, row3, screen_off_page);
+
+    /* 3. 虚拟 ClickWheel：开关（长列表右下角速滑按钮，默认开；点击立即生效）。
+        图标与按钮本身一致（LV_SYMBOL_REFRESH） */
+    lv_obj_t *cw_row = menu_row_create(s_root_page, LV_SYMBOL_REFRESH,
+                                       "虚拟 ClickWheel", &s_click_wheel_status);
+    lv_obj_add_flag(cw_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(cw_row, click_wheel_row_cb, LV_EVENT_CLICKED, NULL);
 
     /* 4. 按键帮助：子页静态说明。
        按键命名用社区通用说法：上键 = A 键（电源键），下键 = B 键；
@@ -768,6 +847,9 @@ void settings_menu_show(void)
        不再参与重绘，消除菜单滚动时被底层大图拖慢的卡顿。
        菜单本身是全屏独立覆盖层，隐藏主界面不影响其显示 */
     main_ui_set_visible(false);
+    /* 隐藏顶层 ClickWheel：它在 lv_layer_top 上，会盖在菜单之上并拦截
+       该区域的触摸（见 core/ui/click_wheel.h） */
+    click_wheel_set_overlay(true);
 
     /* 重置到根页面：仅当当前不在根页面时才清历史并切回。
        ⚠ 不能无条件 clear_history + set_page(root)：main_page 已是 root 时
@@ -794,8 +876,9 @@ void settings_menu_hide(void)
     lv_obj_add_flag(s_menu, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_menu_bg, LV_OBJ_FLAG_HIDDEN);
     s_visible = false;
-    /* 恢复主界面显示（页面状态/滚动位置全部保留） */
+    /* 恢复主界面显示（页面状态/滚动位置全部保留）+ 恢复顶层 ClickWheel */
     main_ui_set_visible(true);
+    click_wheel_set_overlay(false);
     ESP_LOGI(TAG, "settings menu hidden");
 }
 

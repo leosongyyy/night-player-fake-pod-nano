@@ -20,9 +20,15 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # LVGL FPS 计数（屏幕角落显示刷新帧率/耗时）
 CONFIG_LV_USE_PERF_MONITOR=y
 
-# Comprehensive 堆毒化：越界写在释放时立即报 CORRUPT HEAP 并打印写入者调用
-# 栈，专用于在开发/调试阶段抓取堆破坏与悬垂对象类崩溃（曾用于定位坏曲播放
-# 导致的 LVGL 对象崩溃）。性能有少量开销，release 版不启用。
-CONFIG_HEAP_POISONING_COMPREHENSIVE=y
-# CONFIG_HEAP_POISONING_DISABLED is not set
+# 堆毒化：**默认关闭**（2026-09 实测开关对比结论，见 PSRAM_TASK_STACK.md）
+# Comprehensive 模式给每个分配加带调用栈的元数据头、且禁止空闲块合并，
+# 实测多占约 26KB 内部 RAM 并把最大连续块从 31.7KB 压到 14.8KB——这是
+# debug 版内部 RAM 紧张、任务创建失败（power_svc/rescan/performance_monitor）
+# 的直接原因，release 版因此从未出现该问题。
+# 需要抓堆破坏/悬垂对象崩溃时，临时改回下面两行再构建（曾用于定位坏曲播放
+# 导致的 LVGL 对象崩溃）：
+#   CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+#   # CONFIG_HEAP_POISONING_DISABLED is not set
+CONFIG_HEAP_POISONING_DISABLED=y
 # CONFIG_HEAP_POISONING_LIGHT is not set
+# CONFIG_HEAP_POISONING_COMPREHENSIVE is not set

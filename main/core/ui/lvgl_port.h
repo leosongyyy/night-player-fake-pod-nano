@@ -74,11 +74,15 @@ typedef void (*lvgl_port_touch_cb_t)(bool pressed, uint16_t x, uint16_t y, void 
 void lvgl_port_register_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
 
 /**
- * @brief 注销触摸事件回调（按 cb 匹配，忽略 ctx）
+ * @brief 注销触摸事件回调（按 cb + user_ctx 精确匹配）
  *
- * @param cb 之前注册过的回调函数；传 NULL 忽略
+ * 仅注销注册时 cb 与 user_ctx 都相同的那个订阅；同一回调为多个上下文
+ * 注册过时（如多个 ClickWheel 实例），只移除匹配的那一个。
+ *
+ * @param cb       之前注册过的回调函数；传 NULL 忽略
+ * @param user_ctx 注册时传入的用户上下文（需与注册时一致）
  */
-void lvgl_port_unregister_touch_cb(lvgl_port_touch_cb_t cb);
+void lvgl_port_unregister_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
 
 /**
  * @brief 设置触摸句柄（触摸异步初始化完成后调用）

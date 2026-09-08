@@ -32,6 +32,9 @@ extern "C" {
  *     sleep_timer；音量调节不再加时）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调
+ *   - 虚拟 ClickWheel click_wheel（bool，默认**开**）：长列表右下角速滑按钮
+ *     是否启用（见 core/ui/click_wheel）。设置在设置菜单 →「虚拟 ClickWheel」
+ *     行切换，立即生效（隐藏/显示按钮，无需重启）
  *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关，
  *     开机读取决定是否启动相关任务/创建调试对象，修改需重启生效）：
  *     - 电池电压采样日志 battery_log（bool，默认关）+ 采样间隔
@@ -70,6 +73,7 @@ extern "C" {
 #define CONFIG_STORE_SLEEP_DEF_ON_DEFAULT 0u  /* 开机默认不自动开启睡眠定时 */
 #define CONFIG_STORE_SLEEP_AWAKE_DEFAULT 1u   /* 睡眠清醒感知默认开启（NightPlayer 行为） */
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
+#define CONFIG_STORE_CLICK_WHEEL_DEFAULT 1u  /* 虚拟 ClickWheel 默认启用 */
 #define CONFIG_STORE_BATT_LOG_DEFAULT     0u  /* 电池电压日志默认关（开发者选项开启） */
 #define CONFIG_STORE_BATT_LOG_MIN_DEFAULT 5u  /* 日志采样间隔默认 5 分钟 */
 #define CONFIG_STORE_BATT_LOG_MIN_MAX     120u /* 日志间隔上限（分钟，防越界） */
@@ -119,6 +123,9 @@ bool config_store_get_sleep_awake(void);
 
 /** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
 uint32_t config_store_get_screen_off_s(void);
+
+/** @brief 虚拟 ClickWheel 速滑按钮开关（true=长列表显示速滑按钮；默认开） */
+bool config_store_get_click_wheel(void);
 
 /** @brief 电池电压采样日志开关（true=开机创建 batt_log 任务；默认关） */
 bool config_store_get_battery_log(void);
@@ -191,6 +198,11 @@ void config_store_set_sleep_awake(bool on);
 
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);
+
+/** @brief 设置虚拟 ClickWheel 开关并持久化（设置菜单「虚拟 ClickWheel」行）。
+ *          与"重启生效"的开发者选项不同，本项立即生效：调用方随后
+ *          click_wheel_set_enabled() 隐藏/显示速滑按钮；同时通知变更回调 */
+void config_store_set_click_wheel(bool on);
 
 /** @brief 设置电池电压日志开关并持久化（开发者选项；开机检查，重启生效，
  *          仅持久化不通知回调——无 UI 需要实时同步） */

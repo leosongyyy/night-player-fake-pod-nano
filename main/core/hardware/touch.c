@@ -1,5 +1,6 @@
 #include "core/hardware/touch.h"
 #include "core/hardware/display.h"
+#include "core/utils/task_psram.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c.h"
@@ -116,7 +117,12 @@ esp_lcd_touch_handle_t touch_init(void)
     // 异步初始化触摸控制器：控制器完整初始化（含约 400ms 复位等待）放到
     // 后台任务执行，不阻塞后续硬件/UI 初始化。就绪后调用 ready 回调
     //（上层注册，如把句柄交给 LVGL），在此之前触摸回调不给数据。
-    BaseType_t ret = xTaskCreate(touch_init_task, "touch_init", 4096, tp_io_handle, 5, &s_touch_init_task);
+    // ⚠ 栈放 PSRAM：一次性任务，只做 I2C 初始化 + 回调，无实时性要求
+    //（见 core/utils/task_psram.h），省下 4KB 内部 RAM
+    BaseType_t ret = task_create_psram_stack(touch_init_task, "touch_init",
+                                             4096, tp_io_handle, 5,
+                                             &s_touch_init_task,
+                                             tskNO_AFFINITY);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create touch init task");
         return NULL;

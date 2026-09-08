@@ -9,6 +9,7 @@
 #include "core/hardware/display.h"
 #include "core/player/player_controller.h"
 #include "core/storage/playlist.h"
+#include "core/ui/click_wheel.h"
 #include "core/ui/virtual_list.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
@@ -124,6 +125,8 @@ static void dir_list_build(void)
         lv_obj_del(s_loading);
         s_loading = NULL;
     }
+    /* 重建列表：先解除 ClickWheel 的滚动目标（旧列表即将被删除） */
+    click_wheel_set_list(0, NULL, 0);
 
     uint32_t count = playlist_dir_count();
     const playlist_dir_entry_t *dirs =
@@ -143,6 +146,10 @@ static void dir_list_build(void)
     }
     lv_obj_set_pos(s_list, DIR_LIST_X, DIR_LIST_Y);
     virtual_list_set_selected_cb(s_list, dir_selected_cb);
+
+    /* 虚拟 ClickWheel（顶层悬浮按钮）：目录超过 10 页（72 条）时在右下角显示，
+       按住画圈快速翻页（见 core/ui/click_wheel.h） */
+    click_wheel_set_list(0, s_list, count);
 
     /* 定位到当前播放目录（进入界面即能看到正在播放的列表；
        "正在播放"由绑定回调以文字黄色标注，选中状态仅内部记录） */

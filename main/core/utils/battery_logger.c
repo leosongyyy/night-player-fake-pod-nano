@@ -5,6 +5,7 @@
 #include "core/hardware/battery.h"
 #include "core/hardware/sd_card.h"
 #include "core/storage/config_store.h"
+#include "core/utils/task_psram.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -171,7 +172,9 @@ void battery_logger_init(void)
     }
     s_batt_log_interval_min = interval_min;
 
-    if (xTaskCreatePinnedToCore(battery_logger_task, "batt_log",
+    /* 栈放 PSRAM：4KB 内部栈在开机末期内部 RAM 耗尽时会创建失败
+       （本任务只在采样周期醒来写 SD，无实时性要求） */
+    if (task_create_psram_stack(battery_logger_task, "batt_log",
                                 BATT_LOG_TASK_STACK, NULL,
                                 BATT_LOG_TASK_PRIO, NULL,
                                 BATT_LOG_TASK_CORE) != pdPASS) {

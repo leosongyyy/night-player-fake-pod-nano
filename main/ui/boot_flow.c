@@ -40,8 +40,14 @@ static void reset_position_btn_cb(lv_event_t *e);
 /* 扫描进度界面刷新周期（ms） */
 #define BOOT_PROGRESS_TIMER_MS 300u
 
-/* 扫描任务栈：内部 RAM 32KB（解析 .pl 需大局部数组；内部 RAM 栈避免 mmap 断言） */
-#define BOOT_SCAN_STACK_WORDS (32768u / 4u)
+/* 扫描任务栈：32KB（解析 .pl 需大局部数组）。
+   ⚠ 栈**必须在内部 RAM**：扫描过程会调用 pldata_write/pldata_erase_range，
+   其中 pldata_unmap_if_mapped() → esp_partition_munmap → esp_mmu_unmap 会
+   走"关缓存"流程（esp_cache_freeze_caches_disable_interrupts 断言
+   s_task_stack_is_sane_when_cache_frozen()：关缓存期间 PSRAM 不可访问，
+   栈在 PSRAM 会直接 assert 崩溃）。内部 32KB 栈在开机早期仍可分配
+   （此时 UI 尚未创建，内部 RAM 还有约 130KB 空闲）。 */
+#define BOOT_SCAN_STACK_BYTES (32768u)
 
 /* 开机睡眠定时提醒（FUTURE_PLAN 第 27 点）：
    - 延迟：主界面创建后先让首帧画出来、屏幕亮度恢复，再弹提醒，避免提示与
@@ -261,9 +267,10 @@ static void boot_show_scanning(void)
     /* 每 300ms 更新进度，并检查扫描是否完成以切换界面 */
     lv_timer_create(boot_progress_timer_cb, BOOT_PROGRESS_TIMER_MS, NULL);
 
-    /* 启动后台扫描任务（32KB 内部 RAM 栈） */
+    /* 启动后台扫描任务（32KB 栈，⚠ 必须内部 RAM：扫描会触发 pldata 的
+       munmap/erase 关缓存流程，PSRAM 栈会 assert 崩溃，见上方常量注释） */
     BaseType_t ret = xTaskCreatePinnedToCore(boot_scan_task, "boot_scan",
-                                             BOOT_SCAN_STACK_WORDS, NULL, 5,
+                                             BOOT_SCAN_STACK_BYTES / 4u, NULL, 5,
                                              NULL, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "create scan task failed");

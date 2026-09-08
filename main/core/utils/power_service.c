@@ -9,11 +9,14 @@
 #include "core/ui/lvgl_port.h"
 #include "core/utils/deep_worker.h"
 #include "core/utils/fake_shutdown.h"
+#include "core/utils/task_psram.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -233,12 +236,21 @@ void power_service_init(void)
     /* 4. 订阅触摸活动：按下算一次活动（复用 LVGL indev 轮询，无额外轮询） */
     lvgl_port_register_touch_cb(power_service_touch_cb, NULL);
 
-    /* 5. 守护任务（自动息屏 + 自动关机策略检查） */
-    if (xTaskCreatePinnedToCore(power_service_task, "power_svc",
+    /* 5. 守护任务（自动息屏 + 自动关机策略检查）
+       ⚠ 栈放 **PSRAM**（task_create_psram_stack，失败自动回退内部 RAM）：
+       开机末期内部 RAM 已接近耗尽（实测内部空闲仅约 4.5KB、DMA 约 2KB），
+       3KB 栈的内部 RAM 分配会失败（"create power service task failed"），
+       导致自动息屏/自动关机全部失效。本任务每秒醒来一次、只做超时判断与
+       浅投递（深链已交给 deep_worker），PSRAM 栈的性能影响可忽略。 */
+    if (task_create_psram_stack(power_service_task, "power_svc",
                                 POWER_SVC_TASK_STACK, NULL,
                                 POWER_SVC_TASK_PRIO, NULL,
                                 POWER_SVC_TASK_CORE) != pdPASS) {
-        ESP_LOGE(TAG, "create power service task failed");
+        ESP_LOGE(TAG, "create power service task failed (internal free=%u, "
+                      "spiram free=%u, stack=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)POWER_SVC_TASK_STACK);
     }
 
     inited = true;

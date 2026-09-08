@@ -44,6 +44,9 @@ static const char *TAG = "sleep_timer";
 static volatile uint32_t s_minutes = 0;
 static volatile int64_t  s_deadline_us = 0;
 
+/* 守护任务句柄（供重扫前释放内部 RAM 用，见 sleep_timer_release_task） */
+static TaskHandle_t s_task = NULL;
+
 /* 音量渐降状态：s_fade_active/s_fade_origin 仅由本任务修改（恢复也由任务
    统一执行），外部只置 s_restore_requested 请求，避免跨任务直接写音量
    产生竞态。s_last_fade_level 仅本任务使用。 */
@@ -131,7 +134,7 @@ void sleep_timer_init(void)
     }
     BaseType_t ret = xTaskCreatePinnedToCore(sleep_timer_task, "sleep_timer",
                                              SLEEP_TASK_STACK, NULL,
-                                             SLEEP_TASK_PRIO, NULL,
+                                             SLEEP_TASK_PRIO, &s_task,
                                              SLEEP_TASK_CORE);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "create sleep timer task failed");
@@ -139,6 +142,20 @@ void sleep_timer_init(void)
     }
     inited = true;
     ESP_LOGI(TAG, "sleep timer ready (off by default)");
+}
+
+/* 释放守护任务（仅重扫/重启前腾内部 RAM 用，见头文件说明）：删除任务并
+   清空句柄。任务当前可能正在 vTaskDelay 中，删除是安全的（不持锁、不占
+   有跨任务资源；音量渐降状态随重启一并丢弃）。 */
+void sleep_timer_release_task(void)
+{
+    if (s_task == NULL) {
+        return;
+    }
+    TaskHandle_t h = s_task;
+    s_task = NULL;
+    vTaskDelete(h);
+    ESP_LOGI(TAG, "sleep timer task released (freeing internal RAM for rescan)");
 }
 
 /* 开机默认应自动开启的分钟数（纯查询，无副作用）：config_store 的

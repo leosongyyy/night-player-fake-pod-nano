@@ -61,6 +61,17 @@ void app_main(void)
     ESP_LOGI(TAG, "Initialize config store (NVS)");
     config_store_init();
 
+    /* 深路径执行器（常驻大栈任务，Core0）：息屏/亮屏/伪关机的深调用链
+       （esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷 + 停外设）
+       与"重新扫描"的关缓存段集中到该任务执行，业务任务只做浅投递（见
+       core/utils/deep_worker.h）。
+       ⚠ 必须在**开机早期**创建：内部 RAM 在开机末期高度碎片化
+       （最大连续块约 8.6KB），8KB 内部栈此时才稳；曾因把它放在 boot_flow
+       之后且栈加到 12KB，导致任务创建静默失败 → 每次深调用等满 5s 超时
+       （按键息屏/亮屏延迟 5 秒）。 */
+    ESP_LOGI(TAG, "Initialize deep worker");
+    deep_worker_init();
+
     // 硬件初始化
     ESP_LOGI(TAG, "Initialize display");
     esp_lcd_panel_handle_t panel_handle = display_init();
@@ -130,12 +141,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "App started");
 
-    // 深路径执行器（常驻大栈任务，Core0）：息屏/亮屏/伪关机的深调用链
-    // （esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷 + 停外设）
-    // 集中到该任务执行，button/power_service 等业务任务只做浅投递（见
-    // core/utils/deep_worker.h）。必须在任何投递方（睡眠定时器/息屏/按键）
-    // 可能动作之前初始化。
-    deep_worker_init();
+    // 深路径执行器已在 app_main 早期初始化（见上：内部 RAM 碎片化前创建）
 
     // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
     sleep_timer_init();

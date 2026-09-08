@@ -13,6 +13,7 @@
 #include "core/ui/lvgl_port.h"
 #include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
+#include "core/utils/task_psram.h"
 #include "ui/app.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
@@ -689,8 +690,10 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
 
     /* 创建封面加载任务（歌曲变化时后台读 .npd + 解码 JPEG，完成后持锁换图）。
        首次 np_refresh_cb 发生在任务创建前，当时的加载请求因句柄为空被丢弃，
-       创建成功后需主动补发一次，加载当前歌曲封面 */
-    BaseType_t created = xTaskCreatePinnedToCore(cover_load_task, "cover_load",
+       创建成功后需主动补发一次，加载当前歌曲封面。
+       ⚠ 栈放 PSRAM：6KB 内部栈在开机末期内部 RAM 耗尽时创建失败（封面
+       永远不更新）；本任务后台解码、无实时性要求（见 task_psram.h） */
+    BaseType_t created = task_create_psram_stack(cover_load_task, "cover_load",
                                                  COVER_TASK_STACK, NULL,
                                                  COVER_TASK_PRIO, &s_cover_task,
                                                  COVER_TASK_CORE);
@@ -721,4 +724,18 @@ void now_playing_set_marquee(bool enable)
     if (s_sub_label != NULL) {
         lv_label_set_long_mode(s_sub_label, mode);
     }
+}
+
+/* 释放封面加载任务（仅重扫/重启前腾内部 RAM 用，见头文件说明）：
+   删除任务并清空句柄。任务通常阻塞在 ulTaskNotifyTake 上，删除安全；
+   封面图片缓冲（PSRAM）随重启一并回收，无需在此释放。 */
+void now_playing_release_cover_task(void)
+{
+    if (s_cover_task == NULL) {
+        return;
+    }
+    TaskHandle_t h = s_cover_task;
+    s_cover_task = NULL;
+    vTaskDelete(h);
+    ESP_LOGI(TAG, "cover load task released (freeing internal RAM for rescan)");
 }

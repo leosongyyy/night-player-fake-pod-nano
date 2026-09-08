@@ -2,6 +2,8 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/display.h"
+#include "core/storage/config_store.h"
+#include "core/ui/click_wheel.h"
 #include "ui/app.h"
 #include "ui/dir_list.h"
 #include "ui/list_common.h"
@@ -29,6 +31,9 @@ static void main_tabs_sync(void)
 
     dir_list_set_marquee(is_list_page);
     playlist_page_set_marquee(is_list_page);
+    /* 虚拟 ClickWheel（顶层悬浮按钮）：仅目录页/歌曲页显示，
+       其滚动目标由 click_wheel_set_list 在列表构建时登记 */
+    click_wheel_set_tab(act);
     /* 正在播放页的标题/副标题跑马灯：仅当该页为当前页时滚动 */
     now_playing_set_marquee(act == 2);
     app_status_set_page(act);
@@ -141,6 +146,15 @@ void main_ui_create(void)
     playlist_page_create(tv);
     now_playing_create(tv);
     settings_page_create(tv);
+
+    /* 虚拟 ClickWheel：创建在 lv_layer_top()（顶层），整个应用只需一个实例。
+       ⚠ 必须放顶层：放在页面容器内时，从按钮起手拖动会被 LVGL 的滚动链
+       找到可横向滚动的 tabview → 判定为翻页并给按钮发 PRESS_LOST，
+       "按住画圈"直接失效（见 core/ui/click_wheel.h）。
+       显隐由 main_tabs_sync（当前页面）与各列表构建时登记的目标共同决定；
+       功能开关来自 NVS 配置（click_wheel，默认开，设置菜单可切换） */
+    click_wheel_create();
+    click_wheel_set_enabled(config_store_get_click_wheel());
 
     /* 页面切换时控制列表跑马灯（非列表页关闭省电） */
     lv_obj_add_event_cb(tv, main_tabs_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);

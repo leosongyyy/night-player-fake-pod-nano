@@ -1,4 +1,5 @@
 #include "performance_monitor.h"
+#include "core/utils/task_psram.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -94,10 +95,12 @@ static void mem_monitor_task(void *pvParameters)
      * - 本任务只负责内存监视和汇总展示
      */
     TaskHandle_t dummy;
-    xTaskCreatePinnedToCore(cpu_collector_task, "cpu_coll0",
+    /* 采集任务栈放 PSRAM（内部 RAM 开机末期仅剩 4~5KB，1KB 内部栈也曾起不来）；
+       本任务只读空闲计数器，栈访问偶发缓存未命中无影响 */
+    task_create_psram_stack(cpu_collector_task, "cpu_coll0",
                             CPU_COLLECTOR_STACK, (void *)&s_core0_usage,
                             CPU_COLLECTOR_PRIO, &dummy, 0);
-    xTaskCreatePinnedToCore(cpu_collector_task, "cpu_coll1",
+    task_create_psram_stack(cpu_collector_task, "cpu_coll1",
                             CPU_COLLECTOR_STACK, (void *)&s_core1_usage,
                             CPU_COLLECTOR_PRIO, &dummy, 1);
 
@@ -152,7 +155,13 @@ static void mem_monitor_task(void *pvParameters)
 
 void startPerformanceMonitor(void)
 {
-    xTaskCreate(mem_monitor_task, "mem_monitor",
-                MEM_MONITOR_TASK_STACK, NULL,
-                MEM_MONITOR_TASK_PRIO, NULL);
+    /* 栈放 PSRAM（内部 RAM 紧张时 4KB 内部栈会创建失败，表现为"监视任务起不来"）；
+       本任务每 2s 醒一次只做采样打印，PSRAM 栈无性能影响 */
+    if (task_create_psram_stack(mem_monitor_task, "mem_monitor",
+                                MEM_MONITOR_TASK_STACK, NULL,
+                                MEM_MONITOR_TASK_PRIO, NULL,
+                                tskNO_AFFINITY) != pdPASS) {
+        ESP_LOGE("MEM", "create mem_monitor task failed (internal free=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    }
 }

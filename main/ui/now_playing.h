@@ -56,6 +56,15 @@ void now_playing_set_marquee(bool enable);
  */
 void now_playing_force_show_ui(void);
 
+/**
+ * @brief 释放封面加载任务（仅"重新扫描/重启前腾内部 RAM"场景使用）
+ *
+ * 删除后台封面解码任务并清空句柄，释放约 6KB 内部 RAM 栈；此后不再换
+ * 封面（仅适用于**马上要 esp_restart** 的路径，见 ui/settings_menu.c 的
+ * rescan_release_tasks）。幂等：任务未创建或已释放时安全返回。
+ */
+void now_playing_release_cover_task(void);
+
 #ifdef __cplusplus
 }
 #endif

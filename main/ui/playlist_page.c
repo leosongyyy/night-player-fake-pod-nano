@@ -7,6 +7,7 @@
 #include "core/hardware/display.h"
 #include "core/player/player_controller.h"
 #include "core/storage/playlist.h"
+#include "core/ui/click_wheel.h"
 #include "core/ui/virtual_list.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/list_common.h"
@@ -109,6 +110,8 @@ static void song_selected_cb(uint32_t index, void *user_data)
 /* 删除当前列表与提示 label（重建前清理） */
 static void playlist_page_clear_views(void)
 {
+    /* ClickWheel 的滚动目标即将被删除：先解除绑定（按钮自动隐藏） */
+    click_wheel_set_list(1, NULL, 0);
     if (s_list != NULL) {
         lv_obj_del(s_list);
         s_list = NULL;
@@ -193,6 +196,10 @@ void playlist_page_show_dir(uint32_t dir_index)
     }
     lv_obj_set_pos(s_list, PLIST_LIST_X, PLIST_LIST_Y);
     virtual_list_set_selected_cb(s_list, song_selected_cb);
+
+    /* 虚拟 ClickWheel（顶层悬浮按钮）：歌曲超过 10 页（72 首）时在右下角显示，
+       按住画圈快速翻页（见 core/ui/click_wheel.h） */
+    click_wheel_set_list(1, s_list, dir->song_count);
 
     /* 若展示的正是正在播放的目录：定位到当前歌曲（"正在播放"由绑定回调
        以文字黄色标注，选中状态仅内部记录） */

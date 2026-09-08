@@ -22,6 +22,7 @@ static const char *TAG = "config_store";
 #define KEY_SLEEP_DEF_ON     "sleepdefon"
 #define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
+#define KEY_CLICK_WHEEL      "clkwheel"
 #define KEY_BATT_LOG         "battlog"
 #define KEY_BATT_LOG_MIN     "battmin"
 #define KEY_TOUCH_TEST       "touchtest"
@@ -52,6 +53,8 @@ static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
 static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
+/* 虚拟 ClickWheel 速滑按钮（默认开）：设置菜单「虚拟 ClickWheel」行切换 */
+static bool     s_click_wheel = (CONFIG_STORE_CLICK_WHEEL_DEFAULT != 0);
 /* 开发者选项（运行时开关，开机检查、重启生效）：电池电压日志（默认关）
    及其采样间隔（分钟，默认 5）、触摸测试白点（默认关） */
 static bool     s_batt_log    = (CONFIG_STORE_BATT_LOG_DEFAULT != 0);
@@ -270,6 +273,13 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SCREEN_OFF, &s_screen_off) != ESP_OK) {
         s_screen_off = CONFIG_STORE_SCREEN_OFF_DEFAULT;
     }
+    /* 虚拟 ClickWheel：无记录（首次烧录/升级）时默认启用 */
+    uint8_t click_wheel = 0;
+    if (nvs_get_u8(s_nvs, KEY_CLICK_WHEEL, &click_wheel) != ESP_OK) {
+        s_click_wheel = (CONFIG_STORE_CLICK_WHEEL_DEFAULT != 0);
+    } else {
+        s_click_wheel = (click_wheel != 0);
+    }
     /* 开发者选项：无记录（首次烧录/升级）时默认关闭（见 CONFIG_STORE_*_DEFAULT） */
     uint8_t batt_log = 0;
     if (nvs_get_u8(s_nvs, KEY_BATT_LOG, &batt_log) != ESP_OK) {
@@ -333,10 +343,12 @@ void config_store_init(void)
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
                   "sleep_def=%u min def_on=%d awake=%d screen_off=%u s "
+                  "clkwheel=%d "
                   "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s eq=%s(%u bands)",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
              (int)s_shuffle, (unsigned)s_sleep_def, (int)s_sleep_def_on,
              (int)s_sleep_awake, (unsigned)s_screen_off,
+             (int)s_click_wheel,
              (int)s_batt_log, (unsigned)s_batt_log_min,
              (int)s_touch_test,
              (int)s_was_playing,
@@ -396,6 +408,11 @@ bool config_store_get_sleep_awake(void)
 uint32_t config_store_get_screen_off_s(void)
 {
     return s_screen_off;
+}
+
+bool config_store_get_click_wheel(void)
+{
+    return s_click_wheel;
 }
 
 bool config_store_get_battery_log(void)
@@ -570,6 +587,17 @@ void config_store_set_touch_test(bool on)
     }
     s_touch_test = on;
     cfg_write_u8(KEY_TOUCH_TEST, on ? 1 : 0);
+}
+
+/* 虚拟 ClickWheel 开关：立即生效（UI 侧回调隐藏/显示速滑按钮），故通知回调 */
+void config_store_set_click_wheel(bool on)
+{
+    if (on == s_click_wheel) {
+        return;
+    }
+    s_click_wheel = on;
+    cfg_write_u8(KEY_CLICK_WHEEL, on ? 1 : 0);
+    config_notify();
 }
 
 void config_store_set_was_playing(bool playing)

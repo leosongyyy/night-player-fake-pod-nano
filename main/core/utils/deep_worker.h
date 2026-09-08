@@ -16,6 +16,12 @@ typedef void (*deep_worker_fn_t)(void *arg);
  * 创建"deep_worker"任务（栈 8KB、优先级 6）+ 请求/完成信号量与投递互斥锁。
  * 必须在任何 deep_worker_call() 之前调用（app_main 早期）。
  *
+ * ⚠ 必须在**开机早期**调用（`app_main` 里 config_store 之后、硬件初始化之前）：
+ * 内部 RAM 在开机末期高度碎片化（最大连续块约 8.6KB），8KB 内部栈此时才
+ * 稳；曾把它放在 boot_flow 之后并把栈加到 12KB，导致 xTaskCreatePinnedToCore
+ * 静默失败（当时未检查返回值）→ 任务根本不存在 → 每次深调用都等满 5s 超时，
+ * 表现为"按键息屏/亮屏延迟 5 秒"。
+ *
  * 背景：息屏/亮屏（esp_pm_configure + AMOLED 重新初始化 + lv_refr_now
  * 全屏重刷）与伪关机（停外设 + LVGL 提示渲染 + deepsleep）的调用链很深，
  * 历史上导致 button/power_service/fake_shutdown 等任务各自加大栈（8KB），
