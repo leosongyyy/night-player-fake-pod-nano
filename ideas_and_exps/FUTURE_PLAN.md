@@ -45,3 +45,28 @@ Lhear = Lout - 0.03 * Rout
 此功能在R5-7500F上取得了0.8%的CPU占用率（相当于4.12GHz的单核占用9.6%），当然这还包括UI渲染图表占用、WASAPI、压缩器占用等内容。
 可以压力一下ESP32S3的CPU，实在不行双核一起来，一个负责输入，一个负责卷积，卷积完了在给另一个核心混音输出，也可以一个核心卷四个+输入混音输出，另一个核心卷10个
 建议先做算法移植，跑通测试用例，再去做性能测试，防止做完了但性能跟不上。
+
+## 34. 在Token预算充足时，调查谁吃了IRAM，并尽量把LVGL的缓冲区优化回以前的1/10 VRES的程度。
+
+背景（2026-09 实测记录，详见 `PSRAM_TASK_STACK.md` 第 4 节）：
+- 现状：`EXAMPLE_LVGL_BUF_HEIGHT = EXAMPLE_LCD_V_RES / 12`（460/12=38 行 → 每块
+  460×38×2B ≈ 34KB，双缓冲 ≈ 68KB **DMA**），帧率接近原 30fps，DMA 稳态余量约 15KB。
+- 为什么从 1/10 降下来：原 `V_RES/10`（双缓冲 ≈ 83KB DMA）会把 DMA 池压到不足 3KB，
+  SD 卡每次读的 512B `allocate_dma_buf` 都分配不出来 → 解码器从未启动 → 被
+  `mp3_player` 判为"数据损坏" → 坏曲自动跳过。用户侧现象是"开机先播一秒上次的歌，
+  然后跳到别的队列去"。所以这是**内存不足的连锁反应**，不是播放/随机逻辑的 bug。
+- DMA 池实测分布（V_RES/20 那次测量）：启动 263KB → display 后 246KB → audio 后
+  233KB → SD 后 227KB → **LVGL 后 171KB** → **开机完成 45KB**。即除了 LVGL 缓冲，
+  `boot_flow` 里的封面/JPEG 解码等又吃掉约 **126KB DMA**——要腾出空间给更大的
+  绘制缓冲，重点应该是**开机流程的 DMA 占用（能否用完即释放/复用）**，而不是继续
+  牺牲帧率。
+- IRAM 侧要查的对象：LVGL 堆（`LV_MEM_CUSTOM=stdlib` + 几百个常驻控件/样式/缓存）、
+  `SPIRAM_MALLOC_ALWAYSINTERNAL=16384` 这个阈值（<16KB 的分配优先走内部 RAM）、
+  以及各驱动的常驻缓冲。`mem_monitor` 的 `iram=` 列与
+  `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` 是第一手指标。
+- 验收标准建议：绘制缓冲回到 `V_RES/10`（≈83KB DMA）后，DMA 稳态余量仍 ≥ 8~10KB、
+  SD 卡读写无 `allocate_dma_buf` 失败、列表滚动帧率回到 30fps。
+- ⚠ 硬性约束：绘制缓冲**必须** `MALLOC_CAP_DMA`（非 DMA 会触发 SPI bounce 缓冲分配，
+  失败则刷屏阻塞 → 任务看门狗复位）；调这个值前必须同时看帧率与
+  `heap_caps_get_free_size(MALLOC_CAP_DMA)`。
+
