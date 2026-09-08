@@ -30,13 +30,34 @@ extern "C" {
  * 仅切歌/播放控制/点歌等"听觉上仍在活动"的动作算用户动作）。
  *
  * 注意：定时到点进入 deepsleep 后系统重启，本模块状态不保留；开机默认
- * 无定时（关闭）。开机是否自动开启由 config_store 的 sleep_def_on 控制。
+ * 无定时（关闭）。开机是否自动开启由 config_store 的 sleep_def_on 控制
+ * （判定见 sleep_timer_boot_autostart_min）；开机自动开启时，进入主界面
+ * 后由 boot_flow 弹 Toast 提醒用户"定时已开启"，便于用户主动关闭
+ * （见 ideas_and_exps/FUTURE_PLAN.md 第 27 点）。
  */
 
 /**
  * @brief 初始化睡眠定时器（创建倒计时任务，可重复调用）
  */
 void sleep_timer_init(void);
+
+/**
+ * @brief 开机默认应自动开启的睡眠定时分钟数（纯查询，无副作用）
+ *
+ * 读取 config_store 的 sleep_def_on（开机默认开启，默认关）与
+ * sleep_default_min（默认时长，默认 45 分钟）：
+ *   - 开关关闭 → 0（开机不自动开启）；
+ *   - 开关开启但默认时长为 0 → 0；
+ *   - 否则返回默认时长（>0）。
+ *
+ * 两处调用方共用本函数，保证判定一致：
+ *   - main.c 开机时按返回值调用 sleep_timer_set() 真正启动定时；
+ *   - boot_flow 进入主界面后按返回值弹 Toast 提醒用户"定时已开启"
+ *     （见 ideas_and_exps/FUTURE_PLAN.md 第 27 点）。
+ *
+ * @return >0 = 开机应自动开启该分钟数的定时；0 = 不自动开启
+ */
+uint32_t sleep_timer_boot_autostart_min(void);
 
 /**
  * @brief 设置/取消睡眠定时

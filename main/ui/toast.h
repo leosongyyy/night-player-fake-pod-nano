@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,7 +13,9 @@ extern "C" {
  *
  * 屏幕底部弹出的短暂消息条：灰色圆角底色 + 白色文字，右侧带一个小的黄色
  * 环形倒计时，展示当前 Toast 还剩多久自动隐藏；到点后向下滑出收回。
- * 若显示期间有新的请求到达，则直接更新文字并重置 2 秒倒计时（不重复弹出）。
+ * 若显示期间有新的请求到达，则直接更新文字并重置倒计时（不重复弹出）。
+ * 显示时长默认 2 秒，需要更久停留的提示（如开机"睡眠定时已开启"提醒）
+ * 用 ui_toast_show_ms 指定。
  *
  * 特性：
  *   - 挂在 lv_layer_top()（LVGL 系统顶层）：位于主界面/全屏设置菜单/通知栏
@@ -27,7 +30,7 @@ extern "C" {
  */
 
 /**
- * @brief 显示 Toast（替换当前内容并重置隐藏倒计时）
+ * @brief 显示 Toast（替换当前内容并重置隐藏倒计时，默认显示 2 秒）
  *
  * 首次调用时懒创建控件（挂 lv_layer_top）。当前未显示 → 从底部滑入；
  * 正在显示 → 原地更新文字与倒计时；正在滑出（即将隐藏）→ 拉回重新显示。
@@ -35,6 +38,18 @@ extern "C" {
  * @param text 提示文本（UTF-8；内部复制，超长部分截断）
  */
 void ui_toast_show(const char *text);
+
+/**
+ * @brief 显示 Toast，并指定显示时长（开机提醒等需要更长停留时间的场景）
+ *
+ * 与 ui_toast_show 行为完全一致，只多一个时长参数：环形倒计时按该时长
+ * 从满到空推进（默认 2 秒）。例如开机"睡眠定时已开启"提醒用 4 秒，
+ * 避免用户还没注意到就消失。
+ *
+ * @param text        提示文本（UTF-8；内部复制，超长部分截断）
+ * @param duration_ms 显示时长（ms）；0 = 用默认时长（TOAST_DURATION_MS）
+ */
+void ui_toast_show_ms(const char *text, uint32_t duration_ms);
 
 /**
  * @brief 当前是否有 Toast 正在显示（含正在滑出阶段）

@@ -141,6 +141,21 @@ void sleep_timer_init(void)
     ESP_LOGI(TAG, "sleep timer ready (off by default)");
 }
 
+/* 开机默认应自动开启的分钟数（纯查询，无副作用）：config_store 的
+   sleep_def_on + sleep_default_min 组合判定，main.c（真正启动定时）与
+   boot_flow（弹 Toast 提醒）共用，保证两处判定一致。 */
+uint32_t sleep_timer_boot_autostart_min(void)
+{
+    if (!config_store_get_sleep_def_on()) {
+        return 0;                        /* 未开启"开机默认开启" */
+    }
+    uint32_t minutes = config_store_get_sleep_default_min();
+    if (minutes == 0) {
+        return 0;                        /* 默认时长为 0：不自动开启 */
+    }
+    return minutes;
+}
+
 void sleep_timer_set(uint32_t minutes)
 {
     if (minutes == 0) {

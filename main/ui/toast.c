@@ -19,7 +19,7 @@ static const char *TAG = "toast";
 #define TOAST_RING_BG_COLOR  lv_color_hex(0x8A8A8A)
 #define TOAST_RING_COLOR     lv_color_hex(0xFFC000) /* 黄，与设置页按压高亮同色 */
 
-#define TOAST_DURATION_MS    2000    /* 显示时长：2 秒后自动收回 */
+#define TOAST_DURATION_MS    2000    /* 默认显示时长：2 秒后自动收回 */
 #define TOAST_TICK_MS        100     /* 倒计时环刷新周期（2s = 20 步，每步 5%） */
 #define TOAST_SLIDE_PX       120     /* 滑入/滑出位移：底部向下的视觉距离 */
 #define TOAST_SLIDE_IN_MS    240     /* 滑入动画时长 */
@@ -41,6 +41,7 @@ static lv_obj_t    *s_arc     = NULL; /* 右侧环形倒计时 */
 static lv_timer_t  *s_timer   = NULL; /* 倒计时驱动（100ms） */
 static char         s_text[TOAST_TEXT_MAX]; /* 文本缓冲（lv_label 不复制） */
 static int32_t      s_remain_ms = 0;  /* 剩余显示时长（ms）；<=0 = 不在显示期 */
+static uint32_t     s_duration_ms = TOAST_DURATION_MS; /* 本次显示总时长（环形倒计时按它折算百分比） */
 static bool         s_hidden    = true; /* 完全隐藏（含滑出动画完成态） */
 
 /* ------------------------------------------------------------------ */
@@ -126,8 +127,9 @@ static void toast_timer_cb(lv_timer_t *timer)
         toast_start_hide();
         return;
     }
-    /* 环从满（100）递减到空（0）：直观展示"还有多久隐藏" */
-    lv_arc_set_value(s_arc, s_remain_ms * 100 / TOAST_DURATION_MS);
+    /* 环从满（100）递减到空（0）：直观展示"还有多久隐藏"。
+       百分比按本次显示总时长折算（ui_toast_show_ms 可指定更长/更短时长） */
+    lv_arc_set_value(s_arc, s_remain_ms * 100 / (int32_t)s_duration_ms);
 }
 
 /* ------------------------------------------------------------------ */
@@ -202,6 +204,11 @@ static void toast_create(void)
 
 void ui_toast_show(const char *text)
 {
+    ui_toast_show_ms(text, TOAST_DURATION_MS);
+}
+
+void ui_toast_show_ms(const char *text, uint32_t duration_ms)
+{
     if (text == NULL) {
         return;
     }
@@ -218,8 +225,9 @@ void ui_toast_show(const char *text)
     lv_label_set_text(s_label, s_text);
     lv_obj_align(s_toast, LV_ALIGN_BOTTOM_MID, 0, -TOAST_BOTTOM_MARGIN);
 
-    /* 重置隐藏倒计时与环形进度 */
-    s_remain_ms = TOAST_DURATION_MS;
+    /* 重置隐藏倒计时与环形进度（时长 0 = 用默认 2 秒） */
+    s_duration_ms = (duration_ms > 0) ? duration_ms : TOAST_DURATION_MS;
+    s_remain_ms = (int32_t)s_duration_ms;
     lv_arc_set_value(s_arc, 100);
 
     if (s_hidden) {
@@ -229,7 +237,7 @@ void ui_toast_show(const char *text)
     }
     s_hidden = false;
 
-    ESP_LOGI(TAG, "toast: %s", s_text);
+    ESP_LOGI(TAG, "toast (%u ms): %s", (unsigned)s_duration_ms, s_text);
 }
 
 bool ui_toast_is_shown(void)

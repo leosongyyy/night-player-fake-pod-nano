@@ -1,6 +1,7 @@
 #include "ui/boot_flow.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "core/fonts/system_font.h"
@@ -11,11 +12,13 @@
 #include "core/storage/config_store.h"
 #include "core/storage/playlist_builder.h"
 #include "core/storage/playlist_store.h"
+#include "core/utils/sleep_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "ui/app.h"
+#include "ui/toast.h"
 
 static const char *TAG = "boot_flow";
 
@@ -25,6 +28,7 @@ static void boot_enter_normal(void);
 static void boot_show_scanning(void);
 static void boot_progress_timer_cb(lv_timer_t *timer);
 static void boot_scan_task(void *arg);
+static void boot_sleep_toast_timer_cb(lv_timer_t *timer);
 static void start_scan_btn_cb(lv_event_t *e);
 static void clear_scan_data_btn_cb(lv_event_t *e);
 static void reset_position_btn_cb(lv_event_t *e);
@@ -38,6 +42,14 @@ static void reset_position_btn_cb(lv_event_t *e);
 
 /* 扫描任务栈：内部 RAM 32KB（解析 .pl 需大局部数组；内部 RAM 栈避免 mmap 断言） */
 #define BOOT_SCAN_STACK_WORDS (32768u / 4u)
+
+/* 开机睡眠定时提醒（FUTURE_PLAN 第 27 点）：
+   - 延迟：主界面创建后先让首帧画出来、屏幕亮度恢复，再弹提醒，避免提示与
+     开机首帧挤在同一帧；延迟期间用户已手动关闭定时则不打扰；
+   - 显示时长：比普通 Toast（2 秒）长，确保用户注意到"定时已开启"并能主动
+     去播放设置页关闭（这正是本提醒的目的：不需要联网对时做夜间自动开启）。 */
+#define BOOT_SLEEP_TOAST_DELAY_MS 800u
+#define BOOT_SLEEP_TOAST_MS       4000u
 
 /* ------------------------------------------------------------------ */
 /* 状态与共享扫描进度                                                    */
@@ -296,6 +308,18 @@ static void boot_enter_normal(void)
 
     app_ui_create();
 
+    /* 开机默认开启睡眠定时（设置 → 睡眠定时器 → 开机默认开启）时，主界面
+       就绪后弹 Toast 提醒"定时已开启"（见 FUTURE_PLAN 第 27 点）：用户由此
+       能主动发现定时开着、在不需要时手动关闭，因此不必再依赖联网对时实现
+       "夜间自动开启"。判定与 main.c 真正启动定时共用同一函数。 */
+    uint32_t boot_sleep_min = sleep_timer_boot_autostart_min();
+    if (boot_sleep_min > 0) {
+        lv_timer_create(boot_sleep_toast_timer_cb, BOOT_SLEEP_TOAST_DELAY_MS,
+                        (void *)(uintptr_t)boot_sleep_min);
+        ESP_LOGI(TAG, "boot: sleep timer reminder scheduled (%u min)",
+                 (unsigned)boot_sleep_min);
+    }
+
     ESP_LOGI(TAG, "enter normal UI");
 }
 
@@ -369,6 +393,28 @@ static void boot_progress_timer_cb(lv_timer_t *timer)
     } else {
         boot_enter_normal();
     }
+}
+
+/* 开机睡眠定时提醒定时器（一次性，LVGL 任务上下文已持锁）：弹 Toast 后自删。
+   user_data 携带开机自动开启的分钟数（boot_enter_normal 创建时传入）。 */
+static void boot_sleep_toast_timer_cb(lv_timer_t *timer)
+{
+    /* LVGL 8.4 的 lv_timer_t.user_data 是公开字段（无 getter），直接读取；
+       先取出参数再自删定时器 */
+    uint32_t minutes = (uint32_t)(uintptr_t)timer->user_data;
+    lv_timer_del(timer);   /* 一次性定时器 */
+
+    /* 延迟期间用户可能已手动关闭定时（播放设置页长按睡眠格子）：
+       已关闭则不再打扰 */
+    if (!sleep_timer_is_active()) {
+        ESP_LOGI(TAG, "boot: sleep timer already off, skip reminder");
+        return;
+    }
+
+    char buf[48];
+    snprintf(buf, sizeof(buf), "睡眠定时已开启 %u 分钟", (unsigned)minutes);
+    ui_toast_show_ms(buf, BOOT_SLEEP_TOAST_MS);
+    ESP_LOGI(TAG, "boot: sleep timer reminder toast (%u min)", (unsigned)minutes);
 }
 
 /* ------------------------------------------------------------------ */

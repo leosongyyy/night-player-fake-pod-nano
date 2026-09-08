@@ -613,9 +613,12 @@ static void root_page_build(void)
     lv_obj_add_flag(awake_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(awake_toggle, awake_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 底部说明 1：清醒感知（用户文案）+倒计时即将结束时音量逐渐减小（NightPlayer 原版机制） */
+    /* 底部说明 1：开机默认开启的提醒机制 + 清醒感知（用户文案）+ 倒计时即将
+       结束时音量逐渐减小（NightPlayer 原版机制） */
     menu_note_row_create(sleep_page,
         "功能说明：\n"
+        "开启「开机默认开启」后，每次开机会自动开启睡眠定时器，并在进入主界面时弹出提示"
+        "提醒您（不需要时可在播放设置页长按睡眠定时格子关闭）。\n"
         "开启清醒感知后，若在睡眠定时器期间进行操作，"
         "剩余时间会按照一定比例增加。让您在入梦前音乐不断。倒计时即将结束时，音量会逐渐减小，让音乐自然淡出。\n"
         "睡眠定时到点后，播放器只进入休眠状态（所有外设关闭，低功耗待机，同时按下两个按键既可唤醒）"

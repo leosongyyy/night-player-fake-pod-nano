@@ -25,7 +25,8 @@ extern "C" {
  *     由 player_controller 在切歌/暂停/关机时保存，开机恢复随机序列现场
  *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）
  *   - 开机默认开启睡眠定时 sleep_def_on（bool，默认关）：开机自动用默认时长
- *     开启睡眠定时器（在 main.c 的 sleep_timer_init 之后应用）
+ *     开启睡眠定时器（在 main.c 的 sleep_timer_init 之后应用）；开启时进入
+ *     主界面会弹 Toast 提醒"定时已开启"（boot_flow，见 FUTURE_PLAN 第 27 点）
  *   - 睡眠定时清醒感知 sleep_awake（bool，默认开）：睡眠定时开启期间，切歌/
  *     播放控制/点歌等用户动作按 NightPlayer 算法折算加时（见 core/utils/
  *     sleep_timer；音量调节不再加时）
