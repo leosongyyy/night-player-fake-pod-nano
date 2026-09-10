@@ -33,7 +33,9 @@
    `lv_obj_create(NULL)` 创建，不随屏幕内容滚动）：
    - 顶层对象不在 tabview 的祖先链上，滚动链找不到它，事件不会外泄；
    - 顶层不随页面横向滑动，按钮位置稳定；
-   - 与 Toast 同层共存（Toast 后创建则显示在按钮之上）。
+   - 与 Toast 同层共存（Toast 后创建则显示在按钮之上）；
+   - **同层内靠创建顺序定 Z 轴**：下拉控制中心面板同样挂在顶层且创建更晚
+     → 展开时自然遮挡按钮并接管其区域触摸（见踩坑 8）。
 2. **按钮自身清除 `SCROLL_CHAIN_HOR` / `SCROLL_CHAIN_VER`**（图标 label 同样
    清除）：即使滚动链走到按钮，`SCROLLABLE == false` + 链断开会让
    `find_scroll_obj` 立即 break，不再向父级找滚动对象。
@@ -41,7 +43,8 @@
 因为挂在顶层，**显隐必须由外部驱动**（顶层不知道当前是哪一页）：
 `click_wheel_set_tab()`（主界面切页时调用）+ `click_wheel_set_list()`
 （各页列表构建时登记滚动目标）+ `click_wheel_set_overlay()`
-（设置菜单开合时调用，否则按钮会浮在菜单之上并拦截该区域触摸）。
+（设置菜单开合时调用，否则按钮会浮在菜单之上并拦截该区域触摸；
+下拉控制中心无需此调用——它同在顶层且创建更晚，天然在按钮之上）。
 
 定位：`lv_obj_align(btn, LV_ALIGN_BOTTOM_RIGHT, -CW_MARGIN, -CW_MARGIN_BOTTOM)`，
 直径 56px，右/下边距各 **32px**（`CW_MARGIN` / `CW_MARGIN_BOTTOM`，按用户
@@ -246,3 +249,13 @@ I (11227) click_wheel: rotate 32 deg -> scroll 68 px (scroll_y=979)
    `CW_MIN_ITEMS` 集中定义，改"10 页"只需改这一处。
 7. **列表销毁前必须解除绑定**：`click_wheel_set_list(tab, NULL, 0)`，
    否则 `s_cur_list` 会指向已释放的对象。
+8. **同层覆盖层靠创建顺序定 Z 轴（下拉控制中心）**：通知栏面板也挂在
+   `lv_layer_top()`——`app_ui_create()` 的顺序是 `main_ui_create()`
+   （内含 `click_wheel_create()`）→ `create_status_bar()` →
+   `notification_panel_create()`，面板与按钮同层且**创建更晚**，因此面板
+   绘制在按钮之上、展开时自然遮挡并接管按钮区域的触摸。
+   ⚠ 曾用"面板开合时调 `click_wheel_set_overlay()` 隐藏按钮"处理该问题，
+   属于治标（要跟踪拖拽/动画状态），已删除；**顺序敏感**，若把面板改回
+   `lv_scr_act()`（屏幕层永远低于顶层）或提前创建，按钮会重新浮在
+   控制中心之上。设置菜单仍在 `lv_scr_act()` 上，故它的
+   `click_wheel_set_overlay()` 调用保留（见踩坑 2）。

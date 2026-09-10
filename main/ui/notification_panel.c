@@ -690,10 +690,19 @@ static void content_create(void)
 
 void notification_panel_create(lv_obj_t *status_bar)
 {
-    lv_obj_t *scr = lv_scr_act();
+    /* ⚠ 父对象 = lv_layer_top()（系统最顶层），**不是** lv_scr_act()：
+       虚拟 ClickWheel 速滑按钮挂在同一顶层（main_ui_create 早于本函数
+       创建），面板放在这里且**创建更晚** → 面板在 Z 轴上天然位于按钮
+       之上，展开时自然遮挡按钮并接管其区域的触摸（否则按钮会浮在控制
+       中心之上，还会抢走右下角把手区的上拉手势）。
+       ⚠ 顺序敏感：本函数必须在 click_wheel_create() 之后调用
+       （由 ui/app.c 的 app_ui_create 保证），否则按钮会反过来盖住面板。
+       Toast 为懒创建（首次弹提示时），届时位于面板之上，面板展开时
+       提示仍然可见。 */
+    lv_obj_t *top = lv_layer_top();
 
     /* 下拉通知栏（全屏，最后创建=绘制在状态栏之上，默认隐藏在屏幕上方） */
-    notif_bar = lv_obj_create(scr);
+    notif_bar = lv_obj_create(top);
     lv_obj_set_size(notif_bar, EXAMPLE_LCD_H_RES, NOTIF_BAR_HEIGHT);
     lv_obj_set_pos(notif_bar, 0, PANEL_CLOSED_Y);
     lv_obj_set_style_bg_color(notif_bar, lv_color_black(), 0);

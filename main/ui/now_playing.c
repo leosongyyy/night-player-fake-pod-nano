@@ -259,17 +259,27 @@ static lv_obj_t *np_make_icon_btn(lv_obj_t *parent, const char *icon,
     return btn;
 }
 
+/* 前向声明：设置栏背景不透明度（定义在后面的"栏背景不透明度"一节）。
+   np_set_ui_visible 需要在切换显隐时同步设置背景不透明度 */
+static void np_set_bars_bg_opa(lv_opa_t target, bool animated);
+
 /* 设置标题栏/控制栏可见性（点击封面切换）；顶部状态栏同步透明/恢复
-   （状态栏保留触摸事件，通知栏下拉不受影响） */
+   （状态栏保留触摸事件，通知栏下拉不受影响）。
+   ⚠ 显隐与背景不透明度必须**一起**变更：只改 HIDDEN 标志而留下"全透明"
+   的背景，会让栏在下次复现时不可见（历史 bug：隐藏态下滑动页面再回到
+   播放页，SCROLL_END 把栏背景改成全透明，之后点击封面使栏复现时
+   控制栏就是全透明的，见 DONE_PLANS.md 第 15 点 / FUTURE_PLAN.md 第 37 点）。 */
 static void np_set_ui_visible(bool visible)
 {
     s_ui_visible = visible;
     if (visible) {
         lv_obj_clear_flag(s_title_bar, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_control_bar, LV_OBJ_FLAG_HIDDEN);
+        np_set_bars_bg_opa(NP_BARS_OPA, false);          /* 恢复半透明黑 */
     } else {
         lv_obj_add_flag(s_title_bar, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_control_bar, LV_OBJ_FLAG_HIDDEN);
+        np_set_bars_bg_opa(LV_OPA_TRANSP, false);        /* 隐藏时同步透明 */
     }
     app_status_set_ui_visible(visible);
 }
@@ -278,12 +288,21 @@ static void np_set_ui_visible(bool visible)
    与 np_set_ui_visible 的区别：不联动状态栏，状态栏由调用方单独恢复） */
 void now_playing_force_show_ui(void)
 {
+    bool was_hidden = !s_ui_visible;
     s_ui_visible = true;
     if (s_title_bar != NULL) {
         lv_obj_clear_flag(s_title_bar, LV_OBJ_FLAG_HIDDEN);
     }
     if (s_control_bar != NULL) {
         lv_obj_clear_flag(s_control_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* 栏此前隐藏时背景已被同步置为全透明（见 np_set_ui_visible），
+       这里一并恢复半透明黑，避免出现"已显示但看不见"的栏。
+       ⚠ 栏此前已显示时**不动**背景：本函数由 main_tabs_sync 在
+       VALUE_CHANGED 时调用，而该事件早于惯性滚动动画结束（见 main_ui.c），
+       此时背景必须是滚动期间的不透明纯黑，否则惯性滚动中会退回 alpha 混合。 */
+    if (was_hidden) {
+        np_set_bars_bg_opa(NP_BARS_OPA, false);
     }
 }
 
@@ -473,9 +492,20 @@ static void np_set_bars_bg_opa(lv_opa_t target, bool animated)
 
 /* 滚动开始：标题栏/控制栏/状态栏立即不透明纯黑（滚动期间不做 alpha 混合，
    省带宽；封面按 NP_HIDE_COVER_ON_SCROLL 决定是否同时立即隐藏）。
+   ⚠ 先恢复显隐、再改透明度：栏被用户点击封面/挂机自动隐藏时处于
+   "隐藏 + 全透明"状态，若此时只把透明度改成不透明，滚动结束后会停留在
+   "已显示但全透明"的不一致状态（透明度在滑动开始时改、强制显示在页码
+   变化时才发生，两者时机不一致 → 控制栏变全透明的 bug，见
+   FUTURE_PLAN.md 第 37 点）。这里在滚动开始时就把栏显示出来，
+   彻底避免"隐藏状态下滑动"这一触发场景。
    s_bars_opaque 防抖：SCROLL_BEGIN 可能多次到达，只在状态变化时执行。 */
 static void np_on_scroll_begin(void)
 {
+    if (!s_ui_visible) {
+        /* 恢复标题栏/控制栏 + 顶部状态栏显示（背景回到半透明，
+           紧接着的 np_set_bars_bg_opa(COVER) 会覆盖为不透明纯黑） */
+        np_set_ui_visible(true);
+    }
     if (!s_bars_opaque) {
         s_bars_opaque = true;
         np_set_bars_bg_opa(LV_OPA_COVER, false);

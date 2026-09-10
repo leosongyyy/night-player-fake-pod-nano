@@ -81,6 +81,10 @@ void click_wheel_set_tab(uint8_t tab);
  * 覆盖层在顶层之下会盖住按钮，但按钮在顶层仍会拦截该区域的触摸，
  * 故覆盖层打开时必须隐藏按钮。
  *
+ * ⚠ 只适用于创建在 `lv_scr_act()` 上的覆盖层（设置菜单）。创建在
+ *   `lv_layer_top()` 上、且**晚于本按钮**创建的覆盖层（下拉控制中心）
+ *   天然位于按钮之上（遮挡 + 接管触摸），无需调用本接口。
+ *
  * @param visible true = 覆盖层显示中（按钮隐藏）
  */
 void click_wheel_set_overlay(bool visible);

@@ -405,6 +405,9 @@ void click_wheel_set_tab(uint8_t tab)
 
 void click_wheel_set_overlay(bool visible)
 {
+    if (visible == s_overlay) {
+        return;   /* 幂等：状态未变不重算显隐 */
+    }
     s_overlay = visible;
     cw_sync_visible();
 }

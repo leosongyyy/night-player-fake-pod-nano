@@ -23,14 +23,17 @@ static lv_indev_drv_t indev_drv;     // 触摸输入设备驱动（供 LVGL 控�
    （lvgl_port_set_touch_handle）写入，read_cb 读取；就绪前不给触摸数据 */
 static esp_lcd_touch_handle_t s_touch_handle = NULL;
 
-/* 绘制缓冲高度：屏幕高度的 1/12（460/12 = 38 行，LVGL 内部再对齐到偶数）。
-   每块 = 460 × 38 × 2B ≈ 34KB，双缓冲合计约 68KB **DMA 内存**
-   （原为 V_RES/10：每块 ≈41KB、双缓冲 ≈83KB，把 DMA 池压到不足 3KB）。
-   减小是为给 SD 卡读操作的 DMA 分配留余量——DMA 内存不足时
-   `sdmmc_cmd: allocate_dma_buf: not enough mem` 会让切歌随机报"坏曲"
-   并自动跳过（见 lvgl_port_init 内注释）；再降到 V_RES/20（双缓冲 ≈41KB）
-   帧率会掉到约 20fps，故取 /12 折中。 */
-#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 12)
+/* 绘制缓冲高度：屏幕高度的 1/10（460/10 = 46 行，LVGL 内部再对齐到偶数）。
+   每块 = 460 × 46 × 2B ≈ 41KB，双缓冲合计约 83KB **DMA 内存**
+   （这也是 LVGL 官方建议的最小值：≥ 1/10 屏）。
+   ⚠ 历史：/10 曾把开机完成后的 DMA 池压到不足 3KB，SD 卡读操作的 DMA
+   分配失败（`sdmmc_cmd: allocate_dma_buf: not enough mem`）→ 切歌被误判
+   "坏曲"自动跳过，因此一度降到 /12（双缓冲 ≈68KB，DMA 稳态余量约 15KB）；
+   再降到 /20 帧率会掉到约 20fps。
+   2026-09-10 按用户要求改回 /10 做一轮实测（用更大缓冲换帧率）：
+   重点盯 `heap_caps_get_free_size(MALLOC_CAP_DMA)`、FPS 与 SD 读失败日志，
+   若再现 allocate_dma_buf 失败/无故跳曲，退回 /12。 */
+#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
@@ -237,10 +240,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     /* ⚠ 必须 MALLOC_CAP_DMA：SPI 主机发送时若缓冲不是 DMA 能力，会为每次传输
        分配一块 DMA "bounce" 缓冲并拷贝（setup_dma_priv_buffer），而 DMA 内存池
        本就很小——曾实测分配失败 → panel_io_spi_tx_color 失败 → 刷屏阻塞 → 任务
-       看门狗复位。缓冲高度 V_RES/12（460×38×2B ≈ 34KB/块，双缓冲共约 68KB），
-       把 DMA 内存留给 SD 卡读操作（sdmmc_cmd: allocate_dma_buf: not enough mem
-       曾导致"切歌随机报坏曲"）；调这个值必须同时看帧率与
-       heap_caps_get_free_size(MALLOC_CAP_DMA)。 */
+       看门狗复位。缓冲高度见 EXAMPLE_LVGL_BUF_HEIGHT 注释（当前 V_RES/10：
+       460×46×2B ≈ 41KB/块，双缓冲共约 83KB）；该值直接决定留给 SD 卡读操作的
+       DMA 余量（sdmmc_cmd: allocate_dma_buf: not enough mem 曾导致"切歌随机
+       报坏曲"）；调这个值必须同时看帧率与 heap_caps_get_free_size(MALLOC_CAP_DMA)。 */
     lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf1);
     lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
