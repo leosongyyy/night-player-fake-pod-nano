@@ -71,6 +71,28 @@ idfc menuconfig         # 配置菜单
 - 多条参数自动按词合并、含空格的参数会加引号后传给服务器。
 - 标准输出/标准错误逐行通过 SSE 流式打印到本进程，退出码原样透传。
 
+⚠ **本项目是多配置构建（debug / releasecandidate / release），`-B` 必须带上**
+（见 `BUILD_CONFIG.md`）。不带 `-B` 时 idfc 走 `build/`、并按**根目录 `sdkconfig`**
+（已被 `.gitignore` 忽略、内容陈旧）执行，后果分两种：
+
+- `monitor`：无害但会**多出一个走旧配置的根 `build/` 目录**，而且本次还观察到
+  `idf.py` 会顺手在其中跑一次 cmake 配置（日志里出现
+  `Running cmake in directory ...\build`、`Project sdkconfig file ...\sdkconfig`）；
+- `build` / `flash`：**会拿旧配置去构建**，产物与 defaults 链不一致
+  （曾经因此出现过"堆毒化仍开"的固件：内部 RAM 紧张、任务建不起来、SD 读 DMA 失败，
+  而 `sdkconfig.defaults.debug` 里明明是关的）。
+
+调试期统一写成：
+
+```powershell
+idfc -B build/debug build          # 增量构建
+idfc -B build/debug -p COM5 flash  # 烧录
+idfc -B build/debug -p COM5 monitor # 串口监视（ELF 也从该目录取，栈回溯才对得上）
+```
+
+`monitor` 还需注意：idf_monitor 会读该目录的 `.elf` 做地址还原，不带 `-B` 时
+用的是别的目录的 ELF，**栈回溯/行号可能是错的**。
+
 ---
 
 ## 4. 参数说明
@@ -106,6 +128,7 @@ idfc menuconfig         # 配置菜单
 | `Cannot write to ...\IdfClientCLI`（退出码 2） | 沙箱禁止写入探测文件 | 加 `--skip-permission-check` |
 | 激活脚本无法加载（ExecutionPolicy 报错） | 执行策略限制 | 用 `-ExecutionPolicy Bypass` 运行 PowerShell |
 | 端口被占用 | 已有服务器实例 | 关闭旧实例或更换端口（需改源码 `port` 常量） |
+| `monitor` 日志开头出现 `Running cmake in directory ...\build` / `Loading defaults file ...\sdkconfig.defaults` | 命令未带 `-B`，走的是根目录 `build/` + 根 `sdkconfig` | 加 `-B build/debug`（多配置构建，见第 3.2 节警告） |
 
 ---
 
