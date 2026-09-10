@@ -55,6 +55,11 @@ void virtual_list_set_marquee(lv_obj_t *list, bool enable);
 
 /* 获取当前第一个可见条目下标（调试/定位用） */
 uint32_t virtual_list_get_first_index(lv_obj_t *list);
+
+/* 获取条目固定高度（像素；NULL/非法返回 0）。
+   供外部"按整行"驱动滚动——ClickWheel 用它把滚动量取整到行高的整数倍，
+   使列表停在整数行上（见 CLICK_WHEEL_USAGE.md 2.3 行对齐步进） */
+lv_coord_t virtual_list_get_item_height(lv_obj_t *list);
 ```
 
 ### 回调类型

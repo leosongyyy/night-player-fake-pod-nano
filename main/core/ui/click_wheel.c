@@ -4,6 +4,7 @@
 
 #include "core/hardware/display.h"
 #include "core/ui/lvgl_port.h"
+#include "core/ui/virtual_list.h"
 #include "ui/toast.h"
 
 #include "esp_log.h"
@@ -45,6 +46,13 @@ static const char *TAG = "click_wheel";
    数千 px，照旧被钳制，跳变保护不受影响 */
 #define CW_MAX_STEP_PX    800
 
+/* 行对齐步进（核心手感）：本组件内部用浮点累加器累加"角度换算出的连续
+   像素量"，但**只把 item_height 的整数倍**交给列表（见 cw_scroll_by_deg）。
+   于是列表位置恒为行高的整数倍 → virtual_list 的行槽永远停在整数行上，
+   转动时看到的是"行槽位置不动、里面的内容一格一格换"（阶梯式翻行），
+   而不是平滑滑动半个行高。长列表快速画圈时一帧可跨多行（上限
+   CW_MAX_STEP_PX / item_height 行）。 */
+
 /* 画圈指示：屏幕上一圈 12 个灰色小圆点（跟随旋转圆心，即屏幕中心） */
 #define CW_RING_DOTS      12     /* 圆点数量 */
 #define CW_RING_RADIUS    130    /* 圆环半径（px，以屏幕中心为圆心） */
@@ -78,6 +86,13 @@ static bool      s_enabled    = true;
 /* 当前生效的滚动目标（由 s_tab 决定，见 cw_target） */
 static lv_obj_t *s_cur_list   = NULL;  /* 正在被滚动的列表 */
 static uint32_t  s_cur_count  = 0;     /* 该列表条目总数 */
+static lv_coord_t s_cur_item_h = 0;    /* 该列表的行高（整行步进的步长） */
+
+/* 行对齐步进状态：只保存"不足一行的滚动量余量"（浮点像素）。
+   ⚠ 步进是**相对列表当前位置**的（每帧按行高整数倍 by 出去），刻意不做
+   "对齐到整行网格"的吸附——列表停在什么位置，就按那个样子一格格跳，
+   行槽（含小数相位）保持不动、只有里面的条目在换。 */
+static float     s_scroll_acc = 0.0f;
 
 /* 画圈状态 */
 static bool      s_active     = false; /* 是否处于"按住画圈"状态 */
@@ -184,20 +199,35 @@ static void cw_sync_visible(void)
     }
 }
 
-/* 取当前页面生效的滚动目标 */
+/* 取当前页面生效的滚动目标（含行高：按整行步进要知道步长） */
 static void cw_target(void)
 {
     if (s_tab < CLICK_WHEEL_TAB_COUNT && s_lists[s_tab] != NULL) {
-        s_cur_list  = s_lists[s_tab];
-        s_cur_count = s_counts[s_tab];
+        s_cur_list   = s_lists[s_tab];
+        s_cur_count  = s_counts[s_tab];
+        s_cur_item_h = virtual_list_get_item_height(s_cur_list);
     } else {
-        s_cur_list  = NULL;
-        s_cur_count = 0;
+        s_cur_list   = NULL;
+        s_cur_count  = 0;
+        s_cur_item_h = 0;
     }
 }
 
 /* 按角度差滚动列表：顺时针（角度增大）向下滚，逆时针向上滚。
-   lv_obj_scroll_by_bounded 自带边界钳制，滚到顶/底不会出现过冲。 */
+   ⚠ 本函数**只把行高的整数倍**交给列表（行对齐步进）：
+   内部把角度换算出的连续像素量累加进浮点累加器 s_scroll_acc，每帧只取出
+   其中"已满整行"的部分（朝 0 截断）交给列表，不足一行的余量留在累加器里
+   下次一起算——所以慢速转动不会像以前那样丢掉不足 1px 的量。
+   因为输出恒为行高整数倍，行槽在屏幕上的位置（含当前的小数相位）保持不动，
+   转动时呈现"行位置不变、内容一格一格换"的效果。
+   ⚠ 附带收益（意外发现，见 CLICK_WHEEL_USAGE.md 2.3.2）：位移由角度差算出的
+   "格数"决定、与帧数无关，所以**掉帧不再累积成位移损失**；而且帧变慢时平滑滚动
+   会表现为一次突进（被眼睛读作卡顿），按格滚动只表现为"这一下多跳了几格"，
+   原本快速滚动时的卡顿感在体感上消失。注意这只改观感，不省绘制开销
+   （每帧仍是一次列表区整块重绘），底层帧率问题别拿它当遮羞布。
+   边界：**不做任何钳制**，交给 lv_obj_scroll_by_bounded 自己 clamp——
+   滚到最底下时多余的滚动量被列表丢弃，列表就正好停在"最后一项贴底"
+   （顶部同理停在 0，即第一项贴顶）。 */
 static void cw_scroll_by_deg(float delta_deg)
 {
     if (s_cur_list == NULL || s_cur_count == 0 || delta_deg == 0.0f) {
@@ -216,8 +246,8 @@ static void cw_scroll_by_deg(float delta_deg)
 
     /* 一圈滚动 20% 内容高度（5 圈到底）→ 每度滚动量。
        ⚠ 方向：屏幕坐标系里顺时针 = 角度增大；需求是"顺时针向下滚"，
-       而 lv_obj_scroll_by 的 dy 为正表示内容上移（视口向下），故取负号
-       （顺时针 → dy 为正 → 列表向下翻）。 */
+       而 lv_obj_scroll_by 的 dy 为负才是内容上移（视口向下），故取负号
+       （顺时针 → dy 为负 → 列表向下翻行）。 */
     float px_per_deg = (float)content_h * CW_TURN_RATIO / 360.0f;
     float px = -delta_deg * px_per_deg;
     if (px > CW_MAX_STEP_PX) {
@@ -225,17 +255,36 @@ static void cw_scroll_by_deg(float delta_deg)
     } else if (px < -CW_MAX_STEP_PX) {
         px = -CW_MAX_STEP_PX;
     }
-    if (px > -1.0f && px < 1.0f) {
-        return;   /* 不足 1px 不滚动，省掉无意义的重绑 */
+
+    /* 1) 内部累加连续像素量（不足一行的余量保留，不丢弃） */
+    s_scroll_acc += px;
+
+    /* 行高未知（非 virtual_list 或取值失败）：退化为按像素滚动 */
+    if (s_cur_item_h <= 0) {
+        s_scroll_acc = 0.0f;
+        lv_obj_scroll_by_bounded(s_cur_list, 0, (lv_coord_t)px, LV_ANIM_OFF);
+        return;
     }
 
-    lv_obj_scroll_by_bounded(s_cur_list, 0, (lv_coord_t)px, LV_ANIM_OFF);
+    /* 2) 只取出"整行"的部分：朝 0 截断，即转够一行才走一行。
+       （余量上限 = 一行，反向转动最多先"还"掉一行就会立刻响应） */
+    long rows = (long)(s_scroll_acc / (float)s_cur_item_h);
+    if (rows == 0) {
+        return;   /* 不足一行：余量留在累加器里等下次 */
+    }
+    s_scroll_acc -= (float)(rows * s_cur_item_h);   /* 扣掉已交给列表的量 */
+
+    /* 3) 交给列表：行高的整数倍（dy 为负 = 向下翻行），越界由列表自己 clamp */
+    lv_obj_scroll_by_bounded(s_cur_list, 0,
+                             (lv_coord_t)(rows * s_cur_item_h), LV_ANIM_OFF);
 
     /* 累计转动角度：每超过 CW_LOG_STEP_DEG 打一条日志（串口验证用） */
     s_acc_deg += delta_deg;
     if (fabsf(s_acc_deg) >= CW_LOG_STEP_DEG) {
-        ESP_LOGI(TAG, "rotate %.0f deg -> scroll %d px (scroll_y=%d)",
-                 (double)s_acc_deg, (int)px, (int)lv_obj_get_scroll_y(s_cur_list));
+        ESP_LOGI(TAG, "rotate %.0f deg -> %ld row(s) (%d px, scroll_y=%d)",
+                 (double)s_acc_deg, rows,
+                 (int)(rows * s_cur_item_h),
+                 (int)lv_obj_get_scroll_y(s_cur_list));
         s_acc_deg = 0.0f;
     }
 }
@@ -291,6 +340,9 @@ static void cw_pressed_cb(lv_event_t *e)
     s_acc_deg  = 0.0f;
     s_rotated  = false;
     s_active   = true;
+    /* 每次按住重新开始累加余量（不碰列表位置：步进是相对的，
+       按下时列表停在哪儿，就从哪儿开始一格格跳） */
+    s_scroll_acc = 0.0f;
     cw_ring_dots_set_visible(true);   /* 显示画圈指示圆点 */
 }
 

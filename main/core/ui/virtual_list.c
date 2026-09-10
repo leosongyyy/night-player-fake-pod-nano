@@ -454,3 +454,12 @@ uint32_t virtual_list_get_first_index(lv_obj_t *list)
     }
     return (uint32_t)sy / (uint32_t)st->item_height;
 }
+
+lv_coord_t virtual_list_get_item_height(lv_obj_t *list)
+{
+    if (list == NULL) {
+        return 0;
+    }
+    virtual_list_state_t *st = vlist_get_state(list);
+    return (st == NULL) ? 0 : st->item_height;
+}
