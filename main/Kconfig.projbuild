@@ -90,9 +90,11 @@ menu "FakePodNanoNightPlayer 应用配置"
 
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
-        default "0.9.0.0 alpha 3"
+        default "0.9.0.0 alpha 4"
         help
             用户可见的固件版本标识，仅用于"关于"页展示，不影响功能。
             发版时在此修改版本号即可。
+            ⚠ 改本项后需删掉对应 build/<cfg>/sdkconfig 再带 -D reconfigure，
+            否则旧的版本号会从已有 sdkconfig 里沿用（详见 AGENTS.md 第 6 节）。
 
 endmenu
