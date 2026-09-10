@@ -10,6 +10,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/playlist.h"
 #include "core/ui/click_wheel.h"
+#include "core/ui/global_style.h"
 #include "core/ui/virtual_list.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
@@ -76,7 +77,9 @@ static void dir_bind_cb(virtual_list_cell_t *cell, uint32_t index,
     (void)user_data;
     const playlist_dir_entry_t *dir = (const playlist_dir_entry_t *)item;
     const char *name = playlist_get_string(dir->name_str);
-    lv_label_set_text(cell->text, name);
+    /* 跑马灯文本走 global_style 的包装（内容没变则一个字都不动，
+       避免"正在播放高亮"刷新时把跑马灯打回起点） */
+    global_style_marquee_set_text(cell->text, name);
     lv_label_set_text(cell->icon,
                       dir_name_is_pl(name) ? LV_SYMBOL_LIST : LV_SYMBOL_DIRECTORY);
 

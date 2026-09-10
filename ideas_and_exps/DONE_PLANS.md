@@ -1021,5 +1021,57 @@ DMA 稳态 17KB、内部 RAM 稳态约 27KB。下拉流畅度与按钮遮挡效�
 `rotate .. deg -> scroll .. px` 日志核对（`CW_LOG_STEP_DEG = 30°` 一条）。
 画圈手感（快速画圈是否会撞上新的 800px 单帧上限）请以设备实测为准。
 
+## 40. 跑马灯动画统一节奏（FUTURE_PLAN 第 36 点）✅ 已完成
+
+**需求**（用户）：全项目的跑马灯（超长文本滚动）统一成"先停顿 → 只滚动 3 轮 →
+每轮之间停顿 1 秒 → 停下"，不要无限循环；并按计划建议新建一个 `global_style`
+集中放这类全局动画/样式参数（用户明确要求**参数不进 Kconfig**）。
+
+**研究结论（LVGL 8.4，读 `lv_label.c` 源码）**：计划里引用的那份资料只对了一半——
+官方"动画模板"样式属性 `LV_STYLE_ANIM` 确实存在，但对 8.4 的 label：
+1. 只对 `LV_LABEL_LONG_SCROLL_CIRCULAR` 生效（`LV_LABEL_LONG_SCROLL` 那条分支根本不看模板）；
+2. 模板里**只读** `act_time`（起始延迟）与 `repeat_delay`（轮间停顿），
+   `time` / `repeat_cnt` 一概被忽略；
+3. `repeat_count` 被 lv_label **写死为无限**
+   （`lv_label_refr_text()` 里 `lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE)`），
+   所以官方示例 `lv_example_label_5` 的"只重复 N 次"在 8.4 上是无效的。
+
+**实现**（新增 `main/core/ui/global_style.{h,c}`，**不修改 managed_components 里的 LVGL 源码**）：
+① 全局 `lv_anim_t` 模板 + `lv_obj_set_style_anim()` 负责"起始延迟 + 轮间停顿"
+（LVGL 每次重建滚动动画都会自动套用这两个参数）；② 动画建好后用
+`lv_anim_get(label, NULL)` 拿到 LVGL 那条滚动动画并**就地**改 `repeat_cnt`
+（不另建自己的动画：同一 var 上只留一条动画，避免两条动画抢写 `label->offset.x`，
+也不破坏 LVGL"切 CLIP 即停滚动"等既有逻辑，且无需访问 `lv_label_t` 内部字段）；
+③ 200ms 守护定时器兜底：LVGL 在文本/尺寸/样式变化时会重建动画（轮数又变回无限），
+按 `anim->user_data` 标记判断"没接管过"就补一次。
+
+**参数**（`global_style.h` 顶部宏，按用户要求**不放 Kconfig**）：轮数 3、轮间停顿 1000ms、
+起始延迟 1000ms、速度 0（沿用 LVGL 默认，DPI 160 → 约 53px/s）、守护周期 200ms。
+
+**接入点**：`core/ui/virtual_list.c`（行文本 label 创建时登记 + **`vlist_bind_row()`
+绑定完条目文本后统一收口** + `vlist_apply_marquee()` 切回 CIRCULAR 时重跑）；
+`ui/now_playing.c`（新增 `np_set_marquee_text()`，标题/副标题所有改文本处改用它，
+并在创建、开启跑马灯时 attach）。目录页/歌曲页本身无需改动。
+
+**验证**（debug 版，COM12，2026-09）：编译无警告、二进制与实测固件一致；
+启动日志 `gstyle: marquee style: rounds=3, pause=1000ms, start delay=1000ms, speed=0px/s`；
+**设备实测（用户确认）**：跑马灯如预期"停顿 → 滚 3 轮（轮间各停 1s）→ 停下"，
+且停下后文本内容更新（例如切歌）会正确重新开始。
+
+**文档**：新增 `ideas_and_exps/MARQUEE_STYLE.md`（LVGL 8.4 研究结论、方案对比与
+"为什么不改 vendor 源码"、参数表、接入点、已知坑与临时调试日志技巧）。
+
+**后续修正（切歌时"所有跑马灯一起重置"）✅ 已修复**：用户反馈切歌瞬间整屏跑马灯
+都回到起点重新停顿。根因：`playlist_page` / `dir_list` 在曲目/目录变化时会
+`virtual_list_refresh()` 重绑**全部可见行**（只为刷新"正在播放"的黄色高亮，文本一个字
+都没变），而 `lv_label_set_text()` **即使内容相同**也会走 `lv_label_refr_text()`，
+CIRCULAR 分支在有模板时会把 `act_time` 强制成起始延迟并把偏移拉回 0（改造前用的是
+LVGL 默认行为，重建时保留 act_time，所以看不出问题）。修法：
+① 新增 `global_style_marquee_set_text()` —— 先 `strcmp`，内容相同直接返回、不同才
+`set_text` + 重跑（**1 秒初始延迟与 3 轮节奏完全保留**，真换歌照旧）；② `vlist_bind_row()`
+去掉无条件 `attach()`（否则等于强制重跑）；③ 目录页/歌曲页绑定回调改用它；④ 正在播放页
+删掉本地包装改用模块接口（同时修掉"封面补写同一份标题"导致的白重启一次）。
+（debug 版 COM12 重烧验证）
+
 
 

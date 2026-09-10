@@ -11,6 +11,7 @@
 #include "core/image/default_cover.h"
 #include "core/music/song_meta.h"
 #include "core/player/player_controller.h"
+#include "core/ui/global_style.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
@@ -207,12 +208,14 @@ static void cover_load_task(void *arg)
                 lv_img_set_src(s_cover, DEFAULT_COVER_IMG);
             }
         }
-        /* Bug 20：换封面同一时机补写标题/副标题（见函数头注释） */
+        /* Bug 20：换封面同一时机补写标题/副标题（见函数头注释）。
+           用 global_style_marquee_set_text：内容与刚才写入的相同则不动，
+           不会把已经起步的跑马灯又打回起点 */
         if (s_title_label != NULL) {
-            lv_label_set_text(s_title_label, title);
+            global_style_marquee_set_text(s_title_label, title);
         }
         if (s_sub_label != NULL) {
-            lv_label_set_text(s_sub_label, subtitle);
+            global_style_marquee_set_text(s_sub_label, subtitle);
         }
         lvgl_port_unlock();
         mem_trace_log("cover:applied");
@@ -225,7 +228,10 @@ static void cover_load_task(void *arg)
 /* 内部工具                                                             */
 /* ------------------------------------------------------------------ */
 
-/* 创建可滚动的跑马灯 label（超长文本循环滚动；非当前页时由外部关闭） */
+/* 创建可滚动的跑马灯 label（超长文本滚动；非当前页时由外部关闭）。
+   滚动节奏（起始延迟/轮数/轮间停顿）由 core/ui/global_style 统一管理：
+   创建后挂一次，之后改文本一律走 global_style_marquee_set_text()
+   （内容没变就不动，避免"封面补写标题"把刚起步的跑马灯又打回起点） */
 static lv_obj_t *np_make_marquee_label(lv_obj_t *parent, const char *text,
                                        const lv_font_t *font, lv_color_t color)
 {
@@ -235,6 +241,7 @@ static lv_obj_t *np_make_marquee_label(lv_obj_t *parent, const char *text,
     lv_obj_set_style_text_color(lbl, color, 0);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(lbl, LV_PCT(100));
+    global_style_marquee_attach(lbl);
     return lbl;
 }
 
@@ -414,12 +421,12 @@ static void np_refresh_cb(const player_controller_status_t *st, void *ctx)
 {
     (void)ctx;
 
-    /* 歌曲变化时更新标题/副标题（跑马灯随 set_text 重新开始），
+    /* 歌曲变化时更新标题/副标题（跑马灯按全局节奏重新开始），
        并异步加载新歌曲的封面（后台任务读 .npd + JPEG 解码） */
     if (st->cur_global != s_last_global) {
         s_last_global = st->cur_global;
-        lv_label_set_text(s_title_label, st->title);
-        lv_label_set_text(s_sub_label, st->subtitle);
+        global_style_marquee_set_text(s_title_label, st->title);
+        global_style_marquee_set_text(s_sub_label, st->subtitle);
         ESP_LOGI(TAG, "now playing: %s [%s]", st->title, st->subtitle);
         cover_load_request(st->cur_global);
     }
@@ -755,9 +762,15 @@ void now_playing_set_marquee(bool enable)
         ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_CLIP;
     if (s_title_label != NULL) {
         lv_label_set_long_mode(s_title_label, mode);
+        if (enable) {
+            global_style_marquee_attach(s_title_label);   /* 按全局节奏重跑 */
+        }
     }
     if (s_sub_label != NULL) {
         lv_label_set_long_mode(s_sub_label, mode);
+        if (enable) {
+            global_style_marquee_attach(s_sub_label);
+        }
     }
 }
 

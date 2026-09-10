@@ -124,6 +124,9 @@ void virtual_list_set_selected_cb(lv_obj_t *list,
  * 关闭时改为裁剪（LV_LABEL_LONG_CLIP）。常驻行在滚动时不被重绑
  * （不 set_text / set_pos），因此跑马灯动画不会因滚动而重置，
  * 仅新进入视口的行会从头开始（属正常表现）。
+ *
+ * 滚动的节奏（起始延迟 / 滚动轮数 / 轮间停顿）由 core/ui/global_style
+ * 统一管理，本模块只负责"开/关"，不关心具体动画参数。
  */
 void virtual_list_set_marquee(lv_obj_t *list, bool enable);
 

@@ -190,6 +190,14 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
 6. **跑马灯**：cell 默认 `LV_LABEL_LONG_SCROLL_CIRCULAR`。因常驻 cell 滚动时不被
    重绑（不 `set_text` / `set_pos`），跑马灯动画在滚动前后连续不断；只有新进入
    视口的 cell 会从头开始滚动（属正常表现）。
+   ⚠ 滚动的**节奏**（起始延迟 / 滚动轮数 / 轮间停顿）不在这里定义，统一由
+   `core/ui/global_style` 管理（详见 `MARQUEE_STYLE.md`）：
+   - 行文本 label 由本组件在创建时 `global_style_marquee_attach()` **登记一次**；
+   - 绑定回调里设置文本**必须**用 `global_style_marquee_set_text(cell->text, ...)`，
+     **不要**裸调 `lv_label_set_text()`——内容相同的重设也会让 lv_label 重建滚动
+     动画，表现为"跑马灯莫名回到起点"；而曲目/目录变化时本组件会重绑**全部可见行**
+     （只为刷"正在播放"高亮），一裸调就会看到"切歌瞬间整屏跑马灯一起重置"；
+   - `vlist_bind_row()` 故意**不碰**跑马灯（不重跑、不重设参数）。
 
 ---
 

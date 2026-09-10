@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "core/fonts/system_font.h"
+#include "core/ui/global_style.h"
 #include "esp_log.h"
 
 static const char *TAG = "vlist";
@@ -69,18 +70,27 @@ static void vlist_pass_through_cb(lv_event_t *e)
 /* 把跑马灯开关应用到所有行槽的文本 label：
    开启 → 循环滚动（图标保持不动）；关闭 → 裁剪。
    （不再随滚动临时切换：常驻行滚动时不被重绑，跑马灯保持连续，
-     只有新进入视口的行会从头开始，属正常表现） */
+     只有新进入视口的行会从头开始，属正常表现）
+   滚动的节奏（起始延迟/轮数/轮间停顿）统一由 core/ui/global_style 管理 */
 static void vlist_apply_marquee(virtual_list_state_t *st)
 {
     lv_label_long_mode_t mode = st->marquee_enable
         ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_CLIP;
     for (uint32_t i = 0; i < st->row_count; i++) {
         lv_label_set_long_mode(st->rows[i].text, mode);
+        if (st->marquee_enable) {
+            global_style_marquee_attach(st->rows[i].text);
+        }
     }
 }
 
 /* 把某个行槽绑定到指定条目：把行视图（icon/text）交给用户回调填内容。
-   （行槽无选中背景，"当前播放中"的标注由绑定回调用文字颜色实现） */
+   （行槽无选中背景，"当前播放中"的标注由绑定回调用文字颜色实现）
+   ⚠ 本函数**不**碰跑马灯：曲目/目录变化时上层会 virtual_list_refresh() 重绑
+     全部可见行（只为刷新"正在播放"的黄色高亮，文本其实没变），若在这里无条件
+     global_style_marquee_attach() 就会让整屏跑马灯一起回到起点。
+     跑马灯的重启交给绑定回调里的 global_style_marquee_set_text()——它只在内容
+     真的变了时才 set_text + 重跑（详见 core/ui/global_style.h） */
 static void vlist_bind_row(virtual_list_state_t *st, vlist_row_t *row,
                            uint32_t index)
 {
@@ -334,6 +344,10 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         lv_label_set_long_mode(text, LV_LABEL_LONG_SCROLL_CIRCULAR);
         lv_obj_clear_flag(text, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(text, vlist_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
+        /* 登记到全局跑马灯管理（此刻还没有文本、不会滚动；文本绑定后由
+           vlist_bind_row 重新接管并开始滚动）。登记一次即可，之后由守护
+           定时器兜底，无需每个行槽反复登记 */
+        global_style_marquee_attach(text);
 
         st->rows[i].root = root;
         st->rows[i].icon = icon;

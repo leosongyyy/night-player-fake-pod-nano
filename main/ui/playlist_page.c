@@ -8,6 +8,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/playlist.h"
 #include "core/ui/click_wheel.h"
+#include "core/ui/global_style.h"
 #include "core/ui/virtual_list.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/list_common.h"
@@ -59,7 +60,10 @@ static void song_bind_cb(virtual_list_cell_t *cell, uint32_t index,
                          const void *item, void *user_data)
 {
     const playlist_song_entry_t *song = (const playlist_song_entry_t *)item;
-    lv_label_set_text(cell->text, playlist_get_string(song->name_str));
+    /* 跑马灯文本走 global_style 的包装（内容没变则一个字都不动）：
+       切歌后本列表会重绑全部可见行只为刷新"正在播放"黄色高亮，
+       直接 set_text 会把每一行的跑马灯都打回起点重新滚 */
+    global_style_marquee_set_text(cell->text, playlist_get_string(song->name_str));
     lv_label_set_text(cell->icon, LV_SYMBOL_AUDIO);
 
     uint32_t song_start = (uint32_t)(uintptr_t)user_data;

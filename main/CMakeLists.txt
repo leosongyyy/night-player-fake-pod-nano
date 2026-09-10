@@ -21,6 +21,7 @@ set(MAIN_SRCS
     "core/ui/touch_test.c"
     "core/ui/virtual_list.c"
     "core/ui/click_wheel.c"
+    "core/ui/global_style.c"
     "core/utils/fake_shutdown.c"
     "core/utils/deep_worker.c"
     "core/utils/task_psram.c"
