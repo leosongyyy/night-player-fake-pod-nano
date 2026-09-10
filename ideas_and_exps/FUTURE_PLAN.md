@@ -76,3 +76,89 @@ Lhear = Lout - 0.03 * Rout
   `heap_caps_get_free_size(MALLOC_CAP_DMA)`。
   （当然，绘制缓冲区必须在IRAM里，不然带宽就不够刷满30帧了）
 
+## 42. idfc.exe 的改进想法（工具链体验）
+
+> 2026-09 一次完整会话（ClickWheel 按格滚动那次）的实测摩擦点汇总。前提：idfc 的
+> "服务器 + SSE 流式输出"架构本身已经很好用，痛点几乎全在**"人/AI 必须记住隐式约定"**上。
+> 那次真实踩到 4 个坑：① 不带 `-B` 时静默用根 `sdkconfig` + 根 `build/`（还顺手跑了一次
+> cmake 配置），于是构建出的固件带着**过期的堆毒化配置**，连锁出内部 RAM 紧张 → 任务建不起来
+> → SD 读 `allocate_dma_buf` 失败 → 开机跳曲；② 会话中途 IDF 服务器被回收，只能停下等用户
+> 手动启动 VBS；③ `monitor` 永不返回，只能"后台起任务 + sleep + kill + 读增量"，丢尾部又靠
+> 猜时间；④ 串口号要靠人告知（文档里留的是另一台机器的 COM12，本机实际是 COM5）。
+> 下面按"值不值得做"分组，条目编号仅用于引用。
+
+### 42.1 防呆（上述 ① 类事故，价值最高）
+
+1. **`-B` 缺失 / 不匹配要直接报错，而不是静默退化**：① 若 `build/*/` 下有多个配置目录而调用方
+   没给 `-B`，直接失败并列出候选项；② 若给了 `-B build/debug` 但 `-D SDKCONFIG=` 指向别的目录，
+   拒绝执行（这正是"配置漂移"的入口）。
+2. **每条命令开头回显解析结果**：
+   `[idfc] build dir=build/debug  sdkconfig=build/debug/sdkconfig (mtime 09-10 21:25)  target=esp32s3  idf=5.5.5`
+   —— 一行就让"我到底在构建哪套"变成可见事实。
+3. **`idfc config-check -B build/debug`**：拿生效的 `build/<cfg>/sdkconfig` 与 defaults 链逐项比对，
+   列出差异项并以非零码退出（另配 `config-diff` 看具体值）。那次"堆毒化仍开"的漂移是手写
+   PowerShell 才查出来的——若构建/烧录前默认跑一遍，这类问题会当场暴露。
+4. **配置过期提醒**：`sdkconfig.defaults*` / `Kconfig.projbuild` 的 mtime 比
+   `build/<cfg>/sdkconfig` 新时，提示"配置可能未生效，需删 sdkconfig 再 reconfigure"——
+   即那条 `replace=False` 合并坑（见 AGENTS.md 第 5 节）的自动检测器。
+
+### 42.2 面向非交互调用者（脚本 / AI）的输出与退出码
+
+5. **诊断摘要 / 过滤模式**：`idfc build --diagnostics`（只流 `error:|warning:|FAILED|E (` 等）
+   或 `--tail N`，结尾给一段机器可读小结，如
+   `BUILD_OK bin=0x416d60 free=32% elf=... version=0.9.0.0_alpha_4-2-g76ca90d warnings=2`；
+   flash 同理 `FLASH_OK port=COM5 regions=3 verified`。现在要在 1500 行 ninja 进度里捞
+   "binary size" / "Project build complete"，而长输出还会被上游截断或落盘。
+6. **`--no-color`**：idf_monitor 传了 `--force-color`，非终端场景（日志文件、agent）里
+   ANSI 序列是纯噪声。
+7. **`idfc version -B build/release`**：从 ELF 读 app version + `git describe` + 编译时间。
+   那次是从串口日志里看到 `0.9.0.0_alpha_4-2-g76ca90d` 才知道"设备上烧的是哪次提交"，
+   有子命令可直接核对"设备固件 vs 工作区源码是否一致"。
+
+### 42.3 monitor 的可用性（那次用得最痛）
+
+8. **`monitor --duration 30 --log boot.log`**：到点自己退出、退出码 0、原始输出同时落文件。
+   现在 monitor 永不返回，只能"后台起任务 + sleep + kill + 读增量"。
+9. **`--until <regex>`**（如 `--until "App started"`）抓"到启动完成就停"；
+   以及 `--no-reset` / 独立的 `idfc reset` 明确控制是否复位 —— 让"抓一次干净的开机日志"
+   成为可复现的动作。
+10. **落盘不丢 + 离线解码**：被 Ctrl+C/kill 时也要 flush 文件；再配
+    `idfc decode <logfile>`（按对应 `-B` 的 ELF 做离线堆栈/地址还原）。那次 stderr 里
+    `0x4200fbec: power_service_do_screen_off` 是实时解出来的，落盘日志能离线解会更好用。
+
+### 42.4 一条命令走完固定流程
+
+11. **`idfc run -B build/debug -p COM5`** = build → flash → 复位 → 抓 20~30s 启动日志 →
+    输出"错误 N 条 / 已知无害警告 M 条"的小结（带可配置白名单，例如
+    `i2c: This driver is an old driver`、`allocate_dma_buf`）。本项目"改完即烧录 + 看开机日志"
+    是固定动作，一条命令能把三四个回合压成一个。
+
+### 42.5 状态类子命令
+
+12. **`idfc ports`**：列出串口 + 设备描述 + 自动识别 Espressif（USB-Serial/JTAG 的 VID:PID），
+    标出哪个是目标板、哪个被占用。文档里写死的端口号必然会过时（另一台机器 COM12 / 本机 COM5），
+    文档改成"用 `idfc ports` 确认"即可。更彻底：**每机一份不入库的配置**
+    （如 `idfc.local.json` 记默认端口/默认 profile，或 `IDFC_PORT` 环境变量）。
+13. **`idfc status`**：服务器是否在线（uptime、IDF 路径、是否有命令在跑）+ 各 `build/<cfg>`
+    的状态（是否存在？sdkconfig 相对 defaults 是否过期？产物 mtime 是否比源码新？）——
+    一张"我现在处于什么状态"的仪表盘。
+14. **`idfc doctor`**：服务器可达性、IDF/python 版本、端口可用性、磁盘空间一次性体检。
+    那次"IDF server is not running"只能停下等用户启动 VBS，有 doctor 就能一句话给出结论与修复命令。
+
+### 42.6 顺手的小改进
+
+15. **profile 简写**：`idfc --profile debug reconfigure` 自动展开为 `-B build/debug` +
+    `-D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" -D SDKCONFIG="build/debug/sdkconfig"`。
+    现在这串必须从文档复制，手抄极易出错，而 profile → 目录 → defaults 三者的对应关系本来就是死的。
+16. **并发串行化**：两条命令同时发时明确回 `busy: 正在执行 build（已 12s）`，
+    而不是让两路 SSE 交错。
+17. **回显等价命令行**：build 也像 flash 那样打印实际执行的 `idf.py` 命令行（含展开后的 `-D`），
+    便于贴进文档或复盘。
+
+### 42.7 优先级建议
+
+若只挑三个先做：**42.1 的 ③④（配置漂移检测 / 过期提醒）**、**42.3 的 ⑧⑨
+（monitor 的 duration/log/until）**、**42.6 的 ⑮ + 42.1 的 ①（profile 简写 + `-B`/`SDKCONFIG`
+一致性校验）**。共同点：都不需要新增能力，只是把**"必须记住的隐式约定"变成"命令自己会检查、
+会说的显式事实"**——对 AI 协作尤其值钱（AI 不会记得上一台机器是 COM12）。
+

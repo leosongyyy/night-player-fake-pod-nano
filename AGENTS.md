@@ -38,10 +38,11 @@
 
 - **执行命令**（客户端，在 `workspace-write` 权限下运行）：
   ```powershell
-  .\idfc.exe build              # 构建
-  .\idfc.exe -p COMx flash      # 烧录（端口仅为示例，不同电脑上的配置不同）
-  .\idfc.exe -p COMx monitor    # 串口监视
+  .\idfc.exe -B build/debug build            # 构建（-B 指定配置目录，见第 5 节）
+  .\idfc.exe -B build/debug -p COMx flash    # 烧录（端口仅为示例，不同电脑上的配置不同）
+  .\idfc.exe -B build/debug -p COMx monitor  # 串口监视（-B 须与所用固件的那份配置一致）
   ```
+- **⚠ `-B` 必须带上，`monitor` 尤其**（本项目是多配置构建，见第 5 节）：不带 `-B` 时 idfc 走**根目录 `build/` + 根 `sdkconfig`**（已被 `.gitignore` 忽略、内容陈旧），后果有两个——① 会**重新拿默认/旧配置在根 `build/` 里跑一次 cmake 配置**（日志开头可见 `Running cmake in directory ...\build`），白做一轮配置还可能和目标的 `build/<cfg>/` 混淆；② `monitor` 时 idf_monitor 要按**该配置目录的 `.elf`** 还原地址，目录不对就**加载不到正确的调试符号**（栈回溯的函数名/行号失真甚至解不出来）。所以 **monitor 必须用与设备上固件一致的那份配置目录**（`-B build/debug` / `-B build/release` / `-B build/releasecandidate`）。
 - **⚠ 若提示 `IDF server is not running at http://localhost:19781/idf.`**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.vbs` 或上述 `--server` 命令），不要自行尝试在受限权限下重建服务器。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
 - 服务器由 `idfc.exe` 内部派生的 `--server-child` 进程承载，用 `pwsh` 前台启动更稳定。
 
@@ -81,7 +82,7 @@
 **备注**：只有首次或"改过 `sdkconfig.defaults.*`"才需要带 `-D` 重新配置；日常增量构建和烧录只带 `-B` 即可。⚠ 已有 sdkconfig 的优先级高于 defaults（`replace=False` 合并），改了 defaults 后仅 reconfigure 不会生效，**必须先删对应 `build/<cfg>/sdkconfig` 再带 `-D` reconfigure**。烧录前记得确认串口号。
 默认情况下，构建调试版的，除非用户指定。
 
-- `idfc -p COMx monitor`：查看串口日志（退出 Ctrl+C或者直接结束任务）。
+- `idfc -B build/<cfg> -p COMx monitor`：查看串口日志（退出 Ctrl+C或者直接结束任务）。⚠ **必须带 `-B <对应配置>`**（`build/debug` / `build/releasecandidate` / `build/release`）：不带时会拿根 `sdkconfig` 在根 `build/` 重新跑一次配置构建，而且 idf_monitor 取不到该配置的 `.elf`、**调试符号加载不正确**（栈回溯/行号失真）——详见第 4 节。
 - 已开放 `C:\esp\` 与 `C:\Espressif\` 的读取权限，可查阅 IDF 源码。
 
 **6. 构建配置**
