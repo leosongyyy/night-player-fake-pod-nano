@@ -54,6 +54,13 @@ if(CONFIG_PERFORMANCE_MONITOR)
     list(APPEND MAIN_SRCS "core/utils/performance_monitor.c")
 endif()
 
+# 内存快照诊断（CONFIG_MEM_TRACE，release 关闭）：启动各阶段与封面加载打印
+# 内部 RAM / DMA / PSRAM 占用，用于定位内存消耗者（见 IRAM_DMA_AUDIT.md）。
+# 关闭时不编译本文件，且 mem_trace.h 会把所有调用点退化为空语句。
+if(CONFIG_MEM_TRACE)
+    list(APPEND MAIN_SRCS "core/utils/mem_trace.c")
+endif()
+
 # 完整版系统字体体积很大（固件约 4.1MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
 # 开启时才编译；关闭时改用精简版 system_global_font_lite，便于调试快速烧录。
 # ⚠ 曾尝试 SPIFFS 运行时加载（font_store），实测解析 ~8 秒开机太慢已回退。

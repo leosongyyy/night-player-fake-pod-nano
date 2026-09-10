@@ -12,6 +12,7 @@
 #include "core/storage/config_store.h"
 #include "core/storage/playlist_builder.h"
 #include "core/storage/playlist_store.h"
+#include "core/utils/mem_trace.h"
 #include "core/utils/sleep_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -312,8 +313,11 @@ static void boot_enter_normal(void)
     if (r != ESP_OK) {
         ESP_LOGW(TAG, "player controller init failed: %s", esp_err_to_name(r));
     }
+    mem_trace_log("ui:after player_ctrl");
 
+    mem_trace_log("ui:before app_ui_create");
     app_ui_create();
+    mem_trace_log("ui:after app_ui_create");
 
     /* 开机默认开启睡眠定时（设置 → 睡眠定时器 → 开机默认开启）时，主界面
        就绪后弹 Toast 提醒"定时已开启"（见 FUTURE_PLAN 第 27 点）：用户由此
@@ -328,6 +332,7 @@ static void boot_enter_normal(void)
     }
 
     ESP_LOGI(TAG, "enter normal UI");
+    mem_trace_log("ui:enter normal done");
 }
 
 /* ------------------------------------------------------------------ */

@@ -36,6 +36,8 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 | `PERFORMANCE_MONITOR` | 双核 CPU/内存监视（串口每 2s） | 开 | 开 | 关 |
 | `FREERTOS_GENERATE_RUN_TIME_STATS` | FreeRTOS 运行时统计（performance_monitor 依赖） | 开 | 开 | 关 |
 | `LV_USE_PERF_MONITOR` | LVGL FPS 计数（屏幕角落） | 开 | 开 | 关 |
+| `HEAP_POISONING` | 堆毒化（越界写在释放时立即报 CORRUPT HEAP + 调用栈） | 关（`DISABLED`） | 关（`DISABLED`） | 关 |
+| `MEM_TRACE` | 内存快照诊断日志（各阶段内部 RAM/DMA/PSRAM 占用） | 开 | 开 | **关** |
 
 > ⚠ 触摸区域测试（白色圆点）与电池电压采样日志**已改为运行时开关**，不再是构建差异：
 > 设置菜单 → 关于 → 开发者选项（config_store/NVS，**默认关**，开机检查、修改需重启生效），

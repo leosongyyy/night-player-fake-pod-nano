@@ -14,6 +14,21 @@ menu "FakePodNanoNightPlayer 应用配置"
             CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS（已在 sdkconfig.defaults 开启）。
             关闭可减小固件并省掉监视任务占用的内存（约 5KB 任务栈）。
 
+    config MEM_TRACE
+        bool "内存快照诊断日志（各阶段打印内部 RAM/DMA/PSRAM 占用）"
+        default y
+        help
+            启用后在这些位置各打印一行内存快照（内部 RAM 的 free/最大连续块/
+            已分配块数、DMA 池 free/最大连续块、PSRAM free）：
+              · 启动各阶段（config_store/display/audio/pldata/sd/lvgl/boot_flow…）
+              · 开机 UI 创建前后（player_controller_init / app_ui_create）
+              · 封面加载各步骤（请求 / .npd 读取 / JPEG 解码 / 应用）
+            另外打印封面链路上大块分配的实际落点（PSRAM 还是内部 RAM）。
+            只读统计、不做任何分配，用于定位"谁吃了内部 RAM 与 DMA 池"
+            （2026-09 的调查结论见 ideas_and_exps/IRAM_DMA_AUDIT.md）。
+            ⚠ release 构建关闭（正式版不需要这些诊断日志）。
+            关闭时所有调用点编译为空语句，不产生任何代码与日志。
+
     config UI_SYSTEM_FONT_FULL
         bool "系统默认字体使用完整版（编译进固件，体积大）"
         default y

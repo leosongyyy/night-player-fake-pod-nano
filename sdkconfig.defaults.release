@@ -13,5 +13,6 @@ CONFIG_UI_COVER_FLASH=y
 # 调试功能全部关闭（触摸区域测试与电池电压日志已改为运行时开关，默认关，
 # 见设置→关于→开发者选项；此处仅剩编译级调试项）
 # CONFIG_PERFORMANCE_MONITOR is not set
+# CONFIG_MEM_TRACE is not set
 # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not set
 # CONFIG_LV_USE_PERF_MONITOR is not set

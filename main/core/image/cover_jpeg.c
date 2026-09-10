@@ -1,4 +1,5 @@
 #include "core/image/cover_jpeg.h"
+#include "core/utils/mem_trace.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -14,8 +15,14 @@ static uint8_t *cover_alloc(size_t size)
 {
     uint8_t *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (buf == NULL) {
+        /* ⚠ 内存诊断（FUTURE_PLAN 第 34 点）：460x460 RGB565 = 423KB 绝不能落
+           内部 RAM（内部 DRAM 总容量都不够），PSRAM 失败时回退几乎必然失败 */
+        ESP_LOGW(TAG, "PSRAM alloc %u B failed, fallback to default heap",
+                 (unsigned)size);
         buf = malloc(size);
     }
+    /* 打印落点（CONFIG_MEM_TRACE）：460x460 RGB565 = 423KB 绝不能落内部 RAM */
+    mem_trace_ptr(TAG, "pixel", size, buf);
     return buf;
 }
 

@@ -19,9 +19,14 @@ CONFIG_PERFORMANCE_MONITOR=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_LV_USE_PERF_MONITOR=y
 
-# Comprehensive 堆毒化（与 debug 一致）：越界写在释放时立即报 CORRUPT HEAP 并
-# 打印写入者调用栈；预发布版用于在低内存环境下抓取堆破坏类崩溃（曾用于定位
-# 坏曲播放导致的 LVGL 悬垂对象崩溃）。性能有少量开销，release 版不启用。
-CONFIG_HEAP_POISONING_COMPREHENSIVE=y
-# CONFIG_HEAP_POISONING_DISABLED is not set
+# 堆毒化：**关闭**（2026-09-10 修正）。
+# debug 配置早在 2026-09 就已改成 DISABLED，本文件此前仍是 COMPREHENSIVE，
+# 注释还写着"与 debug 一致"——实测这一项就让 RC 比 debug 少 18~28KB 内部 RAM，
+# 并把内部 RAM 最大连续块从 30KB 级压到 2.8KB：LVGL 绘制缓冲回到 V_RES/10 后，
+# app_ui_create 结束时 DMA 只剩 955B / 连续 80B → sdmmc allocate_dma_buf 失败
+# → 判坏曲 → 开机跳曲；同时 4KB 的 sleep_timer 内部栈也起不来。
+# 详见 ideas_and_exps/IRAM_DMA_AUDIT.md。
+# 需要抓堆越界写/悬垂对象时，按下面注释临时改回 Comprehensive 再构建。
+CONFIG_HEAP_POISONING_DISABLED=y
+# CONFIG_HEAP_POISONING_COMPREHENSIVE is not set
 # CONFIG_HEAP_POISONING_LIGHT is not set

@@ -7,6 +7,7 @@
 #include "core/fonts/system_smaller_font.h"
 #include "core/hardware/display.h"
 #include "core/image/cover_jpeg.h"
+#include "core/utils/mem_trace.h"
 #include "core/image/default_cover.h"
 #include "core/music/song_meta.h"
 #include "core/player/player_controller.h"
@@ -143,12 +144,14 @@ static void cover_load_task(void *arg)
         }
         snprintf(path, sizeof(path), "%s", cur);
 
+        mem_trace_log("cover:req");
         song_meta_t meta;
         if (song_meta_load(path, &meta) != ESP_OK) {
             song_meta_free(&meta);
             cover_show_default();   /* 无 .npd：标题本就回退文件名，无需补 */
             continue;
         }
+        mem_trace_log("cover:npd_loaded");
 
         /* 解码前先校验歌曲未变（快速切歌时省掉无谓的解码） */
         player_controller_status_t st;
@@ -165,6 +168,7 @@ static void cover_load_task(void *arg)
             cover_jpeg_decode(meta.jpeg_data, meta.jpeg_len, &img) == ESP_OK) {
             have_cover = true;
         }
+        mem_trace_log("cover:decoded");
 
         /* 解码完成：再确认一次还是这首歌才应用（解码 100~300ms 内可能又切歌） */
         player_controller_get_status(&st);
@@ -211,6 +215,7 @@ static void cover_load_task(void *arg)
             lv_label_set_text(s_sub_label, subtitle);
         }
         lvgl_port_unlock();
+        mem_trace_log("cover:applied");
 
         song_meta_free(&meta);
     }

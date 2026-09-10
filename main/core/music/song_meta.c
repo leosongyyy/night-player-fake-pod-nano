@@ -1,4 +1,5 @@
 #include "core/music/song_meta.h"
+#include "core/utils/mem_trace.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,6 +100,10 @@ esp_err_t song_meta_load(const char *song_path, song_meta_t *out)
         fclose(f);
         return ESP_ERR_NO_MEM;
     }
+    /* 内存诊断（CONFIG_MEM_TRACE）：确认大缓冲落在 PSRAM。
+       fsize > SPIRAM_MALLOC_ALWAYSINTERNAL(16384) 时 heap_caps_malloc_default
+       的 >阈值分支显式带 MALLOC_CAP_SPIRAM，走 PSRAM；≤16KB 的小 .npd 会落内部 RAM。 */
+    mem_trace_ptr(TAG, "npd", (size_t)fsize, buf);
     if (fread(buf, 1, (size_t)fsize, f) != (size_t)fsize) {
         free(buf);
         fclose(f);
@@ -141,7 +146,12 @@ esp_err_t song_meta_load(const char *song_path, song_meta_t *out)
     if (jlen > 0) {
         uint8_t *jd = heap_caps_malloc(jlen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (jd == NULL) {
+            /* PSRAM 不足时回退默认分配（jlen ≤16KB 时会落内部 RAM） */
+            ESP_LOGW(TAG, "PSRAM alloc for jpeg %u B failed, fallback", (unsigned)jlen);
             jd = malloc(jlen);
+        }
+        if (jd != NULL) {
+            mem_trace_ptr(TAG, "jpeg data", jlen, jd);
         }
         if (jd == NULL) goto done;
         memcpy(jd, p, jlen);
