@@ -34,11 +34,16 @@ static const char *TAG = "click_wheel";
    与 virtual_list 的行图标同一处理） */
 #define CW_ICON_FONT      (&lv_font_montserrat_20)
 
-/* 一圈（360°）滚动内容总高度的比例：10% */
-#define CW_TURN_RATIO     0.1f
+/* 一圈（360°）滚动内容总高度的比例：20% → **5 圈滑到底**
+   （原为 10%＝10 圈到底，2026-09-10 按用户要求提高灵敏度；灵敏度只由
+   这一个常量决定，改它就是改"几圈到底"：圈数 = 1 / CW_TURN_RATIO） */
+#define CW_TURN_RATIO     0.2f
 /* 每帧最大滚动量（px）：防止触摸异常跳变（如坐标瞬时漂移 180°）时列表乱飞。
-   正常转动每帧约 10~40°，460x460 屏 600 首列表下约 70~280px */
-#define CW_MAX_STEP_PX    400
+   正常转动每帧约 10~40°，460x460 屏 600 首列表下约 140~560px
+   ⚠ 该上限必须随 CW_TURN_RATIO 同步放大（否则快速画圈时单帧滚动量被削顶，
+   表现成"要转十几圈才到底"，与灵敏度设置矛盾）；180° 的坐标跳变仍会产生
+   数千 px，照旧被钳制，跳变保护不受影响 */
+#define CW_MAX_STEP_PX    800
 
 /* 画圈指示：屏幕上一圈 12 个灰色小圆点（跟随旋转圆心，即屏幕中心） */
 #define CW_RING_DOTS      12     /* 圆点数量 */
@@ -56,10 +61,10 @@ static const char *TAG = "click_wheel";
 #define CW_LOG_STEP_DEG   30.0f
 
 /* ------------------------------------------------------------------ */
-/* 模块状态（全局唯一实例：按钮挂在 lv_layer_top 上，由当前页面驱动）      */
+/* 模块状态（全局唯一实例：按钮挂在 lv_scr_act 屏幕层，由当前页面驱动）    */
 /* ------------------------------------------------------------------ */
 
-static lv_obj_t *s_btn        = NULL;  /* 按钮对象（lv_layer_top 的子对象） */
+static lv_obj_t *s_btn        = NULL;  /* 按钮对象（lv_scr_act() 的子对象） */
 static lv_obj_t *s_lists[CLICK_WHEEL_TAB_COUNT] = { NULL, NULL }; /* 各页面的列表 */
 static uint32_t  s_counts[CLICK_WHEEL_TAB_COUNT] = { 0, 0 };      /* 各页面的条目数 */
 static uint8_t   s_tab        = 0;     /* 当前主界面页面下标 */
@@ -96,7 +101,7 @@ static void cw_icon_pass_through_cb(lv_event_t *e);
    只建一次；平时 HIDDEN，画圈时显示。圆点不接收触摸（纯视觉指示）。 */
 static void cw_ring_dots_create(void)
 {
-    lv_obj_t *parent = lv_layer_top();   /* 与按钮同层，位于所有界面之上 */
+    lv_obj_t *parent = lv_scr_act();   /* 与按钮同层（屏幕层），位于主界面之上 */
     for (uint8_t i = 0; i < CW_RING_DOTS; i++) {
         float deg = CW_RING_START_DEG +
                     (360.0f / (float)CW_RING_DOTS) * (float)i;
@@ -209,7 +214,7 @@ static void cw_scroll_by_deg(float delta_deg)
         return;   /* 内容不足一屏：无需滚动 */
     }
 
-    /* 一圈滚动 10% 内容高度 → 每度滚动量。
+    /* 一圈滚动 20% 内容高度（5 圈到底）→ 每度滚动量。
        ⚠ 方向：屏幕坐标系里顺时针 = 角度增大；需求是"顺时针向下滚"，
        而 lv_obj_scroll_by 的 dy 为正表示内容上移（视口向下），故取负号
        （顺时针 → dy 为正 → 列表向下翻）。 */
@@ -330,11 +335,20 @@ lv_obj_t *click_wheel_create(void)
         return s_btn;   /* 已创建：幂等 */
     }
 
-    /* 父对象 = lv_layer_top()（系统最顶层）：
+    /* 父对象 = 当前屏幕 lv_scr_act()：主界面 tabview 的**兄弟**且比 tabview
+       晚创建 → 天然位于整个主界面之上。
        ⚠ 放在 tab 页容器内时，从按钮起手拖动会被 LVGL 的滚动链
        （SCROLL_CHAIN）找到可横向滚动的 tabview，判定为翻页并给按钮发
-       PRESS_LOST，画圈直接失效；放顶层 + 清除滚动链后事件不再外泄 */
-    lv_obj_t *parent = lv_layer_top();
+       PRESS_LOST，画圈直接失效；放到屏幕层（tabview 之外）+ 清除滚动链后
+       事件不再外泄。
+       ⚠ **不要**改挂 lv_layer_top()：那样它会浮在下拉控制中心之上（曾出现
+       的 Z 序 Bug），而"把面板也挂顶层"的修法会破坏 LVGL 的覆盖判定——
+       lv_refr_get_top_obj() 只在当前屏幕的子对象树里寻找覆盖绘制块的不透明
+       对象，面板一旦离开屏幕树，被它遮住的页面内容（全屏封面大图等）每帧
+       都会被重绘一遍，导致下拉控制中心严重掉帧（见 DONE_PLANS.md 第 38 点）。
+       面板与本按钮同在屏幕层，Z 序由创建顺序（main_ui_create →
+       notification_panel_create）保证面板在上。 */
+    lv_obj_t *parent = lv_scr_act();
 
     s_btn = lv_obj_create(parent);
     lv_obj_set_size(s_btn, CW_SIZE, CW_SIZE);
@@ -375,7 +389,7 @@ lv_obj_t *click_wheel_create(void)
     /* 画圈指示：12 个灰色圆点围成一圈（常驻隐藏，画圈时显示） */
     cw_ring_dots_create();
 
-    ESP_LOGI(TAG, "click wheel created on top layer (%dx%d px, margin %d/%d, "
+    ESP_LOGI(TAG, "click wheel created on screen layer (%dx%d px, margin %d/%d, "
                   "ring %d dots r=%d)",
              CW_SIZE, CW_SIZE, CW_MARGIN, CW_MARGIN_BOTTOM,
              CW_RING_DOTS, CW_RING_RADIUS);

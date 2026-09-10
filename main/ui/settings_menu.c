@@ -847,8 +847,9 @@ void settings_menu_show(void)
        不再参与重绘，消除菜单滚动时被底层大图拖慢的卡顿。
        菜单本身是全屏独立覆盖层，隐藏主界面不影响其显示 */
     main_ui_set_visible(false);
-    /* 隐藏顶层 ClickWheel：它在 lv_layer_top 上，会盖在菜单之上并拦截
-       该区域的触摸（见 core/ui/click_wheel.h） */
+    /* 隐藏 ClickWheel 按钮：它与本菜单同在屏幕层、但创建更早（见
+       core/ui/click_wheel.h），菜单的 s_menu_bg 虽盖住它，按钮仍会拦截
+       该区域的触摸，故显式隐藏 */
     click_wheel_set_overlay(true);
 
     /* 重置到根页面：仅当当前不在根页面时才清历史并切回。

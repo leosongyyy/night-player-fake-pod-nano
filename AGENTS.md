@@ -153,7 +153,7 @@ main/
       lvgl_port.h/.c        # LVGL 移植层：显示驱动、tick、任务(Core0)、互斥锁、触摸 indev、触摸事件订阅
       touch_test.h/.c       # 触摸区域测试（白点跟随 + 淡出；运行时开关，开发者选项控制）
       virtual_list.h/.c     # 通用虚拟滚动列表（固定行槽复用，600+ 长列表可靠，依赖 LARGE_COORD）
-      click_wheel.h/.c      # 虚拟 ClickWheel 速滑按钮（lv_layer_top 顶层黄色圆钮，按住绕屏中心画圈翻页 + 12 灰点指示；NVS 配置 click_wheel 默认开，设置菜单可开关；见 CLICK_WHEEL_USAGE.md）
+      click_wheel.h/.c      # 虚拟 ClickWheel 速滑按钮（lv_scr_act 屏幕层黄色圆钮，按住绕屏中心画圈翻页 + 12 灰点指示；⚠ 不可挂 lv_layer_top——会让被下拉控制中心遮住的页面内容每帧重绘、严重掉帧，见 CLICK_WHEEL_USAGE.md 与 DONE_PLANS #38；NVS 配置 click_wheel 默认开，设置菜单可开关）
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
       fake_shutdown.h/.c        # 伪关机（睡眠定时器到点；A 键长按"等待断电"，深链委托 deep_worker）

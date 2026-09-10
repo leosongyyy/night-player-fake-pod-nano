@@ -690,19 +690,27 @@ static void content_create(void)
 
 void notification_panel_create(lv_obj_t *status_bar)
 {
-    /* ⚠ 父对象 = lv_layer_top()（系统最顶层），**不是** lv_scr_act()：
-       虚拟 ClickWheel 速滑按钮挂在同一顶层（main_ui_create 早于本函数
-       创建），面板放在这里且**创建更晚** → 面板在 Z 轴上天然位于按钮
-       之上，展开时自然遮挡按钮并接管其区域的触摸（否则按钮会浮在控制
-       中心之上，还会抢走右下角把手区的上拉手势）。
-       ⚠ 顺序敏感：本函数必须在 click_wheel_create() 之后调用
-       （由 ui/app.c 的 app_ui_create 保证），否则按钮会反过来盖住面板。
-       Toast 为懒创建（首次弹提示时），届时位于面板之上，面板展开时
+    /* ⚠ 父对象 = lv_scr_act()（当前屏幕），**不能**挂 lv_layer_top()：
+       LVGL 8 每帧按绘制缓冲高度分块刷新，每块先用 lv_refr_get_top_obj()
+       在**当前屏幕的子对象树里**寻找"完全覆盖该块的不透明对象"，命中则
+       跳过它下面的所有内容。面板一旦离开屏幕树（挂到顶层），被它遮住的
+       页面内容（正在播放页的 460×460 封面大图、中文文本、半透明状态栏）
+       就会**每帧被重绘一遍**，再叠加顶层无条件重绘的面板 → 绘制量约 2~3
+       倍；下拉越深无效行越多，越过半屏（5→6 个绘制块）后单帧时间越过
+       33ms 刷新周期，帧率直接腰斩（"下拉控制中心拉到一半后严重掉帧"，
+       详见 DONE_PLANS.md 第 38 点）。
+       Z 序改由**创建顺序**保证：本函数由 app_ui_create 在
+       main_ui_create()（内含 click_wheel_create()，按钮同样建在屏幕层）
+       之后调用 → 面板在屏幕子对象中更年轻 → 依旧绘制在按钮之上并接管
+       其区域的触摸（ClickWheel 按钮不会浮在控制中心之上）。
+       ⚠ 顺序敏感：本函数仍必须在 click_wheel_create() 之后调用。
+       Toast 在 lv_layer_top()（懒创建），始终位于面板之上，面板展开时
        提示仍然可见。 */
-    lv_obj_t *top = lv_layer_top();
+    lv_obj_t *scr = lv_scr_act();
 
-    /* 下拉通知栏（全屏，最后创建=绘制在状态栏之上，默认隐藏在屏幕上方） */
-    notif_bar = lv_obj_create(top);
+    /* 下拉通知栏（全屏，最后创建=绘制在状态栏与 ClickWheel 之上，
+       默认隐藏在屏幕上方） */
+    notif_bar = lv_obj_create(scr);
     lv_obj_set_size(notif_bar, EXAMPLE_LCD_H_RES, NOTIF_BAR_HEIGHT);
     lv_obj_set_pos(notif_bar, 0, PANEL_CLOSED_Y);
     lv_obj_set_style_bg_color(notif_bar, lv_color_black(), 0);

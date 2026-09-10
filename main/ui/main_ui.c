@@ -147,10 +147,15 @@ void main_ui_create(void)
     now_playing_create(tv);
     settings_page_create(tv);
 
-    /* 虚拟 ClickWheel：创建在 lv_layer_top()（顶层），整个应用只需一个实例。
-       ⚠ 必须放顶层：放在页面容器内时，从按钮起手拖动会被 LVGL 的滚动链
-       找到可横向滚动的 tabview → 判定为翻页并给按钮发 PRESS_LOST，
-       "按住画圈"直接失效（见 core/ui/click_wheel.h）。
+    /* 虚拟 ClickWheel：创建在 lv_scr_act()（屏幕层，tabview 的兄弟），
+       整个应用只需一个实例。
+       ⚠ 放屏幕层（tabview 之外）而不是 tab 页容器内：放在页面容器内时，
+       从按钮起手拖动会被 LVGL 的滚动链（SCROLL_CHAIN）找到可横向滚动的
+       tabview → 判定为翻页并给按钮发 PRESS_LOST，"按住画圈"直接失效
+       （见 core/ui/click_wheel.h）。
+       ⚠ 也不要挂 lv_layer_top()：会浮在下拉控制中心之上，而"把面板也挂
+       顶层"的修法会破坏 LVGL 的覆盖判定 → 下拉面板时被遮挡的页面内容
+       每帧重绘、严重掉帧（见 DONE_PLANS.md 第 38 点）。
        显隐由 main_tabs_sync（当前页面）与各列表构建时登记的目标共同决定；
        功能开关来自 NVS 配置（click_wheel，默认开，设置菜单可切换） */
     click_wheel_create();
