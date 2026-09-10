@@ -30,6 +30,11 @@ namespace TestMP3
             RootDir = Application.StartupPath;
 #endif
             InitializeComponent();
+            try
+            {
+                Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            }
+            catch { Icon = SystemIcons.Application; }
             // Bass.LoadMe();
             Bass.BASS_Init(0, 48000, BASSInit.BASS_DEVICE_NOSPEAKER, IntPtr.Zero);
 
@@ -38,6 +43,8 @@ namespace TestMP3
         private void btnDoScan_Click(object sender, EventArgs e)
         {
             btnDoScan.Enabled = false;
+            print("========= 扫描开始 =========");
+            bool scanOnly = chkScanOnly.Checked;
             Application.DoEvents();
             List<string> mp3File = Directory.EnumerateFiles(RootDir, "*.mp3", SearchOption.AllDirectories).Where(s => !s.Contains("\\.")).OrderBy(s => s).ToList();
 
@@ -66,7 +73,7 @@ namespace TestMP3
                         needWrite = true;
                     }
                 }
-                if (needWrite)
+                if (needWrite || scanOnly)
                 {
                     try
                     {
@@ -78,9 +85,11 @@ namespace TestMP3
                         lblMusicInfo.Text = $"标题：{title}\r\n副标题：{subtitle}\r\n回放增益：{replayGain}";
                         btnDoScan.Text = $"扫描中：{current}/{total}";
                         Application.DoEvents();
-
-                        SaveMetaFile(metaFile, img, title, subtitle, replayGain);
-                        File.SetLastWriteTime(metaFile, File.GetLastWriteTime(item));
+                        if (!scanOnly)
+                        {
+                            SaveMetaFile(metaFile, img, title, subtitle, replayGain);
+                            File.SetLastWriteTime(metaFile, File.GetLastWriteTime(item));
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -95,7 +104,7 @@ namespace TestMP3
 
             lblMusicInfo.Text = "扫描完成";
             btnDoScan.Text = "开始扫描";
-            print("扫描完成");
+            print("========= 扫描完成========= ");
             Application.DoEvents();
 
             btnDoScan.Enabled = true;
@@ -120,8 +129,7 @@ namespace TestMP3
             var tag = Un4seen.Bass.AddOn.Tags.BassTags.BASS_TAG_GetFromFile(filePath);
             if (tag == null)
             {
-                print(filePath);
-                print("此文件不包含Tags");
+                print("[WARN] 无ID3Tag："+filePath);
                 img = null;
                 title = Path.GetFileNameWithoutExtension(filePath);
                 subtitle = "Various Artist";
@@ -132,8 +140,7 @@ namespace TestMP3
             var replaypeak = tag.replaygain_track_peak;
             if(replaygain > -101 && replaygain < -99)
             {
-                print(filePath);
-                print("此文件不包含回放增益");
+                print("[WARN] 无回放增益：" + filePath);
                 replaygain = -6;
             }
             replayGain = replaygain;
@@ -188,8 +195,7 @@ namespace TestMP3
             }
             else
             {
-                print(filePath);
-                print("此文件不包含Picture");
+                print("[WARN] 无封面图：" + filePath);
                 img = null;
             }
         }
@@ -250,8 +256,7 @@ namespace TestMP3
                             }
                             catch (Exception ex)
                             {
-                                print("图片重新编码失败：" + outFile);
-                                print(ex.ToString());
+                                print("[WARN] 图片解码失败：" + outFile);
                             }
                         }
                     }
@@ -307,6 +312,11 @@ namespace TestMP3
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
             e.Cancel = !btnDoScan.Enabled;
+        }
+
+        private void btnClear_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            textBox1.Clear();
         }
     }
 }

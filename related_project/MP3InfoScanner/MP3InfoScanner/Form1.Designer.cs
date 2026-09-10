@@ -28,6 +28,7 @@
         /// </summary>
         private void InitializeComponent()
         {
+            this.components = new System.ComponentModel.Container();
             this.imgPreview = new System.Windows.Forms.PictureBox();
             this.btnDoScan = new System.Windows.Forms.Button();
             this.textBox1 = new System.Windows.Forms.TextBox();
@@ -35,10 +36,16 @@
             this.groupBox2 = new System.Windows.Forms.GroupBox();
             this.groupBox3 = new System.Windows.Forms.GroupBox();
             this.lblMusicInfo = new System.Windows.Forms.Label();
+            this.panel1 = new System.Windows.Forms.Panel();
+            this.chkScanAndSave = new System.Windows.Forms.RadioButton();
+            this.chkScanOnly = new System.Windows.Forms.RadioButton();
+            this.btnClear = new System.Windows.Forms.LinkLabel();
+            this.toolTip1 = new System.Windows.Forms.ToolTip(this.components);
             ((System.ComponentModel.ISupportInitialize)(this.imgPreview)).BeginInit();
             this.groupBox1.SuspendLayout();
             this.groupBox2.SuspendLayout();
             this.groupBox3.SuspendLayout();
+            this.panel1.SuspendLayout();
             this.SuspendLayout();
             // 
             // imgPreview
@@ -55,7 +62,7 @@
             // 
             // btnDoScan
             // 
-            this.btnDoScan.Location = new System.Drawing.Point(13, 485);
+            this.btnDoScan.Location = new System.Drawing.Point(13, 512);
             this.btnDoScan.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.btnDoScan.Name = "btnDoScan";
             this.btnDoScan.Size = new System.Drawing.Size(282, 48);
@@ -72,7 +79,7 @@
             this.textBox1.Multiline = true;
             this.textBox1.Name = "textBox1";
             this.textBox1.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
-            this.textBox1.Size = new System.Drawing.Size(562, 480);
+            this.textBox1.Size = new System.Drawing.Size(562, 507);
             this.textBox1.TabIndex = 2;
             // 
             // groupBox1
@@ -89,12 +96,13 @@
             // 
             // groupBox2
             // 
+            this.groupBox2.Controls.Add(this.btnClear);
             this.groupBox2.Controls.Add(this.textBox1);
             this.groupBox2.Location = new System.Drawing.Point(303, 14);
             this.groupBox2.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.groupBox2.Name = "groupBox2";
             this.groupBox2.Padding = new System.Windows.Forms.Padding(8, 10, 8, 10);
-            this.groupBox2.Size = new System.Drawing.Size(578, 519);
+            this.groupBox2.Size = new System.Drawing.Size(578, 546);
             this.groupBox2.TabIndex = 5;
             this.groupBox2.TabStop = false;
             this.groupBox2.Text = "日志输出";
@@ -121,17 +129,64 @@
             this.lblMusicInfo.TabIndex = 0;
             this.lblMusicInfo.Text = "歌曲信息";
             // 
+            // panel1
+            // 
+            this.panel1.Controls.Add(this.chkScanOnly);
+            this.panel1.Controls.Add(this.chkScanAndSave);
+            this.panel1.Location = new System.Drawing.Point(13, 483);
+            this.panel1.Name = "panel1";
+            this.panel1.Size = new System.Drawing.Size(282, 21);
+            this.panel1.TabIndex = 7;
+            // 
+            // chkScanAndSave
+            // 
+            this.chkScanAndSave.AutoSize = true;
+            this.chkScanAndSave.Checked = true;
+            this.chkScanAndSave.Location = new System.Drawing.Point(3, 0);
+            this.chkScanAndSave.Name = "chkScanAndSave";
+            this.chkScanAndSave.Size = new System.Drawing.Size(97, 24);
+            this.chkScanAndSave.TabIndex = 0;
+            this.chkScanAndSave.TabStop = true;
+            this.chkScanAndSave.Text = "扫描并保存";
+            this.toolTip1.SetToolTip(this.chkScanAndSave, "扫描歌曲标签信息，并保存到.ecov文件。\r\n若文件已经扫描过且未变动，则会跳过扫描。");
+            this.chkScanAndSave.UseVisualStyleBackColor = true;
+            // 
+            // chkScanOnly
+            // 
+            this.chkScanOnly.AutoSize = true;
+            this.chkScanOnly.Location = new System.Drawing.Point(106, 0);
+            this.chkScanOnly.Name = "chkScanOnly";
+            this.chkScanOnly.Size = new System.Drawing.Size(97, 24);
+            this.chkScanOnly.TabIndex = 1;
+            this.chkScanOnly.Text = "仅测试标签";
+            this.toolTip1.SetToolTip(this.chkScanOnly, "扫描所有歌曲，仅检查标签有效性并输出日志。\r\n适合用于对曲库进行完整检查。");
+            this.chkScanOnly.UseVisualStyleBackColor = true;
+            // 
+            // btnClear
+            // 
+            this.btnClear.AutoSize = true;
+            this.btnClear.Location = new System.Drawing.Point(69, -1);
+            this.btnClear.Name = "btnClear";
+            this.btnClear.Size = new System.Drawing.Size(37, 20);
+            this.btnClear.TabIndex = 3;
+            this.btnClear.TabStop = true;
+            this.btnClear.Text = "清空";
+            this.btnClear.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.btnClear_LinkClicked);
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 20F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(891, 547);
+            this.ClientSize = new System.Drawing.Size(891, 574);
+            this.Controls.Add(this.panel1);
             this.Controls.Add(this.groupBox3);
             this.Controls.Add(this.groupBox2);
             this.Controls.Add(this.groupBox1);
             this.Controls.Add(this.btnDoScan);
             this.Font = new System.Drawing.Font("微软雅黑", 10.5F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
+            this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
             this.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
+            this.MaximizeBox = false;
             this.Name = "Form1";
             this.Text = "FakePodNano × NightPlayer - 封面扫描工具";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Form1_FormClosing);
@@ -141,6 +196,8 @@
             this.groupBox2.ResumeLayout(false);
             this.groupBox2.PerformLayout();
             this.groupBox3.ResumeLayout(false);
+            this.panel1.ResumeLayout(false);
+            this.panel1.PerformLayout();
             this.ResumeLayout(false);
 
         }
@@ -154,6 +211,11 @@
         private System.Windows.Forms.GroupBox groupBox2;
         private System.Windows.Forms.GroupBox groupBox3;
         private System.Windows.Forms.Label lblMusicInfo;
+        private System.Windows.Forms.Panel panel1;
+        private System.Windows.Forms.RadioButton chkScanOnly;
+        private System.Windows.Forms.RadioButton chkScanAndSave;
+        private System.Windows.Forms.LinkLabel btnClear;
+        private System.Windows.Forms.ToolTip toolTip1;
     }
 }
 
