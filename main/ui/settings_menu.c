@@ -80,7 +80,25 @@ static lv_point_t s_bg_press_point = { 0, 0 };
 static lv_obj_t *s_sleep_def_on_status = NULL;   /* 睡眠定时器（开机默认开启） */
 static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
 static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
-static lv_obj_t *s_click_wheel_status  = NULL;   /* 虚拟 ClickWheel（开/关） */
+/* ⚠ 虚拟 ClickWheel 的根行**不再显示开/关状态**（2026-09-11 用户要求）：
+   行标题直接写「虚拟 ClickWheel 选项」，开启状态在子页第一行「开启」里看 */
+
+/* 虚拟 ClickWheel 子页三行的右侧状态文字（开关 / 方向 / 速度） */
+static lv_obj_t *s_cw_enable_status    = NULL;
+static lv_obj_t *s_cw_dir_status       = NULL;
+static lv_obj_t *s_cw_speed_status     = NULL;
+
+/* 速度档位显示文字（下标 = CONFIG_STORE_CW_SPEED_*）：
+   普通 = 圈数不计算；快速 = ×0.75；极速 = ×0.50（0.25 一档均匀变化） */
+static const char *const CW_SPEED_TXT[] = { "普通", "快速", "极速" };
+
+/* 速度档位取值必须两边一致（core/ui 与 config_store 各自定义，防漂移）： */
+_Static_assert(CONFIG_STORE_CW_SPEED_COUNT == CLICK_WHEEL_SPEED_COUNT,
+               "ClickWheel speed level count mismatch");
+_Static_assert(CONFIG_STORE_CW_SPEED_NORMAL == CLICK_WHEEL_SPEED_NORMAL &&
+               CONFIG_STORE_CW_SPEED_FAST == CLICK_WHEEL_SPEED_FAST &&
+               CONFIG_STORE_CW_SPEED_TURBO == CLICK_WHEEL_SPEED_TURBO,
+               "ClickWheel speed level value mismatch");
 
 /* 息屏档位子页的行对象（选中项高亮刷新用） */
 static lv_obj_t *s_screen_off_rows[SCREEN_OFF_STEP_COUNT] = { NULL };
@@ -257,9 +275,18 @@ static void menu_refresh_root(void)
         screen_off_format(config_store_get_screen_off_s(), buf, sizeof(buf));
         lv_label_set_text(s_screen_off_status, buf);
     }
-    if (s_click_wheel_status != NULL) {
-        lv_label_set_text(s_click_wheel_status,
+    /* 虚拟 ClickWheel 子页三行（开关 / 方向 / 速度） */
+    if (s_cw_enable_status != NULL) {
+        lv_label_set_text(s_cw_enable_status,
                           config_store_get_click_wheel() ? "开" : "关");
+    }
+    if (s_cw_dir_status != NULL) {
+        lv_label_set_text(s_cw_dir_status,
+                          config_store_get_click_wheel_reverse() ? "反转" : "正常");
+    }
+    if (s_cw_speed_status != NULL) {
+        lv_label_set_text(s_cw_speed_status,
+                          CW_SPEED_TXT[config_store_get_click_wheel_speed()]);
     }
 }
 
@@ -304,10 +331,12 @@ static void awake_row_cb(lv_event_t *e)
     menu_refresh_root();
 }
 
-/* 虚拟 ClickWheel 开关：点击切换并持久化（NVS），**立即生效**——
-   config_store 写完后直接驱动 click_wheel 隐藏/显示速滑按钮，
-   不需要像开发者选项那样重启（见 core/ui/click_wheel.h） */
-static void click_wheel_row_cb(lv_event_t *e)
+/* 虚拟 ClickWheel 子页三项：点击切换并持久化（NVS），**立即生效**——
+   config_store 写完后直接驱动 click_wheel 的开关/方向/速度，不需要像
+   开发者选项那样重启（见 core/ui/click_wheel.h） */
+
+/* 1. 开启/关闭 */
+static void cw_enable_row_cb(lv_event_t *e)
 {
     (void)e;
     bool on = !config_store_get_click_wheel();
@@ -315,6 +344,32 @@ static void click_wheel_row_cb(lv_event_t *e)
     click_wheel_set_enabled(on);
     menu_refresh_root();
     ESP_LOGI(TAG, "virtual click wheel -> %d", (int)on);
+}
+
+/* 2. 滑动方向：正常（顺时针向下滚）/ 反转（顺时针向上滚） */
+static void cw_dir_row_cb(lv_event_t *e)
+{
+    (void)e;
+    bool reverse = !config_store_get_click_wheel_reverse();
+    config_store_set_click_wheel_reverse(reverse);
+    click_wheel_set_reverse(reverse);
+    menu_refresh_root();
+    ESP_LOGI(TAG, "virtual click wheel direction -> %s",
+             reverse ? "reverse" : "normal");
+}
+
+/* 3. 速度：点击**循环**切换三档（普通 ×1.00 / 快速 ×0.75 / 极速 ×0.50），
+      0.25 一档均匀变化；系数越小越灵敏 */
+static void cw_speed_row_cb(lv_event_t *e)
+{
+    (void)e;
+    uint8_t next = (uint8_t)((config_store_get_click_wheel_speed() + 1u) %
+                             CONFIG_STORE_CW_SPEED_COUNT);
+    config_store_set_click_wheel_speed(next);
+    click_wheel_set_speed(next);
+    menu_refresh_root();
+    ESP_LOGI(TAG, "virtual click wheel speed -> %s (level %u)",
+             CW_SPEED_TXT[next], (unsigned)next);
 }
 
 /* 息屏档位行：点击设置并返回根页面。
@@ -650,7 +705,7 @@ static void dev_options_page_build(lv_obj_t *about_page)
 /* ------------------------------------------------------------------ */
 
 /* 根页面：6 个功能行（睡眠定时器 / 屏幕自动息屏 / 虚拟 ClickWheel /
-   按键帮助 / 关于 / 重新扫描）。
+   按键帮助 / 关于 / 重新扫描），除 ClickWheel 外均为子页入口。
    ⚠ 行数增加后根页面内容高度超过可视区（实测 6 行需 426px、可视 357px），
    页面会出现滚动条——这是预期行为，不再压缩行距。 */
 static void root_page_build(void)
@@ -715,12 +770,41 @@ static void root_page_build(void)
                                      "屏幕自动息屏", &s_screen_off_status);
     lv_menu_set_load_page_event(s_menu, row3, screen_off_page);
 
-    /* 3. 虚拟 ClickWheel：开关（长列表右下角速滑按钮，默认开；点击立即生效）。
+    /* 3. 虚拟 ClickWheel：子菜单（长列表右下角速滑按钮）。
+        原先是一行"点击即开关"，现改为**子页入口**（本页三项）：
+          开启/关闭、滑动方向（正常/反转）、速度（普通/快速/极速，点击循环）；
+        三项均点击立即生效（写 NVS + 直接驱动 click_wheel，无需重启）。
         图标与按钮本身一致（LV_SYMBOL_REFRESH） */
+    lv_obj_t *cw_page = lv_menu_page_create(s_menu, (char *)"虚拟 ClickWheel");
+    page_style_apply(cw_page);
+
+    lv_obj_t *cw_enable = menu_row_create(cw_page, NULL,
+                                          "开启", &s_cw_enable_status);
+    lv_obj_add_flag(cw_enable, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(cw_enable, cw_enable_row_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cw_dir = menu_row_create(cw_page, NULL,
+                                       "滑动方向", &s_cw_dir_status);
+    lv_obj_add_flag(cw_dir, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(cw_dir, cw_dir_row_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cw_speed = menu_row_create(cw_page, NULL,
+                                         "速度", &s_cw_speed_status);
+    lv_obj_add_flag(cw_speed, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(cw_speed, cw_speed_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 说明：**只保留一条"这个功能是什么"**（沿用"一段一卡"写法，滚动性能
+       见睡眠定时器页注释）。⚠ 方向/速度的细节**刻意不写**（2026-09-11 用户
+       要求）：那属于手感差异，交给用户自己试；文字里也不提转向，避免暗示
+       只有一种转法。 */
+    menu_note_row_create(cw_page,
+        "开启后，目录/歌曲列表超过 10 页（72 条）时右下角出现黄色圆钮："
+        "按住并在屏幕上画圈即可快速翻页。");
+    /* 入口行：**不显示右侧状态**（开关状态在子页第一行「开启」里看），
+        标题直接点明是"选项"页——2026-09-11 用户要求 */
     lv_obj_t *cw_row = menu_row_create(s_root_page, LV_SYMBOL_REFRESH,
-                                       "虚拟 ClickWheel", &s_click_wheel_status);
-    lv_obj_add_flag(cw_row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(cw_row, click_wheel_row_cb, LV_EVENT_CLICKED, NULL);
+                                       "虚拟 ClickWheel 选项", NULL);
+    lv_menu_set_load_page_event(s_menu, cw_row, cw_page);
 
     /* 4. 按键帮助：子页静态说明。
        按键命名用社区通用说法：上键 = A 键（电源键），下键 = B 键；

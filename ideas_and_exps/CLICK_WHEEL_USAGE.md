@@ -8,9 +8,24 @@
 
 - 目录页 / 歌曲页右下角悬浮一个**黄色圆形按钮**；
 - **按住**后在屏幕上画圈 → 快速翻页：
-  - 顺时针（角度增大）**向下**滚，逆时针**向上**滚；
-  - 转满一圈（360°）= 滚动**内容总高度的 20%**，即**5 圈滑到底**
-    （2026-09-10 由 10%＝10 圈提高灵敏度，用户要求；圈数 = 1 / `CW_TURN_RATIO`）；
+  - 顺时针（角度增大）**向下**滚，逆时针**向上**滚
+    （可配置为**反转**：顺时针向上滚，见下方「滑动方向」）；
+  - **滚完整个列表所需的圈数由条目数决定**（2026-09 用户数学建模，取代原先
+    固定的"5 圈到底 / `CW_TURN_RATIO`"）：
+
+    ```
+    y = log_1.618(x) - 7        // x = 列表条目数，y = 滚到底所需圈数
+    y 钳制在 [1.0, 20.0]
+    ```
+
+    标定值：73 条 → 1.92 圈、100 条 → 2.57 圈、200 条 → 4.01 圈、
+    600 条 → 6.29 圈、1000 条 → 7.36 圈、5000 条 → 10.70 圈、
+    10000 条 → 12.14 圈。
+    钳制在现有列表规模下不生效（y=1 需 x ≤ 47 条，低于 `CW_MIN_ITEMS` 显示
+    阈值；y=20 需 x ≈ 44 万条），保留只为公式完整性。
+    实现见 `click_wheel.c` 的 `cw_turns_for_count()` 与文件头常量注释；
+    **速度档位**系数直接乘在上述圈数上（0.25 一档均匀变化）：
+    普通 ×1.00（不计算）/ 快速 ×0.75 / 极速 ×0.50（见 `CW_SPEED_FACTOR`）；
   - **行对齐步进**（2026-09，用户要求）：内部连续累加像素量，但只把**行高的
     整数倍**交给列表 → 行槽屏幕位置不动，转动呈现"内容一格一格换"的阶梯式翻行；
     步进相对**列表当前位置**（不做按第一项对齐的吸附），滚到底按**最后一项**
@@ -19,8 +34,12 @@
     从正上方起均分），给手指一个旋转参照；松手立即消失；
 - **直接点击**（按住期间没转动）→ 弹出使用说明 Toast；
 - 按钮**只在列表超过 10 页（72 条）时显示**（`CW_MIN_ITEMS = 73`）；
-- 功能可在**设置菜单 →「虚拟 ClickWheel」**行开关（NVS 配置 `click_wheel`，
-  **默认开**），点击立即生效（无需重启）。
+- 全部选项集中在**设置菜单 →「虚拟 ClickWheel」子页**（NVS 持久化，
+  三项均**点击立即生效**、无需重启）：
+  - **开启 / 关闭**（配置 `click_wheel`，**默认开**）；
+  - **滑动方向：正常 / 反转**（配置 `click_wheel_rev`，默认正常）；
+  - **速度：普通 / 快速 / 极速**（配置 `click_wheel_spd`，默认普通；点击**循环**
+    切换，系数 0.25 一档均匀变化：×1.00 / ×0.75 / ×0.50）。
 
 ## 2. 关键设计
 
@@ -68,8 +87,8 @@ angle = atan2f(y - H/2, x - W/2) * 180 / M_PI;   // 屏幕坐标系：x 右 y �
 - 屏幕坐标系下角度顺时针增大 → 顺时针 = 正角度；
 - 圆心固定为屏幕中心（需求原意，不要改成按钮中心——曾试过按钮中心，
   被用户否掉）；手指绕右下角按钮转圈时，相对屏幕中心的角度变化被半径
-  比例缩小（绕按钮一圈 ≈ 屏幕中心 36°），转一圈的滚动量由 `CW_TURN_RATIO`
-  统一标定；
+  比例缩小（绕按钮一圈 ≈ 屏幕中心 36°），转一圈的滚动量由圈数模型
+  （条目数 → 圈数，见 2.3）统一标定；
 - 每帧角度差需归一化到 (-180, 180]：
 
 ```c
@@ -82,10 +101,17 @@ while (delta < -180.0f) delta += 360.0f;
 ### 2.3 滚动量换算、方向与**行对齐步进**
 
 ```
-内容总高度 content_h = 视口高度 + (scroll_top + scroll_bottom)   // 反推，不依赖列表内部
-每度滚动量 px_per_deg = content_h * 0.2 / 360        // 0.2 = CW_TURN_RATIO → 5 圈到底
-连续滚动量 px = -角度差 × px_per_deg                  // 内部量，仅累加，不直接交给列表
+可滚动行程 range = scroll_top + scroll_bottom      // = 内容总高度 - 视口高度；
+                                                   //   与当前滚动位置无关（常量）
+圈数 turns = clamp(log_1.618(条目数) - 7, 1, 20)    // 圈数模型，见 1 节
+每度滚动量 px_per_deg = range / (turns * 360)       // 转满 turns 圈正好从顶滚到底
+连续滚动量 px = -角度差 × px_per_deg                // 内部量，仅累加，不直接交给列表
 ```
+
+⚠ 距离基准取的是**可滚动行程**（内容总高度 − 视口高度），而不是内容总高度：
+"滚完整个列表"的行程就是这一段（`scroll_top + scroll_bottom` 之和恒等于它，
+与当前停在哪里无关），所以转满 y 圈刚好停到最后一项贴底。
+（`cw_scroll_by_deg` 另需 `range <= 0` 时直接返回：内容不足一屏无需滚动。）
 
 ⚠ 取负号的推导（别搞反）：屏幕坐标系里**顺时针 = 角度增大**；而
 `lv_obj_scroll_by(dy<0)` 表示**内容上移 = 视口向下**。需求是"顺时针向下滚"，
@@ -116,14 +142,17 @@ lv_obj_scroll_by_bounded(list, 0, rows * item_h, LV_ANIM_OFF);   // 4. 只输出
   滚到最底下时多余的滚动量被列表丢掉，列表正好停在"**最后一项贴底**"
   （顶部同理停在 0，即第一项贴顶）。累加器余量天然有界（上限一行），
   反向转动最多先"还"掉一行就会立刻响应，不会攒账；
-- 代价：不再平滑跟手，快速转动时一帧可跨多行（上限 `CW_MAX_STEP_PX / item_h`
-  ≈ 800/56 ≈ 14 行）；
+- 代价：不再平滑跟手，快速转动时一帧可跨多行（上限 = 1/4 圈，即"每圈行数 / 4"）；
 - **附带收益（用户实测发现，见 2.3.2）**：位移精度从"帧率相关"变成"帧率无关"，
   且原本快速滚动时的卡顿感在体感上消失——按格滚动的节奏本来就不均匀，
   掉帧只表现为"这一跳晚一点/这一下多跳几格"，不再被读成画面一顿；
-- 单帧钳制 `±CW_MAX_STEP_PX (800px)`：触摸坐标偶发跳变（如 180°）时不会乱飞。
-  ⚠ 该上限**跟随 `CW_TURN_RATIO` 同步翻倍**（原 400px）：上限太小会在快速
-  画圈时削掉单帧滚动量，表现成"要转十几圈才到底"，与灵敏度设置自相矛盾；
+- 单帧钳制 = **1/4 圈对应的滚动量**（`CW_MAX_STEP_DEG = 90°`，随行程与圈数一起
+  标定）：触摸坐标偶发跳变（如 180°）时不会乱飞。正常转动每帧约 10~40°，
+  远低于 90°，不会削掉有效滚动量。
+  ⚠ 这里刻意**不用固定像素值**（原为 `CW_MAX_STEP_PX = 800`）：同一个 800px
+  对 73 条（每圈约 34 行）是半个圈，对 10000 条却只是几十分之一圈——长列表
+  快速画圈时单帧滚动量被削顶，表现成"要转十几圈才到底"，与圈数模型自相矛盾
+  （历史注释里已警告过这一点）；改成按角度钳制后，任何列表规模的保护强度一致；
 - 用 `lv_obj_scroll_by_bounded()` 而非 `lv_obj_scroll_by()`：自带边界钳制，
   快速转动到顶/底不会出现过冲回弹；
 - `LV_ANIM_OFF`：转动过程要求跟手，动画会累积延迟。
@@ -147,7 +176,7 @@ lv_obj_scroll_by_bounded(list, 0, rows * item_h, LV_ANIM_OFF);   // 4. 只输出
 因为它把这个组件从"手感取舍"变成了"纯赚"：
 
 - **位移精度变成帧率无关**：平滑滚动靠每帧累加位移，丢帧 = 实际少滚一段，
-  误差会累积（转 5 圈到底的承诺会被掉帧破坏）；按格滚动里，"格数"由角度差算出、
+  误差会累积（"y 圈到底"的承诺会被掉帧破坏）；按格滚动里，"格数"由角度差算出、
   与帧数无关，掉帧只让某一格晚来一点点，**总位移不会少**；
 - **卡顿感被感知层面吃掉**：格进式把"可见位移"与"帧时序"解耦了。帧变慢时，
   平滑滚动表现为一次明显突进（眼睛读作卡顿），而按格滚动只表现为"这一下多跳了
@@ -236,6 +265,8 @@ void      click_wheel_set_list(uint8_t tab, lv_obj_t *list, uint32_t item_count)
 void      click_wheel_set_tab(uint8_t tab);
 void      click_wheel_set_overlay(bool visible);
 void      click_wheel_set_enabled(bool on);                      /* NVS 开关，默认开 */
+void      click_wheel_set_reverse(bool reverse);                 /* NVS 方向，默认正常 */
+void      click_wheel_set_speed(uint8_t speed);                  /* NVS 速度档位，默认普通 */
 ```
 
 - `create`：在 `main_ui_create()` 中调用（四个页面创建之后、首次
@@ -245,21 +276,45 @@ void      click_wheel_set_enabled(bool on);                      /* NVS 开关�
 - `set_tab`：`main_ui.c` 的 `main_tabs_sync()`；
 - `set_overlay`：`settings_menu.c` 的 `settings_menu_show/hide()`；
 - `set_enabled`：`main_ui_create()` 创建后按 `config_store_get_click_wheel()`
-  初始化；`settings_menu.c` 的「虚拟 ClickWheel」行切换后立即调用（关闭时
+  初始化；设置菜单 →「虚拟 ClickWheel」→「开启」切换后立即调用（关闭时
   隐藏按钮并终止进行中的画圈、收起指示圆点）；
+- `set_reverse` / `set_speed`：同样由 `main_ui_create()` 按 NVS 初始化，
+  设置菜单子页对应行切换后立即调用（**无需重启**）；`set_speed` 取
+  `CLICK_WHEEL_SPEED_NORMAL/FAST/TURBO`（越界钳到普通）；
 - 全部接口需持 LVGL 锁。
 
-### 3.1 功能开关（NVS）
+### 3.1 配置项（NVS，设置菜单 →「虚拟 ClickWheel 选项」子页）
 
-`config_store` 新增 `click_wheel`（键 `clkwheel`，uint8，**默认 1 = 启用**）。
-显隐判定因此变成四个条件同时满足：
-`启用 && !覆盖层 && 当前页是列表页 && 条目数 ≥ 73`（`cw_sync_visible`）。
+| 配置键 | 内存值 | 取值 | 默认 | 作用 |
+|---|---|---|---|---|
+| `clkwheel` | `click_wheel` | 开/关 | **开** | 是否启用速滑按钮（关闭即隐藏+终止画圈） |
+| `clkwheel_rev` | `click_wheel_reverse` | 正常/反转 | 正常 | 正常 = 顺时针向下滚；反转 = 顺时针向上滚 |
+| `clkwheel_spd` | `click_wheel_speed` | 普通/快速/极速 | 普通 | 圈数系数 **×1.00 / ×0.75 / ×0.50**（0.25 一档均匀），点击循环切换 |
 
-`core/ui/click_wheel.c` **不依赖 config_store**（保持 core/ui 与应用配置解耦）：
-开关值由 UI 层传入，切换由设置菜单行回调驱动。
+- 显隐判定：`启用 && !覆盖层 && 当前页是列表页 && 条目数 ≥ 73`（`cw_sync_visible`）；
+- 速度档位只作用在"几圈到底"上：`cw_effective_turns() = cw_turns_for_count() ×
+  CW_SPEED_FACTOR[speed]`，例：611 首模型 6.33 圈 → 普通 6.33 / 快速 4.75 /
+  极速 3.17 圈（实测单帧跨行数随档位变化）；行对齐步进、单帧 1/4 圈钳制、
+  方向换算都不受影响；
+- 档位取值在两处定义（`config_store.h` 的 `CONFIG_STORE_CW_SPEED_*` 与
+  `click_wheel.h` 的 `CLICK_WHEEL_SPEED_*`，core 层互不依赖），
+  `settings_menu.c` 用 `_Static_assert` 校验两者一致，防数值漂移；
+- 方向在每帧换算处取符号（`dir_sign = reverse ? +1 : -1`），切页/换列表无需重算；
+- `core/ui/click_wheel.c` **不依赖 config_store**（保持 core/ui 与应用配置解耦）：
+  三项配置都由 UI 层传入，切换由设置菜单子页回调驱动。
 
-⚠ 设置菜单根页面因此多了一行（共 6 行），实测根页面内容高度 357px、6 行需
-426px → **根页面出现滚动条**（用户确认可接受，不再压缩行距）。
+⚠ 设置菜单根页面仍是 6 行（ClickWheel 那行由"点击即开关"改为**子页入口**，
+行数不变），实测根页面内容高度 357px、6 行需 426px → **根页面保留滚动条**
+（用户确认可接受，不再压缩行距）。子页内 3 个选项行 + **1 张说明卡**。
+
+⚠ 说明卡只讲"这个功能是什么"（2026-09-11 用户要求）：**不写方向、不写速度
+的细节**——那属于手感差异，交给用户自己试；文字里也刻意不提转向
+（原文末句"（顺时针向下滚）"已删），避免暗示只有一种转法。
+
+⚠ 入口行的写法（2026-09-11 用户要求）：**标题为「虚拟 ClickWheel 选项」、
+右侧不显示状态**——`menu_row_create(..., "虚拟 ClickWheel 选项", NULL)` 传
+`NULL` 表示不建状态 label，开启状态只在子页第一行「开启」里看（根页面那行
+因此比"睡眠定时器/屏幕自动息屏"两行短，视觉上是纯入口）。
 
 ## 4. 接入方式（三处）
 
@@ -268,6 +323,9 @@ void      click_wheel_set_enabled(bool on);                      /* NVS 开关�
 ```c
 /* 四个页面创建完成后 */
 click_wheel_create();
+click_wheel_set_enabled(config_store_get_click_wheel());          /* 开关（NVS） */
+click_wheel_set_reverse(config_store_get_click_wheel_reverse());  /* 方向（NVS） */
+click_wheel_set_speed(config_store_get_click_wheel_speed());      /* 速度档位（NVS） */
 ...
 /* main_tabs_sync() 内，切页时 */
 click_wheel_set_tab(act);
@@ -281,8 +339,13 @@ click_wheel_set_list(0, s_list, count);   // 列表构建后（歌曲页用 tab 
 click_wheel_set_list(0, NULL, 0);         // 重建/销毁列表前解除绑定
 ```
 
-`settings_menu.c`：`settings_menu_show()` → `click_wheel_set_overlay(true)`；
-`settings_menu_hide()` → `click_wheel_set_overlay(false)`。
+`settings_menu.c`：
+
+- `settings_menu_show()` → `click_wheel_set_overlay(true)`；
+  `settings_menu_hide()` → `click_wheel_set_overlay(false)`；
+- 「虚拟 ClickWheel」子页三行回调 → `config_store_set_click_wheel*()` 之后
+  分别调 `click_wheel_set_enabled()` / `click_wheel_set_reverse()` /
+  `click_wheel_set_speed()`（写 NVS + 立即生效，同一行完成）。
 
 ## 5. 调试与验证
 
@@ -297,8 +360,22 @@ I (11227) click_wheel: rotate 32 deg -> -9 row(s) (-504 px, scroll_y=636)
 （dir 页 52、歌曲页 56），`scroll_y` 也恒为行高整数倍（吸附后）。
 
 - 创建日志：`click wheel created on screen layer (56x56 px, margin 32/32, ...)`；
-- 列表登记日志：`tab 0 list set: items=171 (wheel eligible)` /
-  `(wheel hidden)`——可据此确认按钮是否该显示。
+- 列表登记日志：`tab 0 list set: items=171 (3.69 turns to end, wheel eligible)` /
+  `tab 1 list set: items=611 (6.33 turns to end, wheel eligible)` /
+  `(..., wheel hidden)`——既能确认按钮是否该显示，也能直接读出该列表按
+  圈数模型 × 当前速度档位系数算出的"几圈到底"（`cw_effective_turns()`）；
+- 设置项切换日志（子页三行各一条，用于确认"立即生效"）：
+  `click wheel enabled/disabled`、`click wheel direction: normal/reverse`、
+  `click wheel speed: normal|fast|turbo (x1.00|0.75|0.50 -> 6.33|4.75|3.17 turns
+  for 611 items)`（当前页面没有绑定列表时省略圈数，打成
+  `... speed: fast (x0.75, no list bound)`）；`settings_menu` 侧另有一条
+  `virtual click wheel speed -> 快速 (level 1)` 之类的记录；
+- ⚠ 日志里的 `rotate %.0f deg` 是**每累计 30° 打一条**，而 `px` 只是**该条日志
+  对应那一帧**的输出，两者不可直接相除。要核对手感请按整段行程比：
+  611 首、速度=普通时 `range = 611×56 − 392 = 33824px`、6.33 圈 → 14.85px/度；
+  实测取 `scroll_y 4670 → 0`（4670px）累计约 323° → 14.5px/度（差约 2%，
+  来自日志分组量化与到顶 clamp 丢弃的余量），与模型吻合。档位越灵敏该值越大
+  （快速 ≈ 19.8px/度、极速 ≈ 29.7px/度），实测单帧跨行数随档位明显增加。
 
 ## 6. 踩坑记录
 

@@ -16,8 +16,15 @@ extern "C" {
  * 为长列表提供"转圈翻页"的快速滚动交互：
  *   - 主界面右下角悬浮一个黄色圆形按钮（仅当列表条目超过阈值时显示）；
  *   - 按住按钮后在屏幕上画圈：以**屏幕中心**为圆心计算手指角度，
- *     顺时针（角度增大）向下滚、逆时针向上滚，转满一圈滚动
- *     内容总高度的 20%（即 **5 圈滑到底**）；
+ *     顺时针（角度增大）向下滚、逆时针向上滚。**滚完整个列表所需的圈数
+ *     由条目数决定**（2026-09 用户数学建模，对数模型）：
+ *         y = log_1.618(x) - 7，  y 钳制在 [1, 20]
+ *     其中 x = 列表条目总数、y = 滚到底所需圈数（例：73 条 → 1.92 圈、
+ *     600 条 → 6.29 圈、5000 条 → 10.70 圈）。条目越多圈数越多，但按对数
+ *     缓慢增长；等价地，单圈跨过的行数随条目数线性增加。
+ *     实际圈数再乘"速度档位"系数（普通 1.00 / 快速 0.75 / 极速 0.50，
+ *     见 CLICK_WHEEL_SPEED_*）。模型与标定表详见 click_wheel.c 文件头常量
+ *     注释与 CLICK_WHEEL_USAGE.md 2.3；
  *   - **行对齐步进**：内部按连续像素量累加，但每帧只把**行高的整数倍**
  *     交给列表，因此行槽在屏幕上的位置（含当前小数相位）保持不变，转动时是
  *     "内容一格一格换"的阶梯式翻行（见 cw_scroll_by_deg）。步进是**相对
@@ -49,8 +56,9 @@ extern "C" {
  * ⚠ 角度换算：角度采用屏幕坐标系（x 右、y 下），
  *   angle = atan2f(y - cy, x - cx)，顺时针为正；每帧角度差归一化到
  *   (-180, 180] 以避免跨 0°/360° 跳变。连续滚动量 =
- *   角度差 × (内容总高度 × 0.2 / 360) 像素，累加进内部浮点累加器后
+ *   角度差 × (可滚动行程 / (圈数 × 360)) 像素，累加进内部浮点累加器后
  *   **按行高取整**（只输出行高的整数倍，见上"行对齐步进"）。
+ *   单帧滚动量另有"1/4 圈"上限，防触摸坐标跳变。
  *   行高通过 virtual_list_get_item_height() 取得（故本组件只服务于
  *   virtual_list 列表，不依赖其内部结构）。
  *
@@ -61,6 +69,18 @@ extern "C" {
 
 /** 支持 ClickWheel 的页面数（目录页 tab0 / 歌曲页 tab1） */
 #define CLICK_WHEEL_TAB_COUNT  2
+
+/**
+ * 速度档位（滚完整个列表的圈数 = 圈数模型值 × 系数，0.25 一档均匀变化）
+ *
+ * ⚠ 数值必须与 `core/storage/config_store.h` 的 `CONFIG_STORE_CW_SPEED_*`
+ *   一致（`ui/settings_menu.c` 里有 `_Static_assert` 兜底）：core/ui 不依赖
+ *   config_store，两边各自定义同一组数值。
+ */
+#define CLICK_WHEEL_SPEED_NORMAL  0u  /* 普通：×1.00（不计算） */
+#define CLICK_WHEEL_SPEED_FAST    1u  /* 快速：×0.75 */
+#define CLICK_WHEEL_SPEED_TURBO   2u  /* 极速：×0.50 */
+#define CLICK_WHEEL_SPEED_COUNT   3u
 
 /**
  * @brief 创建 ClickWheel 悬浮按钮（整个应用只需创建一次）
@@ -80,7 +100,8 @@ lv_obj_t *click_wheel_create(void);
  *
  * @param tab         页面下标（0=目录页，1=歌曲页；越界忽略）
  * @param list        虚拟列表对象（virtual_list_create 返回值）
- * @param item_count  该列表条目总数（决定是否显示，≤ 阈值时隐藏）
+ * @param item_count  该列表条目总数（决定是否显示：≤ 阈值时隐藏；同时也作为
+ *                    圈数模型的输入 x，决定"多少圈滚完整个列表"）
  */
 void click_wheel_set_list(uint8_t tab, lv_obj_t *list, uint32_t item_count);
 
@@ -118,6 +139,36 @@ void click_wheel_set_overlay(bool visible);
  * @param on true = 启用；false = 禁用
  */
 void click_wheel_set_enabled(bool on);
+
+/**
+ * @brief 设置滑动方向（true = 反转）
+ *
+ * 正常（默认）：顺时针（角度增大）**向下**滚、逆时针向上滚；
+ * 反转：顺时针**向上**滚、逆时针向下滚（整个换算取反，其余逻辑不变）。
+ *
+ * 调用方：`main_ui_create()` 创建后按 `config_store_get_click_wheel_reverse()`
+ * 初始化；设置菜单 →「虚拟 ClickWheel」→「滑动方向」切换后立即调用（无需重启）。
+ *
+ * @param reverse true = 反转；false = 正常
+ */
+void click_wheel_set_reverse(bool reverse);
+
+/**
+ * @brief 设置速度档位（`CLICK_WHEEL_SPEED_NORMAL` / `_FAST` / `_TURBO`）
+ *
+ * 档位系数直接乘在圈数模型的输出上（`cw_effective_turns`）：
+ * 普通 ×1.00（不计算）、快速 ×0.75、极速 ×0.50，**0.25 一档均匀变化**——
+ * 系数越小，"滚完整个列表"所需圈数越少、手感越灵敏。例：611 首模型 6.33 圈
+ * → 普通 6.33 / 快速 4.75 / 极速 3.17 圈。换算链路、行对齐步进、方向都不变。
+ *
+ * 越界值钳到"普通"（脏配置防护）。
+ * 调用方：`main_ui_create()` 创建后按 `config_store_get_click_wheel_speed()`
+ * 初始化；设置菜单 →「虚拟 ClickWheel 选项」→「速度」点击循环切换后立即调用
+ * （无需重启）。
+ *
+ * @param speed 档位（越界 = 普通）
+ */
+void click_wheel_set_speed(uint8_t speed);
 
 #ifdef __cplusplus
 }

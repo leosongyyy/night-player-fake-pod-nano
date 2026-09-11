@@ -35,23 +35,55 @@ static const char *TAG = "click_wheel";
    与 virtual_list 的行图标同一处理） */
 #define CW_ICON_FONT      (&lv_font_montserrat_20)
 
-/* 一圈（360°）滚动内容总高度的比例：20% → **5 圈滑到底**
-   （原为 10%＝10 圈到底，2026-09-10 按用户要求提高灵敏度；灵敏度只由
-   这一个常量决定，改它就是改"几圈到底"：圈数 = 1 / CW_TURN_RATIO） */
-#define CW_TURN_RATIO     0.2f
-/* 每帧最大滚动量（px）：防止触摸异常跳变（如坐标瞬时漂移 180°）时列表乱飞。
-   正常转动每帧约 10~40°，460x460 屏 600 首列表下约 140~560px
-   ⚠ 该上限必须随 CW_TURN_RATIO 同步放大（否则快速画圈时单帧滚动量被削顶，
-   表现成"要转十几圈才到底"，与灵敏度设置矛盾）；180° 的坐标跳变仍会产生
-   数千 px，照旧被钳制，跳变保护不受影响 */
-#define CW_MAX_STEP_PX    800
+/* 圈数模型（2026-09 用户数学建模）：滚完**整个列表**所需的圈数 y 由列表
+   条目数 x 决定——对数增长，短列表少转几圈、长列表圈数缓慢增加：
+
+       y = log_1.618(x) - 7        // log_1.618(x) = ln(x) / ln(1.618)
+
+   y 钳制在 [CW_TURNS_MIN, CW_TURNS_MAX] = [1, 20]。
+   设计意图：条目越多，单圈必须跨越多行才可能在有限圈数内到底；而圈数按
+   对数增长，避免"600 首转一圈飞过 120 行、完全看不清"。
+   标定值（x → y）：
+        73 条 → 1.92 圈     200 条 → 4.01 圈     600 条 → 6.29 圈
+      1000 条 → 7.36 圈    5000 条 → 10.70 圈  10000 条 → 12.14 圈
+   ⚠ 钳制在现有列表规模（几十~几千条）下不生效：y = 1 需 x ≤ 47 条（低于
+   CW_MIN_ITEMS 显示阈值），y = 20 需 x ≈ 44 万条；保留钳制只为公式完整性。 */
+#define CW_TURNS_LOG_BASE   1.618f  /* 对数底（黄金比例） */
+#define CW_TURNS_LOG_OFFSET 7.0f    /* 对数项的偏移（-7） */
+#define CW_TURNS_MIN        1.0f    /* 圈数下限 */
+#define CW_TURNS_MAX        20.0f   /* 圈数上限 */
+
+/* 速度档位系数表（下标 = CLICK_WHEEL_SPEED_*）：实际圈数 = 模型圈数 × 系数。
+   1.00 / 0.75 / 0.50 —— **0.25 一档均匀变化**（2026-09-11 用户要求：快速由
+   早先的"÷1.5"改为 ×0.75，与极速 ×0.5 构成等差档位）。系数越小，圈数越少、
+   手感越灵敏。⚠ 只作用于"几圈到底"；行对齐步进、单帧钳制（1/4 圈）、方向
+   都不受影响 */
+static const float CW_SPEED_FACTOR[CLICK_WHEEL_SPEED_COUNT] = {
+    1.00f,   /* 普通：不计算 */
+    0.75f,   /* 快速 */
+    0.50f,   /* 极速 */
+};
+
+/* 档位名（串口日志用；下标同 CLICK_WHEEL_SPEED_*） */
+static const char *const CW_SPEED_NAME[CLICK_WHEEL_SPEED_COUNT] = {
+    "normal", "fast", "turbo",
+};
+
+/* 单帧滚动量上限：取**当前圈数标定出的角度上限**，即单帧最多计入
+   CW_MAX_STEP_DEG（90° = 1/4 圈）对应的滚动量。
+   ⚠ 为什么不用固定像素上限：同一个固定值（原 800px）对 73 条（每圈约 34 行）
+   是半个圈，对 10000 条（每圈约 830 行）却只是几十分之一圈——快速画圈时
+   单帧滚动量被削顶，表现成"要转十几圈才到底"，与圈数模型自相矛盾。
+   正常转动每帧约 10~40°，远低于 90°；坐标瞬时跳变（如 180°）仍会被钳到
+   1/4 圈，跳变保护不丢（详见 ideas_and_exps/CLICK_WHEEL_USAGE.md 2.3）。 */
+#define CW_MAX_STEP_DEG     90.0f
 
 /* 行对齐步进（核心手感）：本组件内部用浮点累加器累加"角度换算出的连续
    像素量"，但**只把 item_height 的整数倍**交给列表（见 cw_scroll_by_deg）。
    于是列表位置恒为行高的整数倍 → virtual_list 的行槽永远停在整数行上，
    转动时看到的是"行槽位置不动、里面的内容一格一格换"（阶梯式翻行），
-   而不是平滑滑动半个行高。长列表快速画圈时一帧可跨多行（上限
-   CW_MAX_STEP_PX / item_height 行）。 */
+   而不是平滑滑动半个行高。长列表快速画圈时一帧可跨多行（上限 = 1/4 圈对应的
+   行数，即"每圈行数 / 4"）。 */
 
 /* 画圈指示：屏幕上一圈 12 个灰色小圆点（跟随旋转圆心，即屏幕中心） */
 #define CW_RING_DOTS      12     /* 圆点数量 */
@@ -82,11 +114,19 @@ static bool      s_overlay    = false; /* 全屏覆盖层（设置菜单）是�
    切换时调用 click_wheel_set_enabled() 立即生效（本模块不依赖 config_store，
    保持 core/ui 与应用配置解耦） */
 static bool      s_enabled    = true;
+/* 滑动方向（NVS 配置 click_wheel_rev，默认正常）：true = 反转（顺时针向上滚）。
+   同样由 UI 层通过 click_wheel_set_reverse() 驱动，本模块不依赖 config_store */
+static bool      s_reverse    = false;
+/* 速度档位（NVS 配置 clkwheel_spd，默认普通）：index 到 CW_SPEED_FACTOR。
+   由 click_wheel_set_speed() 驱动，本模块不依赖 config_store */
+static uint8_t   s_speed      = CLICK_WHEEL_SPEED_NORMAL;
 
 /* 当前生效的滚动目标（由 s_tab 决定，见 cw_target） */
 static lv_obj_t *s_cur_list   = NULL;  /* 正在被滚动的列表 */
 static uint32_t  s_cur_count  = 0;     /* 该列表条目总数 */
 static lv_coord_t s_cur_item_h = 0;    /* 该列表的行高（整行步进的步长） */
+static float     s_cur_turns  = CW_TURNS_MIN; /* 该列表"滚完需几圈"（条目数经
+                                                 圈数模型算出，见 cw_turns_for_count） */
 
 /* 行对齐步进状态：只保存"不足一行的滚动量余量"（浮点像素）。
    ⚠ 步进是**相对列表当前位置**的（每帧按行高整数倍 by 出去），刻意不做
@@ -166,7 +206,8 @@ static void cw_ring_dots_set_visible(bool visible)
 
 /* 计算手指相对**屏幕中心**的角度（度，屏幕坐标系：x 右 y 下，顺时针为正）。
    圆心固定取屏幕中点（需求原意）：手指绕按钮小圈转时，相对屏幕中心的角度
-   变化量被半径比例缩小，转一圈的滚动量由 CW_TURN_RATIO 统一标定。 */
+   变化量被半径比例缩小，转一圈的滚动量由圈数模型（条目数 → 几圈到底）统一
+   标定，见文件头常量注释。 */
 static float cw_angle_deg(uint16_t x, uint16_t y)
 {
     float dx = (float)x - (float)EXAMPLE_LCD_H_RES / 2.0f;
@@ -199,17 +240,45 @@ static void cw_sync_visible(void)
     }
 }
 
-/* 取当前页面生效的滚动目标（含行高：按整行步进要知道步长） */
+/* 圈数模型：由条目数 x 算"滚完整个列表需要几圈" y = log_1.618(x) - 7，
+   钳制到 [CW_TURNS_MIN, CW_TURNS_MAX]（2026-09 用户建模，标定值见文件头
+   常量注释）。只在**锁定滚动目标时**算一次（按下/换列表时），此处两次
+   logf 的开销可以忽略；转圈过程中条目数不会变。 */
+static float cw_turns_for_count(uint32_t count)
+{
+    if (count < 2) {
+        return CW_TURNS_MIN;   /* log 定义域保护（实际列表要么为空、要么 ≥ 1 条） */
+    }
+    float y = logf((float)count) / logf(CW_TURNS_LOG_BASE) - CW_TURNS_LOG_OFFSET;
+    if (y < CW_TURNS_MIN) {
+        y = CW_TURNS_MIN;
+    } else if (y > CW_TURNS_MAX) {
+        y = CW_TURNS_MAX;
+    }
+    return y;
+}
+
+/* 有效圈数 = 圈数模型输出 × 速度档位系数（普通 1.00 / 快速 0.75 / 极速 0.50）。
+   目标锁定（cw_target）与列表登记日志都用它，保证串口读数与当前档位一致 */
+static float cw_effective_turns(uint32_t count)
+{
+    return cw_turns_for_count(count) * CW_SPEED_FACTOR[s_speed];
+}
+
+/* 取当前页面生效的滚动目标（含行高：按整行步进要知道步长；含圈数：滚动量
+   由条目数按圈数模型标定，再乘当前速度档位系数） */
 static void cw_target(void)
 {
     if (s_tab < CLICK_WHEEL_TAB_COUNT && s_lists[s_tab] != NULL) {
         s_cur_list   = s_lists[s_tab];
         s_cur_count  = s_counts[s_tab];
         s_cur_item_h = virtual_list_get_item_height(s_cur_list);
+        s_cur_turns  = cw_effective_turns(s_cur_count);
     } else {
         s_cur_list   = NULL;
         s_cur_count  = 0;
         s_cur_item_h = 0;
+        s_cur_turns  = CW_TURNS_MIN;
     }
 }
 
@@ -234,26 +303,32 @@ static void cw_scroll_by_deg(float delta_deg)
         return;
     }
 
-    /* 内容总高度 = 视口高度 + 可滚动范围（从滚动范围反推，避免依赖
-       虚拟列表内部结构） */
-    lv_coord_t view_h    = lv_obj_get_height(s_cur_list);
-    lv_coord_t range     = lv_obj_get_scroll_bottom(s_cur_list) +
-                           lv_obj_get_scroll_top(s_cur_list);
-    lv_coord_t content_h = view_h + range;
-    if (content_h <= view_h) {
+    /* 可滚动行程 = 内容总高度 - 视口高度 = scroll_top + scroll_bottom
+       （两者之和与当前滚动位置无关，是常量）：这正是"滚完整个列表"要走过
+       的距离，圈数模型 y 标定的就是这段行程。从滚动范围反推，避免依赖
+       虚拟列表内部结构 */
+    lv_coord_t range = lv_obj_get_scroll_bottom(s_cur_list) +
+                       lv_obj_get_scroll_top(s_cur_list);
+    if (range <= 0) {
         return;   /* 内容不足一屏：无需滚动 */
     }
 
-    /* 一圈滚动 20% 内容高度（5 圈到底）→ 每度滚动量。
+    /* 每度滚动量 = 全部行程 / (圈数 × 360°)：转满 s_cur_turns
+       （= 圈数模型输出，快速模式已减半）圈正好从顶部滚到底部。
        ⚠ 方向：屏幕坐标系里顺时针 = 角度增大；需求是"顺时针向下滚"，
        而 lv_obj_scroll_by 的 dy 为负才是内容上移（视口向下），故取负号
-       （顺时针 → dy 为负 → 列表向下翻行）。 */
-    float px_per_deg = (float)content_h * CW_TURN_RATIO / 360.0f;
-    float px = -delta_deg * px_per_deg;
-    if (px > CW_MAX_STEP_PX) {
-        px = CW_MAX_STEP_PX;
-    } else if (px < -CW_MAX_STEP_PX) {
-        px = -CW_MAX_STEP_PX;
+       （顺时针 → dy 为负 → 列表向下翻行）。
+       滑动方向设为"反转"时整体取反：顺时针 → 向上滚，逆时针 → 向下滚 */
+    float px_per_deg = (float)range / (s_cur_turns * 360.0f);
+    float dir_sign   = s_reverse ? 1.0f : -1.0f;
+    float px = dir_sign * delta_deg * px_per_deg;
+    /* 单帧上限 = 1/4 圈对应的量（随行程/圈数一起标定，见 CW_MAX_STEP_DEG）：
+       正常转动（10~40°/帧）不受影响，坐标跳变仍被钳住 */
+    float max_px = px_per_deg * CW_MAX_STEP_DEG;
+    if (px > max_px) {
+        px = max_px;
+    } else if (px < -max_px) {
+        px = -max_px;
     }
 
     /* 1) 内部累加连续像素量（不足一行的余量保留，不丢弃） */
@@ -457,8 +532,9 @@ void click_wheel_set_list(uint8_t tab, lv_obj_t *list, uint32_t item_count)
     s_counts[tab] = item_count;
     cw_target();
     cw_sync_visible();
-    ESP_LOGI(TAG, "tab %u list set: items=%u (%s)", (unsigned)tab,
-             (unsigned)item_count,
+    ESP_LOGI(TAG, "tab %u list set: items=%u (%.2f turns to end, %s)",
+             (unsigned)tab, (unsigned)item_count,
+             (double)cw_effective_turns(item_count),
              item_count >= CW_MIN_ITEMS ? "wheel eligible" : "wheel hidden");
 }
 
@@ -486,4 +562,37 @@ void click_wheel_set_enabled(bool on)
     s_enabled = on;
     cw_sync_visible();   /* 关闭时立即隐藏按钮并终止画圈 */
     ESP_LOGI(TAG, "click wheel %s", on ? "enabled" : "disabled");
+}
+
+void click_wheel_set_reverse(bool reverse)
+{
+    if (reverse == s_reverse) {
+        return;   /* 幂等 */
+    }
+    s_reverse = reverse;
+    /* 方向在每帧换算时取用，无需重算滚动目标；只打日志便于串口核对 */
+    ESP_LOGI(TAG, "click wheel direction: %s", reverse ? "reverse" : "normal");
+}
+
+void click_wheel_set_speed(uint8_t speed)
+{
+    if (speed >= CLICK_WHEEL_SPEED_COUNT) {
+        speed = CLICK_WHEEL_SPEED_NORMAL;   /* 越界钳到"普通"（脏配置防护） */
+    }
+    if (speed == s_speed) {
+        return;   /* 幂等 */
+    }
+    s_speed = speed;
+    /* 系数参与每帧换算，重新锁定一次滚动目标把新系数应用到当前列表 */
+    cw_target();
+    if (s_cur_list != NULL) {
+        ESP_LOGI(TAG, "click wheel speed: %s (x%.2f -> %.2f turns for %u items)",
+                 CW_SPEED_NAME[s_speed], (double)CW_SPEED_FACTOR[s_speed],
+                 (double)s_cur_turns, (unsigned)s_cur_count);
+    } else {
+        /* 当前页面没有绑定的列表（如停在非列表页）：只报档位，
+           避免打出"0 items / 1.00 turns"这种误导性读数 */
+        ESP_LOGI(TAG, "click wheel speed: %s (x%.2f, no list bound)",
+                 CW_SPEED_NAME[s_speed], (double)CW_SPEED_FACTOR[s_speed]);
+    }
 }

@@ -157,9 +157,14 @@ void main_ui_create(void)
        顶层"的修法会破坏 LVGL 的覆盖判定 → 下拉面板时被遮挡的页面内容
        每帧重绘、严重掉帧（见 DONE_PLANS.md 第 38 点）。
        显隐由 main_tabs_sync（当前页面）与各列表构建时登记的目标共同决定；
-       功能开关来自 NVS 配置（click_wheel，默认开，设置菜单可切换） */
+       功能开关/方向/速度档位来自 NVS 配置（click_wheel / click_wheel_rev /
+       click_wheel_spd，设置菜单 → 虚拟 ClickWheel 选项 子页可调，立即生效） */
     click_wheel_create();
     click_wheel_set_enabled(config_store_get_click_wheel());
+    /* 方向（正常/反转）与速度档位（普通/快速/极速）同样来自 NVS
+       （设置菜单 → 虚拟 ClickWheel 选项 子页），开机按配置初始化 */
+    click_wheel_set_reverse(config_store_get_click_wheel_reverse());
+    click_wheel_set_speed(config_store_get_click_wheel_speed());
 
     /* 页面切换时控制列表跑马灯（非列表页关闭省电） */
     lv_obj_add_event_cb(tv, main_tabs_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);

@@ -33,8 +33,15 @@ extern "C" {
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调
  *   - 虚拟 ClickWheel click_wheel（bool，默认**开**）：长列表右下角速滑按钮
- *     是否启用（见 core/ui/click_wheel）。设置在设置菜单 →「虚拟 ClickWheel」
- *     行切换，立即生效（隐藏/显示按钮，无需重启）
+ *     是否启用（见 core/ui/click_wheel）。设置菜单 →「虚拟 ClickWheel」子页
+ *     切换，三项均立即生效（无需重启）：
+ *     - click_wheel     开关（默认开）
+ *     - click_wheel_rev 滑动方向（bool，默认**关**=正常：顺时针向下滚；
+ *                       开 = 反转：顺时针向上滚）
+ *     - click_wheel_spd 速度档位（uint8 enum，默认**普通**）：把圈数模型算出
+ *                       的圈数乘一个 ≤1 的系数（0.25 一档均匀变化）——
+ *                       普通 ×1.00（不计算）/ 快速 ×0.75 / 极速 ×0.50；
+ *                       设置菜单里点击循环切换
  *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关，
  *     开机读取决定是否启动相关任务/创建调试对象，修改需重启生效）：
  *     - 电池电压采样日志 battery_log（bool，默认关）+ 采样间隔
@@ -74,6 +81,22 @@ extern "C" {
 #define CONFIG_STORE_SLEEP_AWAKE_DEFAULT 1u   /* 睡眠清醒感知默认开启（NightPlayer 行为） */
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
 #define CONFIG_STORE_CLICK_WHEEL_DEFAULT 1u  /* 虚拟 ClickWheel 默认启用 */
+#define CONFIG_STORE_CW_REVERSE_DEFAULT  0u  /* 滑动方向默认"正常"（顺时针向下滚） */
+#define CONFIG_STORE_CW_SPEED_DEFAULT    0u  /* 速度档位默认"普通"（圈数不折减） */
+
+/**
+ * 虚拟 ClickWheel 速度档位（NVS 配置 clkwheel_spd）
+ *
+ * ⚠ 数值必须与 `core/ui/click_wheel.h` 的 `CLICK_WHEEL_SPEED_*` 一致
+ *   （`ui/settings_menu.c` 里有 `_Static_assert` 兜底校验）：core/ui 不依赖
+ *   config_store，两边各自定义同一组数值。
+ */
+typedef enum {
+    CONFIG_STORE_CW_SPEED_NORMAL = 0,  /* 普通：圈数按模型原值（不计算） */
+    CONFIG_STORE_CW_SPEED_FAST   = 1,  /* 快速：圈数 × 0.75 */
+    CONFIG_STORE_CW_SPEED_TURBO  = 2,  /* 极速：圈数 × 0.50 */
+    CONFIG_STORE_CW_SPEED_COUNT  = 3,
+} config_store_cw_speed_t;
 #define CONFIG_STORE_BATT_LOG_DEFAULT     0u  /* 电池电压日志默认关（开发者选项开启） */
 #define CONFIG_STORE_BATT_LOG_MIN_DEFAULT 5u  /* 日志采样间隔默认 5 分钟 */
 #define CONFIG_STORE_BATT_LOG_MIN_MAX     120u /* 日志间隔上限（分钟，防越界） */
@@ -126,6 +149,12 @@ uint32_t config_store_get_screen_off_s(void);
 
 /** @brief 虚拟 ClickWheel 速滑按钮开关（true=长列表显示速滑按钮；默认开） */
 bool config_store_get_click_wheel(void);
+
+/** @brief 虚拟 ClickWheel 滑动方向（true=反转：顺时针向上滚；默认正常） */
+bool config_store_get_click_wheel_reverse(void);
+
+/** @brief 虚拟 ClickWheel 速度档位（取值见 config_store_cw_speed_t，默认普通） */
+uint8_t config_store_get_click_wheel_speed(void);
 
 /** @brief 电池电压采样日志开关（true=开机创建 batt_log 任务；默认关） */
 bool config_store_get_battery_log(void);
@@ -199,10 +228,19 @@ void config_store_set_sleep_awake(bool on);
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);
 
-/** @brief 设置虚拟 ClickWheel 开关并持久化（设置菜单「虚拟 ClickWheel」行）。
+/** @brief 设置虚拟 ClickWheel 开关并持久化（设置菜单 → 虚拟 ClickWheel 子页）。
  *          与"重启生效"的开发者选项不同，本项立即生效：调用方随后
  *          click_wheel_set_enabled() 隐藏/显示速滑按钮；同时通知变更回调 */
 void config_store_set_click_wheel(bool on);
+
+/** @brief 设置虚拟 ClickWheel 滑动方向并持久化（true=反转）。
+ *          立即生效：调用方随后 click_wheel_set_reverse()；同时通知变更回调 */
+void config_store_set_click_wheel_reverse(bool reverse);
+
+/** @brief 设置虚拟 ClickWheel 速度档位并持久化（取值见 config_store_cw_speed_t，
+ *          越界钳到"普通"）。立即生效：调用方随后
+ *          click_wheel_set_speed()；同时通知变更回调 */
+void config_store_set_click_wheel_speed(uint8_t speed);
 
 /** @brief 设置电池电压日志开关并持久化（开发者选项；开机检查，重启生效，
  *          仅持久化不通知回调——无 UI 需要实时同步） */

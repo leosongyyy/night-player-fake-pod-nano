@@ -23,6 +23,10 @@ static const char *TAG = "config_store";
 #define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
 #define KEY_CLICK_WHEEL      "clkwheel"
+#define KEY_CW_REVERSE       "clkwheel_rev"   /* 滑动方向：0=正常，1=反转 */
+#define KEY_CW_SPEED         "clkwheel_spd"   /* 速度档位：0=普通，1=快速，2=极速 */
+/* ⚠ 不兼容旧键 `clkwheel_fast`（旧版 bool 速度）：速度档位功能尚未发布，
+   最终用户拿到的固件只会有新键 `clkwheel_spd`，无需迁移逻辑 */
 #define KEY_BATT_LOG         "battlog"
 #define KEY_BATT_LOG_MIN     "battmin"
 #define KEY_TOUCH_TEST       "touchtest"
@@ -53,8 +57,12 @@ static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
 static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
-/* 虚拟 ClickWheel 速滑按钮（默认开）：设置菜单「虚拟 ClickWheel」行切换 */
+/* 虚拟 ClickWheel 速滑按钮（默认开）：设置菜单 →「虚拟 ClickWheel 选项」子页
+   切换。三项配套配置：开关 / 滑动方向（正常=顺时针向下滚，反转=顺时针向上滚）/
+   速度档位（普通 ×1.00 / 快速 ×0.75 / 极速 ×0.50，点击循环），均立即生效 */
 static bool     s_click_wheel = (CONFIG_STORE_CLICK_WHEEL_DEFAULT != 0);
+static bool     s_cw_reverse  = (CONFIG_STORE_CW_REVERSE_DEFAULT != 0);
+static uint8_t  s_cw_speed    = CONFIG_STORE_CW_SPEED_DEFAULT;
 /* 开发者选项（运行时开关，开机检查、重启生效）：电池电压日志（默认关）
    及其采样间隔（分钟，默认 5）、触摸测试白点（默认关） */
 static bool     s_batt_log    = (CONFIG_STORE_BATT_LOG_DEFAULT != 0);
@@ -280,6 +288,20 @@ void config_store_init(void)
     } else {
         s_click_wheel = (click_wheel != 0);
     }
+    /* 滑动方向（正常/反转）与速度档位（普通/快速/极速）：无记录时用默认值 */
+    uint8_t cw_reverse = 0;
+    if (nvs_get_u8(s_nvs, KEY_CW_REVERSE, &cw_reverse) != ESP_OK) {
+        s_cw_reverse = (CONFIG_STORE_CW_REVERSE_DEFAULT != 0);
+    } else {
+        s_cw_reverse = (cw_reverse != 0);
+    }
+    /* 速度档位（普通/快速/极速）：无记录时用默认值；越界按脏数据钳到"普通" */
+    if (nvs_get_u8(s_nvs, KEY_CW_SPEED, &s_cw_speed) != ESP_OK) {
+        s_cw_speed = CONFIG_STORE_CW_SPEED_DEFAULT;
+    }
+    if (s_cw_speed >= CONFIG_STORE_CW_SPEED_COUNT) {
+        s_cw_speed = CONFIG_STORE_CW_SPEED_DEFAULT;
+    }
     /* 开发者选项：无记录（首次烧录/升级）时默认关闭（见 CONFIG_STORE_*_DEFAULT） */
     uint8_t batt_log = 0;
     if (nvs_get_u8(s_nvs, KEY_BATT_LOG, &batt_log) != ESP_OK) {
@@ -343,12 +365,12 @@ void config_store_init(void)
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
                   "sleep_def=%u min def_on=%d awake=%d screen_off=%u s "
-                  "clkwheel=%d "
+                  "clkwheel=%d(rev=%d spd=%d) "
                   "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s eq=%s(%u bands)",
              (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
              (int)s_shuffle, (unsigned)s_sleep_def, (int)s_sleep_def_on,
              (int)s_sleep_awake, (unsigned)s_screen_off,
-             (int)s_click_wheel,
+             (int)s_click_wheel, (int)s_cw_reverse, (unsigned)s_cw_speed,
              (int)s_batt_log, (unsigned)s_batt_log_min,
              (int)s_touch_test,
              (int)s_was_playing,
@@ -413,6 +435,16 @@ uint32_t config_store_get_screen_off_s(void)
 bool config_store_get_click_wheel(void)
 {
     return s_click_wheel;
+}
+
+bool config_store_get_click_wheel_reverse(void)
+{
+    return s_cw_reverse;
+}
+
+uint8_t config_store_get_click_wheel_speed(void)
+{
+    return s_cw_speed;
 }
 
 bool config_store_get_battery_log(void)
@@ -597,6 +629,31 @@ void config_store_set_click_wheel(bool on)
     }
     s_click_wheel = on;
     cfg_write_u8(KEY_CLICK_WHEEL, on ? 1 : 0);
+    config_notify();
+}
+
+/* 滑动方向（true=反转）：立即生效（UI 侧回调 click_wheel_set_reverse），通知回调 */
+void config_store_set_click_wheel_reverse(bool reverse)
+{
+    if (reverse == s_cw_reverse) {
+        return;
+    }
+    s_cw_reverse = reverse;
+    cfg_write_u8(KEY_CW_REVERSE, reverse ? 1 : 0);
+    config_notify();
+}
+
+/* 速度档位（普通/快速/极速）：立即生效（UI 侧回调 click_wheel_set_speed），通知回调 */
+void config_store_set_click_wheel_speed(uint8_t speed)
+{
+    if (speed >= CONFIG_STORE_CW_SPEED_COUNT) {
+        speed = CONFIG_STORE_CW_SPEED_DEFAULT;   /* 越界钳到"普通" */
+    }
+    if (speed == s_cw_speed) {
+        return;
+    }
+    s_cw_speed = speed;
+    cfg_write_u8(KEY_CW_SPEED, speed);
     config_notify();
 }
 

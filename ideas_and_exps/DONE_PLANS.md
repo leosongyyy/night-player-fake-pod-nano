@@ -659,6 +659,36 @@ LV_SYMBOL_DOWN）：
   可以快速翻页」中的中文字，Toast 会显示方块；发布版（完整字体）正常。
 
 
+
+## 25. 模拟4.4平衡口 ⛔ 已砍掉
+
+> 经过测试，cs43131对串扰的控制似乎相当不错（地线阻抗极低），测试后串扰到另一侧的音频低于-60dB，几乎处于不可闻的状态。耳机线用的甚至还是九块九包邮的插针线材  
+> 因此此功能不做实现
+
+原始想法：
+```
+此前研究过3.5和4.4的区别，发现3.5因为共用地线的原因，若地线有阻抗，就会有一部分电流串到另一边的耳机里。
+听起来就像
+Lhear = Lout - 0.03 * Rout
+Rhear = Rout - 0.03 * Lout
+而每一边都有独立地线的4.4平衡口则无此问题
+后面尝试主动混入部分音频抵消，即左声道混入一定的右声道，右声道混入一定左声道
+Lout = L + 0.03 * R
+Rout = R + 0.03 * L
+
+这样 
+Lhear = Lout - 0.03 * Rout 
+      = (L + 0.03 * R) - 0.03 * (R + 0.03 * L)
+      = L + 0.03 * R - 0.03 * R - 0.0009 * L
+      = L - 0.0009 * L 
+      = 0.9991 * L
+      
+另一边同理，两个串扰正负抵消，每一边只有最干净的音频。
+此原理已经在电脑声卡上测试通过，虽然听起来没啥区别，但可以给那些声场洁癖或者4.4真理的老烧们提供一点选择
+需要验证当前电路设计里，是否所有频率的阻抗都相同，即找一个耳机，测试所有频率是否均匀混入对面，以及经过抵消消除后，是否全频段都是正好抵消而不是泄漏。
+```
+
+
 ## 26. USB声卡的耳机虚拟环绕声模式 ⛔ 已砍掉
 
 - 本固件主要注重于音乐播放，不做这些和音乐播放无关的功能。
@@ -1128,6 +1158,158 @@ LVGL 默认行为，重建时保留 act_time，所以看不出问题）。修法
 **设备实测（COM5，2026-09，加吸附的旧版本）**：所有 `px` 与 `scroll_y` 均为 56 的
 整数倍（17528=313×56、28728=513×56、0）；歌曲页 `view_h = 392 = 7×56`，底边天然
 对齐。删除吸附后的手感（相对当前位置起跳、底部按最后一项对齐）以设备实测为准。
+
+## 42. ClickWheel 大改：条目数驱动的圈数模型 +「虚拟 ClickWheel 选项」子菜单（开关/方向/速度三档）✅ 已完成
+
+> ⚠ 本条**合并**了本次会话对 ClickWheel 的全部改动（原分 #42/#43/#44 三条，
+> 2026-09-11 按用户要求合并为一条）：① 圈数模型；② 设置子菜单；③ 速度三档。
+> 涉及文件：`core/ui/click_wheel.{h,c}`、`core/storage/config_store.{h,c}`、
+> `ui/main_ui.c`、`ui/settings_menu.c`。
+
+### 42.1 需求（用户，2026-09-11，按提出顺序）
+
+1. **圈数由条目数决定**（用户数学建模），取代原先由 `CW_TURN_RATIO` 固定的
+   "5 圈到底"：
+
+   ```
+   y = log_1.618(x) - 7        // x = 列表条目数，y = 滚完整个列表所需圈数
+   y 钳制在 [1.0, 20.0]
+   ```
+
+   标定表（x → y）：73 → 1.92、100 → 2.57、200 → 4.01、600 → 6.29、
+   1000 → 7.36、5000 → 10.70、10000 → 12.14。钳制只在 x ≤ 47（低于显示阈值
+   `CW_MIN_ITEMS = 73`）或 x ≈ 44 万条时生效，现有列表规模下不触发。
+
+2. **设置项改成子菜单**：原来的「虚拟 ClickWheel」开关行（点击即切换）改成一个
+   入口，点进去三项：开启/关闭、滑动方向（正常/反转）、速度。
+3. **速度三档、点击循环**：普通（不计算）×1.00 / 快速 ×0.75 / 极速 ×0.50
+   —— **0.25 一档均匀变化**（最初提的是"快速 = 除以 1.5"，随即按用户更正为
+   ×0.75）。
+4. **入口行文案**：标题「虚拟 ClickWheel 选项」、**不显示右侧开/关状态**
+   （开启状态只在子页第一行看）。
+5. **子页说明卡只留一条**（讲"这个功能是什么"），并删掉其中的"（顺时针向下滚）"
+   —— 方向/速度属手感差异，交给最终用户自己试；文字里不提转向，避免暗示只有
+   一种转法。
+6. **不做旧键兼容**：速度功能尚未发布，最终用户只会拿到新键，旧 `clkwheel_fast`
+   直接废弃、不写迁移逻辑。
+
+### 42.2 实现
+
+**(1) `core/ui/click_wheel.{h,c}` —— 模型与三个运行期开关**
+
+- 新增 `cw_turns_for_count(count)`（`ln(x)/ln(1.618) − 7` 后钳制）：只在锁定
+  滚动目标时算一次（按下瞬间 / 换列表），转圈期间条目数不变，两次 `logf` 的
+  开销可忽略；
+- 状态：`s_cur_turns`（有效圈数）、`s_reverse`（方向）、`s_speed`（档位），与
+  `s_cur_list` / `s_cur_count` / `s_cur_item_h` 一起由 `cw_target()` 锁定
+  （防画圈途中切页/换列表）；
+- 距离基准由"内容总高度"改为**可滚动行程**：
+  `range = scroll_top + scroll_bottom`（恒等于 `内容总高度 − 视口高度`，与当前
+  滚动位置无关）。这才是"滚完整个列表"要走的行程，转满 y 圈正好停到最后一项
+  贴底；`range <= 0`（内容不足一屏）直接返回（取代原 `content_h <= view_h` 判据）；
+- 换算 `px_per_deg = range / (turns × 360)`（原 `content_h × 0.2 / 360`），其中
+  `turns = cw_effective_turns() = cw_turns_for_count() × CW_SPEED_FACTOR[speed]`；
+  行对齐步进、`lv_obj_scroll_by_bounded` 边界 clamp 全部不变；
+- 单帧钳制由固定 `CW_MAX_STEP_PX = 800` 改为**按角度钳制**
+  `CW_MAX_STEP_DEG = 90°`（= 1/4 圈，随行程/圈数一起标定）：固定像素上限对
+  73 条（每圈约 34 行）是半个圈，对 10000 条却只是几十分之一圈，长列表快速
+  画圈时单帧滚动量会被削顶（旧注释已警告过）；按角度钳制后各规模保护强度一致，
+  正常转动（10~40°/帧）不受影响；
+- 方向：`dir_sign = s_reverse ? +1 : -1`（每帧换算处取符号，切页/换列表无需
+  重算）；接口 `click_wheel_set_reverse(bool)`；
+- 档位：宏 `CLICK_WHEEL_SPEED_NORMAL/FAST/TURBO/COUNT` + 系数表
+  `CW_SPEED_FACTOR[3] = { 1.00f, 0.75f, 0.50f }`（取代原单一宏
+  `CW_FAST_TURN_FACTOR`）+ 日志名表 `CW_SPEED_NAME[3] = {"normal","fast",
+  "turbo"}`；接口 `click_wheel_set_speed(uint8_t)`（越界钳到普通），切换时调
+  一次 `cw_target()` 让当前列表立刻套用新系数；
+- 日志：列表登记 `tab %u list set: items=%u (%.2f turns to end, %s)`；档位切换
+  `click wheel speed: fast (x0.75 -> 4.75 turns for 611 items)`（当前页面没有
+  绑定列表时只报档位 `(x0.75, no list bound)`，避免误导性的
+  "1.00 turns for 0 items"）。
+
+**(2) `core/storage/config_store.{h,c}` —— 三项 NVS 配置**
+
+| 键（≤15 字符） | 内存值 | 取值 | 默认 | 作用 |
+|---|---|---|---|---|
+| `clkwheel` | `s_click_wheel` | 开/关 | **开** | 是否启用速滑按钮（关闭即隐藏 + 终止画圈） |
+| `clkwheel_rev` | `s_cw_reverse` | 正常/反转 | 正常 | 正常 = 顺时针向下滚；反转 = 顺时针向上滚 |
+| `clkwheel_spd` | `s_cw_speed` | 普通/快速/极速 | 普通 | 圈数系数 ×1.00 / ×0.75 / ×0.50（0.25 一档均匀） |
+
+- 新增 `config_store_cw_speed_t { NORMAL=0, FAST=1, TURBO=2, COUNT=3 }`
+  与 `CONFIG_STORE_CW_SPEED_DEFAULT = 0`（普通），读取时越界按脏数据钳到普通；
+- 三个 set 均 `config_notify()`（与"设置菜单切换即生效"语义一致）；开机日志
+  `clkwheel=1(rev=0 spd=1)` 便于一眼看清三项状态；
+- 旧键 `clkwheel_fast` 废弃不读（见需求 6）。
+
+**(3) `ui/settings_menu.c` —— 入口行与子页**
+
+- 根页面那行**去掉**"点击即开关"回调（`click_wheel_row_cb` 删除，拆成三个子页
+  回调），改为 `lv_menu_set_load_page_event(s_menu, cw_row, cw_page)`；状态参数
+  传 `NULL`（不建状态 label）、标题「虚拟 ClickWheel 选项」，随之删掉根行状态
+  句柄 `s_click_wheel_status` 及其在 `menu_refresh_root()` 里的刷新。
+  **根页面仍是 6 行**，布局/滚动条状况不变；
+- 子页 `cw_page`（标题「虚拟 ClickWheel」）三行 + **1 张说明卡**：
+  - 「开启」（右显 开/关）→ `config_store_set_click_wheel()` + `click_wheel_set_enabled()`；
+  - 「滑动方向」（右显 正常/反转）→ `set_click_wheel_reverse()` + `set_reverse()`；
+  - 「速度」（右显 `CW_SPEED_TXT[3] = {"普通","快速","极速"}`）→ **点击循环**
+    `next = (cur + 1) % CONFIG_STORE_CW_SPEED_COUNT` + `set_click_wheel_speed()`
+    + `set_speed()`；
+  - 说明卡文案（沿用"一段一卡"写法，滚动性能原因见睡眠定时器页注释）：
+    「开启后，目录/歌曲列表超过 10 页（72 条）时右下角出现黄色圆钮：按住并在
+    屏幕上画圈即可快速翻页。」
+  - 三个状态句柄 `s_cw_enable_status / s_cw_dir_status / s_cw_speed_status`
+    统一在 `menu_refresh_root()` 里刷新；
+  - 两条 `_Static_assert` 校验 `CONFIG_STORE_CW_SPEED_*` 与
+    `CLICK_WHEEL_SPEED_*` 的**数量与逐个取值**一致（core/ui 与 config_store
+    各自定义同一组数值，防止漂移）。
+
+**(4) `ui/main_ui.c`**：`click_wheel_create()` 之后按 NVS 依次
+`set_enabled / set_reverse / set_speed`（三项都在开机时生效）。
+
+### 42.3 验证
+
+- **编译**：debug / releasecandidate / release **三个配置均零警告**（改动文件
+  强制重编确认，含 `_Static_assert` 通过）。
+- **设备实测（COM12，2026-09-11）**：
+  - 模型数值：`items=171 (3.69 turns to end)`（理论 3.69）、
+    `items=611 (6.33 turns to end)`（理论 6.33）；
+  - 行程核对（611 首：range = 611×56 − 392 = 33824px、6.33 圈 → 14.85px/度）：
+    取连续日志 `scroll_y 4670 → 0`（4670px）累计约 323°（日志每 30° 打点）→
+    实测约 **14.5px/度**（差约 2%，来自日志分组量化与到顶 clamp 丢弃的余量）；
+  - **三档与循环**（611 首）：`normal (x1.00 -> 6.33 turns)` /
+    `fast (x0.75 -> 4.75 turns)` / `turbo (x0.50 -> 3.17 turns)`；连续点击 4 次
+    确认 普通→快速→极速→普通 正常回绕；
+  - **反转方向有效**：反转时逆时针 `rotate -34 deg` → `px` 为负 →
+    `scroll_y` **增大**（向下滚）、顺时针 `rotate 51 deg` → `scroll_y` **减小**
+    （向上滚）；切回正常后同样动作方向相反；
+  - 行对齐步进不受影响：`px` 恒为行高整数倍（歌曲页 56、目录页 52），
+    `scroll_y` 亦然，到顶/到底由列表 clamp；
+  - 持久化：重启后 `clkwheel=1(rev=0 spd=1)`（旧键被忽略）。
+- **完整字体核对（RC）**：新增菜单文案在 `system_global_font.c`（24px MiSans，
+  `--symbols` 表 + `--range 32-127`）里**零缺字**；`system_global_font_lite.c`
+  （调试版精简字体）缺「虚拟/选/项/滑/动/方/向/反/转/速/快/常/滚/顺/针/灵/敏/
+  翻/倍」等字，故调试版这几行显示方块（符合"调试版字库不全"的既有说明）。
+- **发布版构建与烧录**：增量构建（release 目录此前已手动 reconfigure）
+  `.\idfc.exe -B build/release build` → `FakePodNanoNightPlayer.bin` **0x4176f0**
+  （4.29MB，分区余量 32%）；烧录 COM12 启动正常
+  （`click wheel speed: fast (x0.75 -> 2.76 turns for 171 items)`），
+  画圈翻页 / 点歌 / 设置菜单开合 / 双键息屏均正常。
+
+### 42.4 文档同步
+
+`CLICK_WHEEL_USAGE.md`：1 节（圈数模型 + 三项设置）、2.2 / 2.3 节（标定来源、
+换算公式、距离基准、单帧钳制）、3 节 API、3.1 节配置表（三项 NVS + 两处定义
+一致性说明）、4 节接入方式、5 节调试日志（模型/档位/方向日志格式）；
+`AGENTS.md` 代码结构里 click_wheel 一行；`click_wheel.h` / `config_store.h`
+头文件注释。
+
+## 42.5 后续（本条内已废弃的中间方案，留档备查）
+
+- 需求 3 的"快速 = 除以 1.5"只在本会话中间态出现过，未烧录到任何配置；
+  最终实现即 ×0.75（0.25 一档均匀变化）。
+- 速度配置的键名一度用过 `clkwheel_fast`（bool 语义，1 = 圈数减半 = 现在的
+  "极速"），因功能未发布，合并时直接改为 `clkwheel_spd`（uint8 档位），
+  不保留兼容读取。
 
 
 
