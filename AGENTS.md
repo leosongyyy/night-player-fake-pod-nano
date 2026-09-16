@@ -23,73 +23,98 @@
 
 - `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动、i2c_bsp）
 - `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_sh8601、esp_lcd_touch、cmake_utilities、chmorgan__esp-libhelix-mp3）
-- `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（架构、启动服务器、常见问题排查）
+- `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：三套构建配置（debug/releasecandidate/release）的完整说明
 
 **4. idfc.exe 使用说明（重要）**
 
-`idfc.exe` 是 ESP-IDF 命令行的**服务器 + 客户端**封装：服务器一次性激活 IDF 环境并常驻监听 `http://localhost:19781/idf/`（HTTP + SSE 流式输出），客户端把 `idf.py` 命令发给服务器执行。
+`idfc.exe` 是 ESP-IDF 命令行的**服务器 + 客户端**封装：服务器一次性激活 IDF 环境并常驻监听 `http://localhost:19781/idf-client-cli/`（HTTP + SSE 流式输出），客户端把 `idf.py` 命令发给服务器执行。
+
+> ⚠ **本项目用的是「子命令版」idfc，旧语法已全部失效**：`--server`、`-B build/<cfg> build`、`-B ... reconfigure` 等写法现在一律报 `没有这样的命令`（退出码 1，不会静默成功）。**历史文档、旧对话记录里的 idfc 命令不要照抄**；完整说明见 `ideas_and_exps/IDFC_USAGE.md`，全部命令与参数用 `.\idfc.exe help --all` 查。
+
+- **首次配置项目**（每个项目目录做一次，写入 `.idfc/idfc_config.json`）：
+  ```powershell
+  .\idfc.exe set-idfenv "C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1"   # 版本号按本机安装（5.5.4 或 5.5.5）
+  .\idfc.exe set-variant debug
+  .\idfc.exe ports          # 列出串口（需服务器已启动）
+  .\idfc.exe set-port COMn
+  .\idfc.exe status         # 复核当前生效的构建类型与串口
+  ```
 
 - **启动服务器**（需要 `danger-full-access` 权限，否则 HTTP.sys 端口绑定会失败）：
   ```powershell
-  .\idfc.exe --server --idfenv "C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1"   # 版本号按本机安装（5.5.4 或 5.5.5）
+  .\idfc.exe start-server                          # 已 set-idfenv 时可省略参数
+  .\idfc.exe start-server --idfenv "<激活脚本路径>"  # 或显式指定本次使用的脚本
   ```
-  也可以让用户直接运行项目根目录的 `StartIDFCServer.vbs`。
+  也可以让用户直接运行项目根目录的 `StartIDFCServer.vbs`。`start-server` 会轮询服务器状态，**确认就绪后才返回**；停止用 `.\idfc.exe stop-server`。
 
 - **执行命令**（客户端，在 `workspace-write` 权限下运行）：
   ```powershell
-  .\idfc.exe -B build/debug build            # 构建（-B 指定配置目录，见第 5 节）
-  .\idfc.exe -B build/debug -p COMx flash    # 烧录（端口仅为示例，不同电脑上的配置不同）
-  .\idfc.exe -B build/debug -p COMx monitor  # 串口监视（-B 须与所用固件的那份配置一致）
+  .\idfc.exe build                                 # 构建（自动检测配置是否过期）
+  .\idfc.exe size                                  # 固件体积分析
+  .\idfc.exe flash                                 # 烧录到已保存的串口
+  .\idfc.exe monitor --wait-for "App started"      # 串口监视，命中后退出
+  .\idfc.exe run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
+  .\idfc.exe idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
   ```
-- **⚠ `-B` 必须带上，`monitor` 尤其**（本项目是多配置构建，见第 5 节）：不带 `-B` 时 idfc 走**根目录 `build/` + 根 `sdkconfig`**（已被 `.gitignore` 忽略、内容陈旧），后果有两个——① 会**重新拿默认/旧配置在根 `build/` 里跑一次 cmake 配置**（日志开头可见 `Running cmake in directory ...\build`），白做一轮配置还可能和目标的 `build/<cfg>/` 混淆；② `monitor` 时 idf_monitor 要按**该配置目录的 `.elf`** 还原地址，目录不对就**加载不到正确的调试符号**（栈回溯的函数名/行号失真甚至解不出来）。所以 **monitor 必须用与设备上固件一致的那份配置目录**（`-B build/debug` / `-B build/release` / `-B build/releasecandidate`）。
-- **⚠ 若提示 `IDF server is not running at http://localhost:19781/idf.`**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.vbs` 或上述 `--server` 命令），不要自行尝试在受限权限下重建服务器。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
-- 服务器由 `idfc.exe` 内部派生的 `--server-child` 进程承载，用 `pwsh` 前台启动更稳定。
+- ⚠ 在使用 `.\idfc.exe idfpy <任意 idf.py 参数...>` 之前，请务必阅读 IDFC_USAGE.md，查看此前旧版本踩过的坑。
+- **⚠ 若提示 `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1）**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.cmd` 或 `start-server`），或者按照说明使用完整权限重启，由用户确认启动。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
+- 未用 `-t` 指定时，构建类型取自 `.idfc/idfc_config.json` 的 `ActiveBuildVariant`（默认为 `debug`）；串口取自 `LastComPort`。**这两个是隐式状态，不确定时先跑 `.\idfc.exe status`。**
 
 **5. 开发命令**
 
 本项目使用多配置构建系统（debug / releasecandidate / release 三套，详见 `ideas_and_exps/BUILD_CONFIG.md`），以下是不同配置的命令速查表：
 
-** debug（精简字体 + 非极速封面 + 调试全开） **
+** debug（精简字体 + 非极速封面 + 调试全开）** —— 当前项目默认
 
 ```powershell
-# 增量构建（首次需带 -D 配置，见下）
-.\idfc.exe -B build/debug build
-
-# 重新配置（改过 sdkconfig.defaults* 后，先删 build/debug/sdkconfig 再执行）
-.\idfc.exe -B build/debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" -D SDKCONFIG="build/debug/sdkconfig" reconfigure
-
-# 烧录
-.\idfc.exe -B build/debug -p COMn flash
+.\idfc.exe build                      # 增量构建（自动检测配置是否过期）
+.\idfc.exe build --reconfigure        # 强制重新配置（改了 sdkconfig.defaults* 之后）
+.\idfc.exe build --dry-run            # 只看"会做什么"，不实际构建
+.\idfc.exe flash                      # 烧录（串口取自 .idfc 配置）
+.\idfc.exe monitor --wait-for "App started"   # 监视并在命中后退出
 ```
 
 ** releasecandidate（完整字体 + 极速封面 + 调试全开） **
 
 ```powershell
-.\idfc.exe -B build/releasecandidate build
-.\idfc.exe -B build/releasecandidate -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.releasecandidate" -D SDKCONFIG="build/releasecandidate/sdkconfig" reconfigure
-.\idfc.exe -B build/releasecandidate -p COMn flash
+.\idfc.exe build -t releasecandidate
+.\idfc.exe build -t releasecandidate --reconfigure
+.\idfc.exe flash -t releasecandidate -p COMn
 ```
 
 ** release（完整字体 + 极速封面 + 调试全关） **
 
 ```powershell
-.\idfc.exe -B build/release build
-.\idfc.exe -B build/release -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" -D SDKCONFIG="build/release/sdkconfig" reconfigure
-.\idfc.exe -B build/release -p COMn flash
+.\idfc.exe build -t release
+.\idfc.exe build -t release --reconfigure
+.\idfc.exe flash -t release -p COMn
 ```
 
-**备注**：只有首次或"改过 `sdkconfig.defaults.*`"才需要带 `-D` 重新配置；日常增量构建和烧录只带 `-B` 即可。⚠ 已有 sdkconfig 的优先级高于 defaults（`replace=False` 合并），改了 defaults 后仅 reconfigure 不会生效，**必须先删对应 `build/<cfg>/sdkconfig` 再带 `-D` reconfigure**。烧录前记得确认串口号。
-默认情况下，构建调试版的，除非用户指定。
+**其它常用**
 
-- `idfc -B build/<cfg> -p COMx monitor`：查看串口日志（退出 Ctrl+C或者直接结束任务）。⚠ **必须带 `-B <对应配置>`**（`build/debug` / `build/releasecandidate` / `build/release`）：不带时会拿根 `sdkconfig` 在根 `build/` 重新跑一次配置构建，而且 idf_monitor 取不到该配置的 `.elf`、**调试符号加载不正确**（栈回溯/行号失真）——详见第 4 节。
+```powershell
+.\idfc.exe run -t debug --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
+.\idfc.exe size -t debug                                   # 固件体积分析
+.\idfc.exe clean -t debug        # 删 build/debug/sdkconfig 与 build/debug/config
+.\idfc.exe fullclean -t debug    # 删整个 build/debug
+.\idfc.exe help --all            # 全部命令与参数
+```
+
+**备注**：
+
+- **过期检测已自动化**：改了 `sdkconfig.defaults*` 或 `main/Kconfig.projbuild` 后，`build` 会自动发现并清理+重新配置，**不需要再手工删 `build/<cfg>/sdkconfig`**。想强制全量重配用 `build --reconfigure`，想跳过检测走纯增量用 `build --no-reconfigure`，想从最干净状态开始用 `build --fullclean`。
+- ⚠ 原理仍值得知道（历史事故的根因）：**已存在的 `build/<cfg>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），所以只跑普通增量构建时新配置**不会生效、也不会报错**。历史上曾因此产出"堆毒化仍开"的固件（内部 RAM 紧张、任务建不起来、SD 读 DMA 失败）。**手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意这一点。**
+- 串口优先级：`-p` > `.idfc` 里 `set-port` 保存的值。构建类型优先级：`-t` > `.idfc` 里 `set-variant` 保存的值（当前 `debug`）。
+- 默认构建idfc当前默认构建类型，除非用户指定。
+- `idfc -B build/<cfg> build` 之类的旧写法已全部失效（见第 4 节）。
 - 已开放 `C:\esp\` 与 `C:\Espressif\` 的读取权限，可查阅 IDF 源码。
 
 **6. 构建配置**
 
 - `main/Kconfig.projbuild`：应用配置项（menuconfig）。配置项目请阅读该文件获得配置项的详细信息。常用配置组合均已使用三套构建配置切换。
 - `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.releasecandidate` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、LVGL 刷新 33ms / indev 轮询 33ms、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、LVGL 字体（12/16/20/24/28/32/48，默认 18）、**`CONFIG_LV_USE_LARGE_COORD=y`**（lv_coord_t 升为 int32_t，600+ 歌曲列表必需，见 virtual_list）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192` 等
-- **版本管理：配置事实源只有 `sdkconfig.defaults*` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cfg>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个 build 目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cfg>/sdkconfig` 指定）；`fullclean` 只清 `build/`，不会删 sdkconfig。改配置的正确姿势：改 `sdkconfig.defaults*` 或 `Kconfig.projbuild` 后，按第 5 节命令删对应 `build/<cfg>/sdkconfig` 再带 `-D` reconfigure。
+- **版本管理：配置事实源只有 `sdkconfig.defaults*` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cfg>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个 build 目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cfg>/sdkconfig` 指定）；`fullclean` 只清 `build/`，不会删 sdkconfig。改配置的正确姿势：改 `sdkconfig.defaults*` 或 `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
 - `partitions.csv`（**显式静态布局**，偏移写死不随自动分配漂移）：bootloader@0x0 / 分区表@0x8000（两者由 sdkconfig 默认 `BOOTLOADER_OFFSET_IN_FLASH`、`PARTITION_TABLE_OFFSET` 控制，不在 CSV 内）→ `nvs`@0x9000(0x6000) / `phy_init`@0xf000(0x1000) / `factory`(app，6M)@0x10000 / `pldata`(data 0x40，4M)@0x610000（播放列表数据结构分区，内存映射只读访问）。
 - 调试版的字体可能不全，请无视这一点，优先调试为主。实际效果会在发布版确认。用户会不定期更新调试版的字库。
 
@@ -104,7 +129,7 @@
 **当前实现状态：**
 - 播放核心：本地 MP3 播放（Helix 解码，实测 5000+ 首大曲库），按**文件夹**组织、支持 **`.pl` 文本歌单**；**循环模式**（全部/列表/单曲）+ **顺序/随机**；**无限确定性随机播放**（分块 + 确定性洗牌，断点续播）；回放增益；**EQ 均衡器**（10 段浮点 PeakEQ + 预增益，NightPlayer 兼容 `.eq` 文件）；**封面/歌曲信息**（`.npd` 元数据 + JPEG 封面解码）
 - 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT，挂载 `/sdcard`）
-- **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见第 6 节）**
+- **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
 - LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
 - 开机流程（boot_flow）：低电拒启（<3.45V 停充电警告屏）→ 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"
 - UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=音量档位、中=当前页面名、右=电池电压）、下拉控制中心（电池/亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
@@ -280,4 +305,4 @@ components/
 ### 回复/行动说明
 
 - 推理/思考及回复均使用中文。
-- 若 IDF 服务器未运行（`idfc` 报连接错误），请提示用户手动启动 `StartIDFCServer.vbs`，不要自行尝试在受限权限下启动服务器。
+- 若 IDF 服务器未运行（`idfc` 报 `IDF 服务器可能尚未运行` / 退出码 -1），请提示用户手动启动 `StartIDFCServer.cmd`（或按照提示使用完整权限运行 `idfc.exe start-server`，由用户点击确认。）
