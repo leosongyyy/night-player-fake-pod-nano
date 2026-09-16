@@ -68,7 +68,7 @@ namespace TestMP3
                 else
                 {
                     var timeDiff = File.GetLastWriteTime(metaFile) - File.GetLastWriteTime(item);
-                    if(timeDiff.Seconds > 5)
+                    if(Math.Abs(timeDiff.Seconds) > 5)
                     {
                         needWrite = true;
                     }
