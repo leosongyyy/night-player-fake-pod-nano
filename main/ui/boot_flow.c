@@ -6,6 +6,7 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/battery.h"
+#include "core/image/default_cover.h"
 #include "core/player/player_controller.h"
 #include "core/hardware/display.h"
 #include "core/hardware/sd_card.h"
@@ -64,6 +65,7 @@ static void reset_position_btn_cb(lv_event_t *e);
 
 typedef enum {
     BOOT_ST_NONE = 0,
+    BOOT_ST_SPLASH,       /* 开机封面（默认封面，屏幕最早点亮的那一屏） */
     BOOT_ST_LOW_BAT,      /* 电池电压过低，拒绝启动（停在此屏） */
     BOOT_ST_NO_SD,        /* 未插入 SD 卡（停在此屏） */
     BOOT_ST_PROMPT_SCAN,  /* 提示扫描，等待用户点击开始扫描 */
@@ -159,6 +161,30 @@ static lv_obj_t *boot_make_button(lv_obj_t *parent, const char *text,
 /* ------------------------------------------------------------------ */
 /* 各开机界面                                                           */
 /* ------------------------------------------------------------------ */
+
+/* 0. 开机封面（splash）：全屏黑底 + 默认封面。
+   在 app_main **早期**调用（display_init + lvgl_port_init 之后、touch/audio/
+   pldata/SD 之前，持 LVGL 锁）：屏幕亮度此时仍为 0，调用方在本函数返回后
+   lv_refr_now() 提交首帧、再点亮，防白屏顺序与原来一致。
+   目的：让用户开机即有画面，把其余硬件初始化与主界面创建（app_ui_create
+   实测约 700ms）的耗时全部藏在这张封面背后（实测首次点亮从约 1.9s 提前到
+   约 0.7s）。
+   ⚠ 本容器会被随后 boot_flow_run() 的任一分支经 boot_root_create() 删除并
+   替换成对应界面（低电/无卡/提示扫描/扫描中/无音乐/常规主界面），因此不需要
+   额外的清理入口；也必须保持"整屏不透明"，否则未初始化的面板 RAM 会透出来。 */
+void boot_splash_show(void)
+{
+    s_state = BOOT_ST_SPLASH;
+    lv_obj_t *root = boot_root_create();
+
+    /* 默认封面（DEFAULT_COVER_IMG，随 CONFIG_UI_COVER_FLASH 切换实现）：
+       460×460 与屏幕等大，居中即铺满整屏 */
+    lv_obj_t *cover = lv_img_create(root);
+    lv_img_set_src(cover, DEFAULT_COVER_IMG);
+    lv_obj_center(cover);
+
+    ESP_LOGI(TAG, "boot splash: default cover shown");
+}
 
 /* 1. 电池电压过低：拒绝启动，只展示警告 + 当前电压 + 提示（不自动重启） */
 static void boot_show_low_battery(void)

@@ -80,19 +80,51 @@ void app_main(void)
     esp_lcd_panel_handle_t panel_handle = display_init();
     mem_trace_log("03-display");
 
+    /* LVGL 移植层（显示驱动注册 + tick + LVGL 任务 + 触摸输入设备）
+       ⚠ 提前到 display_init 之后**立刻**启动（不再等其他硬件）：它只依赖
+       面板句柄（display_init 返回）与 config_store（读"触摸测试"开关），
+       不依赖 touch/audio/pldata/SD——触摸本就是异步初始化，此处句柄传 NULL，
+       就绪后由 on_touch_ready 经 lvgl_port_set_touch_handle 交付。
+       提前启动的目的：随后立刻画一张默认封面（boot_splash_show）并点亮屏幕，
+       把 touch/audio/pldata/button/SD 与主界面创建（app_ui_create 实测约
+       700ms）的耗时全部藏到封面背后——实测首次点亮从约 1.9s 提前到约 0.7s，
+       而"进入主界面"的时刻不变。 */
+    ESP_LOGI(TAG, "Initialize LVGL port");
+    lvgl_port_init(panel_handle, NULL);
+    mem_trace_log("04-lvgl_port");
+
+    /* 开机封面（默认封面）：此时面板亮度仍为 0，先把整屏写满再点亮——与原
+       来"全黑启动防白屏"的顺序完全一致。
+       ⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须与首帧渲染在同一个 LVGL 锁内
+       连续执行；锁外执行会被更高优先级的 LVGL 任务抢占并发刷屏，导致画面
+       定格/花屏。 */
+    if (lvgl_port_lock(-1)) {
+        boot_splash_show();
+        lv_refr_now(NULL);
+
+        uint8_t splash_brightness = config_store_get_brightness();
+        ESP_LOGI(TAG, "Turn on display (boot splash, brightness %d)", splash_brightness);
+        display_set_brightness(splash_brightness);
+        lvgl_port_unlock();
+    }
+    mem_trace_log("05-boot_splash");
+
     ESP_LOGI(TAG, "Initialize touch");
-    esp_lcd_touch_handle_t tp = touch_init();   // 异步初始化：立即返回（就绪前为 NULL）
+    /* 触摸异步初始化：立即返回（就绪前为 NULL）；就绪后经 ready 回调把句柄交给
+       已在 lvgl_port_init 注册好的 LVGL 输入设备（就绪前触摸回调不给数据），
+       故此处不需要返回值 */
+    touch_init();
     /* 触摸就绪回调：把句柄交给 LVGL 输入设备（就绪前触摸回调不给数据） */
     touch_register_ready_cb(on_touch_ready, NULL);
-    mem_trace_log("04-touch");
+    mem_trace_log("06-touch");
 
     ESP_LOGI(TAG, "Initialize battery ADC");
     battery_init();
-    mem_trace_log("05-battery");
+    mem_trace_log("07-battery");
 
     ESP_LOGI(TAG, "Initialize audio (I2S + CS43131)");
     audio_init();
-    mem_trace_log("06-audio");
+    mem_trace_log("08-audio");
 
     /* 应用用户音量配置（NVS 持久化，档位 0~30；audio_init 内部先按默认档初始化 DAC） */
     audio_set_volume_level(config_store_get_volume());
@@ -115,41 +147,37 @@ void app_main(void)
     if (pldata_init() != ESP_OK) {
         ESP_LOGW(TAG, "pldata partition unavailable (播放列表持久化不可用)");
     }
-    mem_trace_log("07-pldata");
+    mem_trace_log("09-pldata");
 
     ESP_LOGI(TAG, "Initialize button service (A=GPIO48, B=GPIO0)");
     button_service_init();
-    mem_trace_log("08-button");
+    mem_trace_log("10-button");
     /* 按键分发（亮屏/息屏两套映射）在 LVGL 初始化后统一注册（见下） */
 
     ESP_LOGI(TAG, "Initialize SD card (SDMMC)");
     sd_card_init();   // 挂载失败不阻塞，由 boot_flow 依据 sd_card_is_mounted() 决定流程
-    mem_trace_log("09-sd");
-
-    // LVGL 移植层（显示驱动注册 + tick + LVGL 任务 + 触摸输入设备）
-    ESP_LOGI(TAG, "Initialize LVGL port");
-    lvgl_port_init(panel_handle, tp);
-    mem_trace_log("10-lvgl_port");
+    mem_trace_log("11-sd");
 
     // 开机流程：电池电压 / SD 卡 / 播放列表数据检查，决定进入哪个界面。
-    // （LVGL API 非线程安全，需持锁操作；本函数只创建首屏并启动后台任务，不阻塞）
+    // （LVGL API 非线程安全，需持锁操作；本函数只创建首屏并启动后台任务，不阻塞；
+    //   任一分支都会经 boot_root_create() 删除开机封面，替换为对应界面）
     ESP_LOGI(TAG, "Run boot flow");
     if (lvgl_port_lock(-1)) {
         boot_flow_run();
-        // 强制同步渲染首帧（此时屏幕仍为全黑亮度 0），确保点亮前首帧已
-        // 提交到屏幕，避免出现"点亮后空白/半帧刷新"的窗口
+        // 强制同步渲染：把"封面 → 目标界面"的切换在同一个锁内一次提交，避免
+        // 中间出现半成品帧（全程持锁，LVGL 任务无法插入渲染）
         lv_refr_now(NULL);
 
-        // 完整点亮（恢复用户配置亮度，默认 255）：与首帧渲染在同一个 LVGL
-        // 锁内连续执行。⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须在持锁时
-        // 调用；锁外执行会被更高优先级的 LVGL 任务抢占并发刷屏，导致画面
-        // 定格/花屏。
+        // 复核亮度（用户配置值；无卡界面会在 boot_flow 内把它拉满到 255 并写回
+        // NVS，低电警告屏则依赖此处点亮）：与上面渲染在同一个 LVGL 锁内连续执行。
+        // ⚠ 亮度命令与 LVGL 刷屏共用 SPI 总线，必须在持锁时调用；锁外执行会被
+        // 更高优先级的 LVGL 任务抢占并发刷屏，导致画面定格/花屏。
         uint8_t boot_brightness = config_store_get_brightness();
         ESP_LOGI(TAG, "Turn on display (restore brightness %d)", boot_brightness);
         display_set_brightness(boot_brightness);
         lvgl_port_unlock();
     }
-    mem_trace_log("11-boot_flow+first_frame");
+    mem_trace_log("12-boot_flow+first_frame");
 
     ESP_LOGI(TAG, "App started");
 
@@ -157,7 +185,7 @@ void app_main(void)
 
     // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
     sleep_timer_init();
-    mem_trace_log("12-sleep_timer");
+    mem_trace_log("13-sleep_timer");
 
     // 开机默认开启睡眠定时（config_store 的 sleep_def_on，默认关）：
     // 开启时用默认时长（sleep_default_min，默认 45 分钟）自动启动定时。
@@ -173,24 +201,24 @@ void app_main(void)
     // 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）。
     // 放在 LVGL 初始化之后，注册 button_service 事件回调。
     key_handler_init();
-    mem_trace_log("13-key_handler");
+    mem_trace_log("14-key_handler");
 
     // 电源服务（power_service）：esp_pm 固定频率（亮屏 240MHz/息屏 80MHz）+
     // 触摸活动订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）+ 自动关机
     // 策略（息屏暂停超时 / 电池电压持续过低，见 Kconfig）。需在 LVGL 之后。
     power_service_init();
-    mem_trace_log("14-power_service");
+    mem_trace_log("15-power_service");
 
     // 电池电压采样日志（开发者选项：设置 → 关于 → 开发者选项，NVS 运行时
     // 开关，默认关）：开启时独立任务按所选间隔（默认 5 分钟）把
     // "运行时长 + 平均电压"写入 SD 卡；此处读取开机时的 NVS 值决定是否建
     // 任务（修改需重启生效）。需在 sd_card_init 之后（SD 未挂载时任务自行跳过）。
     battery_logger_init();
-    mem_trace_log("15-batt_logger");
+    mem_trace_log("16-batt_logger");
 
     // 启动性能监视（内存 + 双核 CPU 使用率），Kconfig CONFIG_PERFORMANCE_MONITOR 控制
 #ifdef CONFIG_PERFORMANCE_MONITOR
     startPerformanceMonitor();
-    mem_trace_log("16-perf_monitor");
+    mem_trace_log("17-perf_monitor");
 #endif
 }

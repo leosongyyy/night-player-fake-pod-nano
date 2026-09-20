@@ -131,7 +131,7 @@
 - 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT，挂载 `/sdcard`）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
 - LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
-- 开机流程（boot_flow）：低电拒启（<3.45V 停充电警告屏）→ 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"
+- 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 低电拒启（<3.45V 停充电警告屏）→ 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）
 - UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=音量档位、中=当前页面名、右=电池电压）、下拉控制中心（电池/亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
 - 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：电池电压日志开关/采样间隔、触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效）、全局 Toast 提示
 
@@ -139,7 +139,7 @@
 
 ```
 main/
-  main.c                    # app_main：config_store → 硬件初始化 → LVGL 移植层 → boot_flow → 深链/睡眠/按键/电源/日志/性能监视
+  main.c                    # app_main：config_store → display → LVGL 移植层 + 开机封面（提前点亮）→ 其余硬件 → boot_flow → 深链/睡眠/按键/电源/日志/性能监视
   CMakeLists.txt
   Kconfig.projbuild         # 构建级应用配置项（Kconfig；触摸测试/电池日志已移至运行时开关）
   core/
@@ -197,7 +197,7 @@ main/
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
     now_playing.h/.c        # 正在播放页（全屏封面 + 标题栏 + 控制栏/进度条，点击封面隐藏呼出）
     settings_page.h/.c      # 播放设置页（九宫格：循环/随机/睡眠定时）
-    settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/按键帮助/关于+开发者选项/重新扫描）
+    settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/按键帮助/关于+开发者选项/重新扫描）；**分级懒加载**：外壳+根页面首次打开时建（44ms），子页首次进入才建，不占开机路径（见 DONE_PLANS #44）
     notification_panel.h/.c # 下拉控制中心（电池/亮度/音量竖条/睡眠开关/设置入口，LVGL 事件驱动）
     key_handler.h/.c        # 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）
     player_ticker.h/.c      # 播放器状态轮询刷新 + 坏曲事件 toast 拉取
@@ -258,7 +258,8 @@ components/
 
 **1. 分层架构**
 - `core/` 放与应用无关的底层：`core/hardware/`（显示/触摸/电池驱动）、`core/ui/`（LVGL 移植层 + 触摸测试 + 虚拟列表 + ClickWheel 速滑按钮 + 全局跑马灯节奏 global_style）、`core/utils/`（性能监视/电源/深链）；`core/player`、`core/storage`、`core/music`、`core/image`、`core/fonts` 放播放引擎与数据层；`ui/` 放应用 UI（app、main_ui、boot_flow、notification_panel、settings_menu 等）
-- `main.c` 只做初始化装配：`config_store_init → display_init → touch_init → battery_init → audio_init → audio_set_volume_level → EQ 恢复 → pldata_init → button_service_init → sd_card_init → lvgl_port_init → boot_flow_run(持锁首帧+点亮) → deep_worker_init → sleep_timer_init → key_handler_init → power_service_init → battery_logger_init → startPerformanceMonitor()`
+- `main.c` 只做初始化装配：`config_store_init → deep_worker_init → display_init → lvgl_port_init → boot_splash_show(持锁首帧+点亮默认封面) → touch_init → battery_init → audio_init → audio_set_volume_level → EQ 恢复 → pldata_init → button_service_init → sd_card_init → boot_flow_run(持锁切屏+复核亮度) → sleep_timer_init → key_handler_init → power_service_init → battery_logger_init → startPerformanceMonitor()`
+  - ⚠ **LVGL 故意提前到 display 之后立刻启动**（唯一硬依赖是面板句柄 + config_store，触摸句柄可传 NULL 由异步回调补上）：这样能马上画一张默认封面并点亮，把 touch/audio/pldata/SD 与 `app_ui_create`（实测约 700ms）的耗时藏在封面背后——实测首次点亮从约 1.9s 提前到约 0.7s，进主界面的时刻不变。开机封面由 `boot_splash_show()`（`ui/boot_flow.c`）创建，随后 `boot_flow_run()` 的任一分支都会删除它并替换为对应界面；防白屏顺序（亮度 0 时先写满整屏 → 再置亮度）与亮度必须与刷屏同锁的约定均未变。
 
 **2. 任务核心布局（UI Core0 / 音频 Core1）**
 - 动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL）固定在 Core0**、**播放解码/封面解码固定在 Core1**，二者分核互不抢占。

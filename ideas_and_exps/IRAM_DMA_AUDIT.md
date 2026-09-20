@@ -41,6 +41,14 @@
 
 ### 2.1 debug（堆毒化已关，`V_RES/10`）
 
+> ⚠ **阶段编号已重排（2026-09，开机封面改动）**：`lvgl_port_init` 从 SD 之后提前到
+> `display_init` 之后立刻执行，并新增 `05-boot_splash` 阶段，因此下表里的
+> `05-battery`/`06-audio`/`08-button`/`09-sd`/`10-lvgl_port`/`11-boot_flow+first_frame`
+> 等编号是**改动前**的旧编号（读数本身仍有效，用于对比绝对量）。现在的顺序为：
+> `03-display → 04-lvgl_port → 05-boot_splash → 06-touch → 07-battery → 08-audio →
+> 09-pldata → 10-button → 11-sd → 12-boot_flow+first_frame`。数值上的结论不变：
+> 绘制缓冲约占 95KB 内部 RAM/DMA，`app_ui_create` 再吃约 105KB 并产生 ~1800 个分配块。
+
 | 阶段 | int free | int largest | int blocks | dma free | psram free |
 |---|---|---|---|---|---|
 | 01-config_store | 273167 | 180224 | 70 | 265451 | 7200676 |
@@ -129,6 +137,9 @@ PSRAM 峰值约 545KB、常驻 423KB——这是"看起来占了很多空间"的
 - `create_status_bar()` + `notification_panel_create()`：约 −8KB；
 - `settings_menu_create()`（全屏 lv_menu + 暗色主题 + 开发者选项页）：**剩余大头，约 −55KB**，
   创建耗时也是最长的一段（I(1667)→I(2016)，约 350ms）。
+  ⚠ **2026-09 实测修正**：按"去掉这一项前后直接对比"重测，它实际只占 **约 29KB**
+  （耗时 ≈310ms 无误）——残差估算把同期其它分配算进来了。懒加载落地实测见
+  `DONE_PLANS.md` 第 44 点。
 
 即：**开机常驻 UI 对象 ≈ 105KB 内部 RAM（= DMA 池）**，这才是"V_RES/10 放不下"的根本原因；
 封面加载只是恰好与它同时期发生，被误记为凶手。
@@ -195,7 +206,7 @@ E (1788) diskio_sdmmc: sdmmc_read_blocks failed (0x101)
 | **P0 ✅ 已实施** | 把 `sdkconfig.defaults.releasecandidate` 的 `CONFIG_HEAP_POISONING_COMPREHENSIVE` 改为 `DISABLED`（与 debug 对齐）——实测验证见 §6 | 实测内部 RAM **+18~28KB**、DMA 池 **+23KB**，跳曲与定时器问题同时消失 | 失去"释放时立即报 CORRUPT HEAP + 调用栈"能力；需要抓堆破坏时按注释临时开回 |
 | **P1** | 降低 `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`（16384 → 4096/2048）：让 LVGL 小对象落 PSRAM | 内部 RAM 最多 **+80~100KB** | PSRAM 访问延迟高于内部 RAM，需实测列表滚动帧率；建议只降阈值而非全量搬迁 |
 | **P2** | LVGL 内存分配改走自定义 `LV_MEM_CUSTOM_ALLOC`（按大小分流：小对象内部、大对象 PSRAM，或反选）+ 统计 | 精确可控，且能直接量出"LVGL 到底占多少" | 需要改 lv_conf 注入点 |
-| **P3** | 懒创建重对象：`settings_menu`（约 55KB）与 `notification_panel` 改为首次打开时创建 | 开机常驻内部 RAM **+50KB 以上** | 首次打开设置会有一帧延迟（可配合 loading） |
+| **P3 ✅ 部分已实施** | 懒创建重对象：`settings_menu` 改为**分级懒加载**（外壳/根页面首次打开菜单时建、子页首次进入才建，`DONE_PLANS.md` 第 44 点）；`notification_panel`（约 8KB）未做 | 实测开机常驻内部 RAM / DMA 各 **+29KB**、主界面提前 **305ms**（⚠ 本节早先按残差估算的"约 55KB"偏大，实测为 29KB） | 首次打开设置菜单 44ms、首次进入某子页一次构建（实测无感知卡顿） |
 | **P4** | 保持 `V_RES/10` 的判定基线：`dma free ≥ 8~10KB` 且 `largest ≥ 4KB`（后者保证 SD 512B 与 4KB 内部栈都能分配） | 防止再次踩线 | — |
 
 ---

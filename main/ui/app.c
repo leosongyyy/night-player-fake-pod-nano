@@ -2,7 +2,6 @@
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/notification_panel.h"
-#include "ui/settings_menu.h"
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/audio.h"
@@ -184,10 +183,10 @@ void app_ui_create(void)
     ESP_LOGI(TAG, "Create notification panel");
     notification_panel_create(status_bar);
 
-    ESP_LOGI(TAG, "Create settings menu");
-    /* 全屏设置菜单（lv_menu，暗色主题）：最后创建 → 覆盖在所有界面之上，
-       由通知栏的设置按钮打开，初始隐藏 */
-    settings_menu_create();
+    /* ⚠ 全屏设置菜单**不在开机时创建**（懒加载，见 ui/settings_menu.h）：
+       它常驻实测约 29KB 内部 RAM、构建约 310ms，改为首次点开设置时创建，
+       开机主界面因此提前约 305ms 出现、并多出约 29KB 内部 RAM 与 DMA 余量。
+       其层级（屏幕层最上）依然成立——首次打开必定晚于本函数创建的一切。 */
 }
 
 void app_status_set_page(uint8_t tab_index)

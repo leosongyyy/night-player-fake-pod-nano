@@ -1,6 +1,6 @@
 # 已完成的计划
 
-这里存放已完成的计划的记录。
+这里存放FUTURE_PLAN中已完成的计划的记录。非FUTURE_PLAN中的任务不存放于此。若产生经验教训，建议单独开一个文件存放。
 
 ## 1. 配置存储（NVS）✅ 已完成
 
@@ -1310,6 +1310,115 @@ LVGL 默认行为，重建时保留 act_time，所以看不出问题）。修法
 - 速度配置的键名一度用过 `clkwheel_fast`（bool 语义，1 = 圈数减半 = 现在的
   "极速"），因功能未发布，合并时直接改为 `clkwheel_spd`（uint8 档位），
   不保留兼容读取。
+
+## 44. 开机路径优化：① 开机封面提前点亮（LVGL 提前启动）+ ② 设置菜单分级懒加载 ✅ 已完成
+
+> 需求来源：用户提问"目前开机在什么时候启动 LVGL？是否可以提前启动 LVGL，先只绘制
+> 一个默认封面，等初始化完成后再进入主界面"；② 来自 `FUTURE_PLAN.md` 第 34 点的
+> 修复优先级 ②"懒创建 `settings_menu`"。
+
+### 44.1 实测基线（debug / COM5，ESP_LOG 时间戳 = 芯片启动后 ms）
+
+| 时刻 | 阶段（改动前） |
+|---|---|
+| 404–599 | `display_init`（含 0x11 SLEEP OUT 120ms 等待），全黑、亮度 0 |
+| 599–641 | touch（控制器异步） |
+| 650–772 | battery + audio + EQ |
+| 779–819 | pldata + button |
+| 828–947 | SD 挂载（120GB 卡） |
+| 957–1008 | `lvgl_port_init`（绘制缓冲 2×41KB DMA） |
+| 1014–1092 | 播放列表 mmap（172 目录 / 8965 首）+ player_ctrl |
+| 1102–1804 | **`app_ui_create` 约 700ms**（main_ui 1112–1394；状态栏+通知栏 1400–1455；**`settings_menu_create` 1457–1803 ≈ 310ms**） |
+| **1922** | **`Turn on display`（亮度 193）→ 屏幕第一次亮** |
+| 1960 | `App started` |
+
+### 44.2 ① 开机封面（LVGL 提前启动）
+
+- `lvgl_port_init()` 从"SD 之后"提前到 `display_init()` 之后**立刻**执行：它只依赖
+  面板句柄 + `config_store`（触摸句柄传 `NULL`，就绪后由异步 ready 回调补上）。
+- 紧随其后持 LVGL 锁 `boot_splash_show()`（`ui/boot_flow.c`：全屏黑底 + `DEFAULT_COVER_IMG`）
+  → `lv_refr_now()` → `display_set_brightness(用户亮度)`，把 touch/audio/pldata/SD 与
+  `app_ui_create` 的耗时全部藏在封面背后。**防白屏顺序与"亮度必须与刷屏同锁"两条约定未变。**
+- 封面复用 boot_flow 的 `s_root` 容器，`boot_flow_run()` 的任一分支（低电/无卡/提示扫描/
+  扫描中/无音乐/主界面）都会经 `boot_root_create()` 删除并替换，无需额外清理入口。
+- 行为差异：低电（<3.45V）时也会先亮封面约 1 秒再切低电警告屏（用户确认接受）。
+- 实测：**首次点亮 1922 → 704ms（省 1.22s）**，封面停留约 1.24s，进主界面时刻不变。
+
+### 44.3 ② 设置菜单分级懒加载
+
+- `ui/settings_menu.c` 改为**分级懒加载**：外壳（背景层 + lv_menu + header）+ 根页面在
+  **首次 `settings_menu_show()`** 时构建（实测 **44ms**）；6 个子页（睡眠定时器 / 屏幕
+  自动息屏 / 虚拟 ClickWheel / 按键帮助 / 关于 / 重新扫描）与"关于 → 开发者选项"
+  在**首次点进时**各构建一次。
+- 机制：`lazy_row_create()` 建入口行并挂 `lazy_page_row_cb`（user_data 传构建器表**下标**，
+  避免函数指针 ↔ `void*` 互转）→ 点击时 `builder()` 构建（幂等）再 `lv_menu_set_page()`，
+  与 LVGL 原生 `lv_menu_set_load_page_event` 行为一致（后者内部也只是 click → set_page），
+  并补齐 `CLICKABLE / 不滚动 / SCROLL_ON_FOCUS` 三个行标记。
+- 公开 API 收敛：删除 `settings_menu_create()`（`ui/app.c` 不再调用），打开菜单一律
+  `settings_menu_show()`；层级不变（首次打开必然晚于状态栏/通知栏/ClickWheel 创建）。
+- ⚠ **数值修正**：`IRAM_DMA_AUDIT.md` 早先按残差估算的"`settings_menu` ≈ 55KB"**偏大**，
+  2026-09 直接对比实测为 **约 29KB**（`ui:after app_ui_create` 内部 RAM 余量
+  27.6KB → 56.4KB、DMA 余量 19.9KB → 48.7KB），构建耗时约 310ms 无误。
+
+### 44.4 改动后实测（同一设备、同一张 8965 首卡）
+
+| 时刻 | 阶段 |
+|---|---|
+| 654 | `boot splash: default cover shown` |
+| **704** | **`Turn on display (boot splash)`（原 1922ms）** |
+| 1141–1498 | `app_ui_create` 约 357ms（原约 700ms） |
+| **1638** | **复核亮度 → 封面切主界面（原 1943ms，提前 305ms）** |
+| 1648 | `App started`（原 1960；复测 1658 / 1668ms，波动 ±20ms） |
+| 3452–3505 | 首次点开设置：`shell created (44ms)` → `settings menu shown` |
+| 19100 | `developer options page built`（关于页的子页，懒加载生效） |
+
+- 内存终态：`12-boot_flow+first_frame` 内部余量 **28.9KB → 58.3KB**、DMA **21.3KB → 50.5KB**；
+  SD 读无 `allocate_dma_buf` 失败、无坏曲误判；播放/封面/触摸全部正常。
+- `mem_trace` 阶段编号随初始化顺序重排：`03-display → 04-lvgl_port → 05-boot_splash →
+  06-touch → 07-battery → 08-audio → 09-pldata → 10-button → 11-sd → 12-boot_flow+first_frame`
+  （旧编号读数仍留在 `IRAM_DMA_AUDIT.md` 表内，已在该文件标注）。
+- 真机交互验证（COM5，用户操作）：
+  - 逐页进入 7 个页面并返回 → **无崩溃、无 assert、菜单立即出现**（"关于 → 开发者选项"
+    的懒构建在日志中有据：`developer options page built`）；
+  - 意外收获的强验证：用户点了「重新扫描 → 是，重新扫描」——**该页也是懒构建的**，
+    流程完整走通（`rescan_do_deinit` 停播放/卸载映射/擦头 → 重启 → 开机扫描 → 回到
+    主界面，重扫后 `playlist loaded: dirs=172 songs=8965` 曲库完好）；
+  - 事后给 7 个子页各加了一行 `xxx page built` 日志（便于后续核对懒加载时机），
+    该版本单独复测过一次完整开机：封面 705ms 点亮、`playlist loaded` 172 目录 /
+    8965 首、主界面 1658ms、无 assert。
+
+### 44.5 RC（releasecandidate）版实测复核（2026-09，全字体 + 极速封面）
+
+同一条路径在 RC 上单独跑了一轮（含完整 rescan 重启），**无 `E (` 错误、无 assert/看门狗/内存失败**：
+
+- 开机：封面 **845ms** 点亮（debug 705ms）、`playlist loaded: dirs=172 songs=8965`、
+  主界面 **1810ms**（debug 1638ms）、`App started` 1819ms。
+  ⚠ RC 整体比 debug 慢约 **170ms**（`display_init` 598→761ms、`app_ui_create` 368→420ms），
+  原因是全字体 + 极速封面让镜像从 1.3MB 涨到 4.3MB（XIP/字形查表更慢），与本改动无关。
+- 懒加载逐页验证（日志为证，未访问的页面**不会**被构建）：
+  `sleep timer` 8539ms → `screen off` 14783ms → `click wheel` 16799ms → 关闭菜单；
+  再开**无重建日志**（幂等命中）→ … → `about` 42736ms → `developer options` 43917ms →
+  `rescan` 51748ms；**"按键帮助"全程未打开，因此全程没有它的构建日志** ✓
+- 首次打开菜单外壳：**61ms**（debug 44ms，全字体字形度量更慢）。
+- rescan 全流程：`rescan confirmed` → 释放 cover/sleep 任务 → `rescan: stop playback,
+  invalidate playlist, restart` → 重启 → 开机走"需要扫描音乐"屏（`12-boot_flow+first_frame`
+  1261ms，此时**不建主界面**，内部 RAM 余 141KB）→ 用户点开始扫描 → 8.6s 扫完
+  `playlist loaded: dirs=172 songs=8965` → 主界面 10345ms → 封面/播放恢复。
+- 重启后内存：`12-boot_flow+first_frame` 内部 RAM **58.5KB** / DMA **50.8KB**（菜单未常驻）。
+
+### 44.6 未做 / 待评估
+
+- `notification_panel`（约 8KB）未懒加载：它是下拉控制中心的常驻部分，且与状态栏拖拽
+  事件耦合，收益小、改动面大。
+- 设置菜单省下的 29KB DMA 余量已足够把 LVGL 绘制缓冲从 `V_RES/10` 再调大（换更高帧率），
+  属 `FUTURE_PLAN` 第 34 点验收范围，本次未动。
+
+### 44.7 文档同步
+
+`AGENTS.md`（初始化顺序 + 开机封面说明）、`ideas_and_exps/BOOT_FLOW_SUMMARY.md`
+（4.6 节 + 第 6 节改动前后时间线）、`IRAM_DMA_AUDIT.md`（阶段编号重排说明 + 55KB→29KB 修正 +
+P3 标记完成）、`FUTURE_PLAN.md` 第 34 点（② 标记完成）。
+
 
 
 

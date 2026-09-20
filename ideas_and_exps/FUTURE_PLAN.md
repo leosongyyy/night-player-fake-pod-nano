@@ -1,7 +1,9 @@
 # 未来计划
 
 > 本文档用于存放想法、Bug分析记录和和未来计划  
-> 请将已完成的内容请移动到隔壁 DONE_PLANS.md 中，同一会话中所作的对同一个功能点的变更应该合并在一条记录里。
+> **只有本文档（`FUTURE_PLAN.md`）里出现过的内容，才可以写进 `DONE_PLANS.md` 中**——
+> 未在本文件登记过的临时改动/额外发挥，不做记录。若遇到踩坑，可以单独另起一个文档记录。
+> 已完成的内容从本文档移入隔壁 `DONE_PLANS.md`，同一会话中所作的对同一个功能点的变更应该合并在一条记录里。
 
 ## 23. 歌词显示
 
@@ -34,6 +36,9 @@
   - **真凶是 `app_ui_create()` 的 LVGL 控件对象**：`LV_MEM_CUSTOM=stdlib` + 阈值
     `SPIRAM_MALLOC_ALWAYSINTERNAL=16384` 让每笔 ≤16KB 的 `malloc` 都**强制落内部 RAM**，
     实测这一段吃掉 **105KB 内部 RAM、新增 1795 个分配块**（其中 `settings_menu` 最大，约 55KB）。
+    ⚠ **2026-09 二次实测修正**：按"关掉某一项前后直接对比"重测，`app_ui_create` 合计
+    约 **80KB**，其中 `settings_menu` 只有 **约 29KB**——"55KB"是按残差估算偏大
+    （见 `DONE_PLANS.md` 第 44 点）。
     此前"开机流程 126KB"其实是这份 UI 对象开销——只不过封面加载同期发生，被误记成了凶手。
   - **debug 与 releasecandidate 相差 18~28KB 内部 RAM，唯一配置差异是
     `CONFIG_HEAP_POISONING_COMPREHENSIVE=y`**（RC 独有，debug 早在 2026-09 已关）。
@@ -42,8 +47,10 @@
     → `sdmmc_cmd: allocate_dma_buf: not enough mem` → 读曲失败 → 判坏曲 → **开机跳曲**；
     同刻内部 RAM 最大连续块只有 **2804B**，而 `sleep_timer` 需要 4KB 内部栈
     → **睡眠定时器服务起不来**。
-- 修复优先级（按性价比）：① RC 关闭堆毒化（+18~28KB，零风险）；② 懒创建
-  `settings_menu` / `notification_panel`（+50KB 以上）；③ 调低
+- 修复优先级（按性价比）：① RC 关闭堆毒化（+18~28KB，零风险）；✅ ② **已完成（2026-09）**：
+  懒创建 `settings_menu`【实测 +29KB 内部 RAM/DMA、主界面提前 305ms；做法是把
+  `lvgl_port_init` 提前 + 开机封面 + 设置菜单分级懒加载，见 `DONE_PLANS.md` 第 44 点】，
+  `notification_panel`（约 8KB）未做、收益小；③ 调低
   `SPIRAM_MALLOC_ALWAYSINTERNAL` 让 LVGL 小对象落 PSRAM（+80~100KB，需实测滚动帧率）；
   ④ LVGL 自定义分配器按大小分流。
 - IRAM 侧仍待查的对象：LVGL 堆（`LV_MEM_CUSTOM=stdlib` + 几百个常驻控件/样式/缓存）、

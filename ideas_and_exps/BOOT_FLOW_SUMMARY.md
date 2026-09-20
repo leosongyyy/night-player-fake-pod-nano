@@ -29,7 +29,7 @@
   └─ 有卡 + 数据有效 ──────────▶ 常规界面
 ```
 
-决策函数为 `boot_flow_run()`，在 `lvgl_port_init()` 之后、持有 LVGL 锁时调用。它**只创建首屏并启动后台扫描任务/定时器，然后立即返回**（不阻塞），后续界面切换由 LVGL 定时器 / 按钮事件 / 扫描完成标志驱动。
+决策函数为 `boot_flow_run()`，在 `lvgl_port_init()` 之后、持有 LVGL 锁时调用。它**只创建首屏并启动后台扫描任务/定时器，然后立即返回**（不阻塞），后续界面切换由 LVGL 定时器 / 按钮事件 / 扫描完成标志驱动。开机封面 `boot_splash_show()` 由 `main.c` 在更早的 `display_init()` + `lvgl_port_init()` 之后持锁调用（见 4.6 与第 6 节）。
 
 ---
 
@@ -44,6 +44,7 @@
 | `main/CMakeLists.txt` | 注册 `ui/boot_flow.c` |
 
 ### 开机界面状态机（`boot_flow.c`）
+- `BOOT_ST_SPLASH`：开机封面（默认封面 `DEFAULT_COVER_IMG`，**屏幕最早点亮的那一屏**；由 `boot_splash_show()` 在 app_main 早期创建，随后被下面任一界面替换）
 - `BOOT_ST_LOW_BAT`：低电量警告屏（**停在此屏**）
 - `BOOT_ST_NO_SD`：无卡提示 + 清除扫描数据（**停在此屏**）
 - `BOOT_ST_PROMPT_SCAN`：提示扫描 + 开始扫描按钮
@@ -74,6 +75,13 @@
 ### 4.5 常规界面入口
 - `boot_enter_normal()` 先删除开机 UI 根容器（`s_root`），再调用 `app_ui_create()`（创建主界面 + 顶部状态栏 + 下拉通知栏）。
 
+### 4.6 开机封面（LVGL 提前启动 + 默认封面首屏，2026-09 增加）
+- **动机**：原来 LVGL 排在所有硬件（touch/audio/pldata/button/SD）之后启动，且首帧要等 `app_ui_create()` 完成才提交，实测屏幕到 **1922ms** 才第一次亮，之前一直是纯黑（用户感觉"按了没反应"）。
+- **做法**：`lvgl_port_init()` 提前到 `display_init()` 之后**立刻**执行（它只依赖面板句柄与 `config_store`，触摸句柄传 `NULL`、由异步 ready 回调补上），紧接着持 LVGL 锁调用 `boot_splash_show()`（全屏黑底 + 默认封面）→ `lv_refr_now()` → `display_set_brightness(用户亮度)`，然后才做其余硬件初始化。
+- **界面回收**：封面用的是同一个 `s_root` 容器，`boot_flow_run()` 的任一分支都会经 `boot_root_create()` 删除它并建自己的界面 → **无需额外清理代码**。
+- **不变的约定**：防白屏顺序（亮度 0 时先把整屏写满再置亮度）不变；亮度命令与刷屏必须在同一个 LVGL 锁内连续执行不变；低电（<3.45V）**仍会先显示封面**，约 1 秒后切到低电警告屏（用户确认可接受）。
+- **效果**：首次点亮从 **1922ms 提前到实测 704ms**（省约 1.2s），"进入主界面"的时刻不变（约 1.9s）——即封面会停留约 1.24 秒；内存终态与改动前几乎逐字节相同。
+
 ---
 
 ## 5. 验证结果（真机 COM12）
@@ -85,7 +93,62 @@
 
 ---
 
-## 6. 当前状态与后续
+## 6. 开机时间线实测（debug 版 / COM5，ESP_LOG 时间戳 = 芯片启动后 ms）
+
+改动**前**（LVGL 在所有硬件之后启动）实测：
+
+| 时刻 | 阶段 |
+|---|---|
+| 334 | `app_main` 开始（之前 ~330ms 是 ROM/bootloader/IDF） |
+| 404–599 | `display_init`（195ms，其中 120ms 是 0x11 SLEEP OUT 规格等待），全黑、亮度 0 |
+| 599–641 | `touch_init`（I2C 扫描；控制器初始化异步） |
+| 650–772 | battery + audio + EQ 恢复 |
+| 779–819 | pldata + button |
+| 828–947 | SD 挂载（119ms，120GB 卡） |
+| 957–1008 | **`lvgl_port_init`**（绘制缓冲 2×41KB DMA，内部 RAM 239,983 → 143,115） |
+| 1014–1092 | `boot_flow_run`：播放列表 mmap（172 目录 / **8965 首**）+ `player_controller_init` |
+| 1102–1804 | **`app_ui_create` ≈ 700ms**（main_ui 1112–1394；状态栏+通知栏 1400–1455；**settings_menu 1457–1803 = 346ms**） |
+| 1811–1885 | 进常规界面 + 首帧渲染 |
+| **1922** | **`Turn on display`（亮度 193）→ 屏幕第一次亮** |
+| 1960 | `App started` |
+
+改动**后**（第 1 步：LVGL 提前启动 + 开机封面；实测，同上设备/同一张 8965 首卡）：
+
+| 时刻 | 阶段 |
+|---|---|
+| 403–598 | `display_init` |
+| 598–648 | **`lvgl_port_init`**（提前到此处，48ms） |
+| 654 | `boot splash: default cover shown`（创建全屏黑底 + 默认封面） |
+| **704** | **`Turn on display (boot splash, brightness 193)` → 屏幕第一次亮（原来 1922ms，省 1.22s）** |
+| 709–1060 | touch / battery / audio / pldata / button / SD（全部在封面背后进行） |
+| 1070–1128 | 播放列表 mmap + `player_controller_init` |
+| 1147–1817 | `app_ui_create`（约 670ms） |
+| 1831 | `enter normal UI` |
+| **1943** | 复核亮度（`restore brightness 193`）→ 封面切换到主界面 |
+| 1960 | `App started`（与改动前相同） |
+
+- 封面停留时间 = 1943 − 704 ≈ **1.24 秒**；内存终态与改动前几乎逐字节相同（`12-boot_flow+first_frame` int free 28979 / dma 21263，改动前 28991 / 21275），SD 读无 `allocate_dma_buf` 失败、无坏曲误判。
+- 唯一的行为差异：低电（<3.45V）时也会先亮封面约 1 秒再切到低电警告屏（用户已确认接受）。
+
+改动**后**（第 2 步：再叠加**设置菜单分级懒加载**，见 `DONE_PLANS.md` 第 44 点）：
+
+| 时刻 | 阶段 |
+|---|---|
+| 654 | `boot splash: default cover shown` |
+| **704** | **屏幕第一次亮（不变）** |
+| 709–1064 | touch / battery / audio / pldata / button / SD |
+| 1151–1497 | **`app_ui_create` 约 357ms**（原约 700ms；`settings_menu` 已移出开机路径） |
+| **1638** | **复核亮度 → 封面切主界面（原 1943ms，再提前 305ms）** |
+| 1648 | `App started`（原 1960） |
+| 3452→3505 | 首次点开设置：`settings menu shell created (44 ms)` → `settings menu shown` |
+| 19100 | `developer options page built`（关于页子页，首次进入才构建） |
+
+- 内存终态：`12-boot_flow+first_frame` 内部 RAM 余量 **28.9KB → 58.3KB**、DMA 余量 **21.3KB → 50.5KB**（设置菜单实测约 **29KB**，`IRAM_DMA_AUDIT.md` 早先估的 55KB 偏大，已修正）。
+- 设置菜单 6 个子页在**首次点进时**各构建一次（真机逐页验证无卡顿、无崩溃）。
+
+---
+
+## 7. 当前状态与后续
 
 ### 已完成
 - [x] 开机电池电压检查（<3.2V 拒绝启动，展示当前电压 + 提示）

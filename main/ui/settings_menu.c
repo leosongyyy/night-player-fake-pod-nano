@@ -20,6 +20,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -102,6 +103,17 @@ _Static_assert(CONFIG_STORE_CW_SPEED_NORMAL == CLICK_WHEEL_SPEED_NORMAL &&
 
 /* 息屏档位子页的行对象（选中项高亮刷新用） */
 static lv_obj_t *s_screen_off_rows[SCREEN_OFF_STEP_COUNT] = { NULL };
+
+/* 子页句柄（**懒加载**：NULL = 尚未构建，首次进入该子页时才创建）。
+   动机见 settings_menu_show() 注释：整个菜单常驻需要约 55KB 内部 RAM、
+   构建耗时约 310ms，全部从开机路径上移除。 */
+static lv_obj_t *s_sleep_page      = NULL;   /* 睡眠定时器 */
+static lv_obj_t *s_screen_off_page = NULL;   /* 屏幕自动息屏 */
+static lv_obj_t *s_cw_page         = NULL;   /* 虚拟 ClickWheel */
+static lv_obj_t *s_help_page       = NULL;   /* 按键帮助 */
+static lv_obj_t *s_about_page      = NULL;   /* 关于 */
+static lv_obj_t *s_dev_page        = NULL;   /* 开发者选项（关于页的子页） */
+static lv_obj_t *s_rescan_page     = NULL;   /* 重新扫描 */
 
 /* ------------------------------------------------------------------ */
 /* 暗色主题应用                                                         */
@@ -644,12 +656,16 @@ static void dev_restart_row_cb(lv_event_t *e)
     }
 }
 
-/* 构建开发者选项子页，并在关于页最下方追加入口行。
-   两个功能均为"开机检查、重启生效"的运行时开关（config_store/NVS）：
+/* 构建开发者选项子页（**懒加载**：从关于页首次点进来时才构建）。
+   三个功能均为"开机检查、重启生效"的运行时开关（config_store/NVS）：
    电池电压日志对应 battery_logger_init 是否建任务，触摸测试白点对应
-   lvgl_port_init 末尾是否创建圆点。 */
-static void dev_options_page_build(lv_obj_t *about_page)
+   lvgl_port_init 末尾是否创建圆点，采样间隔对应日志写入周期。
+   入口行由 about_page_build() 挂在关于页最下方。 */
+static lv_obj_t *dev_page_build(void)
 {
+    if (s_dev_page != NULL) {
+        return s_dev_page;
+    }
     lv_obj_t *dev_page = lv_menu_page_create(s_menu, (char *)"开发者选项");
     page_style_apply(dev_page);
 
@@ -691,21 +707,79 @@ static void dev_options_page_build(lv_obj_t *about_page)
     dev_refresh_interval();
     dev_refresh_touch();
 
-    /* 关于页最下方：开发者选项入口（本页最后一行） */
-    lv_obj_t *dev_entry = menu_row_create(about_page, LV_SYMBOL_WARNING,
-                                          "开发者选项", NULL);
-    lv_menu_set_load_page_event(s_menu, dev_entry, dev_page);
-
+    s_dev_page = dev_page;
     ESP_LOGI(TAG, "developer options page built (battery log / interval / "
                   "touch test)");
+    return dev_page;
 }
 
 /* ------------------------------------------------------------------ */
-/* 页面构建                                                             */
+/* 页面构建（子页懒加载）                                                */
 /* ------------------------------------------------------------------ */
 
+/* ⚠ 整个设置菜单常驻**实测约 29KB 内部 RAM（= DMA 池）、构建耗时约 310ms**
+   （`IRAM_DMA_AUDIT.md` 早期按残差估的"约 55KB"偏大，2026-09 实测修正为
+   29KB：`ui:after app_ui_create` 的内部 RAM 从 27.6KB 余量变回 56.4KB）。
+   为把它从**开机路径**上彻底移除，页面改为**分级懒加载**：
+     - 外壳（背景层 + lv_menu + header）与根页面：首次打开菜单时构建
+       （实测 44ms）；
+     - 6 个子页（+ 关于页里的"开发者选项"）：**首次点进该子页时**才构建。
+   实测效果：开机主界面提前约 305ms 出现（1943 → 1638ms），且未打开过设置时
+   常驻内部 RAM / DMA 各多出约 29KB（SD 读余量同步变宽松）。 */
+
+/* 各子页构建器（**幂等**：已构建则直接返回句柄）。定义在本节末尾，
+   这里先统一前向声明（root_page_build / about_page_build 会引用）。 */
+static lv_obj_t *sleep_page_build(void);
+static lv_obj_t *screen_off_page_build(void);
+static lv_obj_t *cw_page_build(void);
+static lv_obj_t *help_page_build(void);
+static lv_obj_t *about_page_build(void);
+static lv_obj_t *dev_page_build(void);
+static lv_obj_t *rescan_page_build(void);
+
+/* 懒加载入口表：行的事件 user_data 传**下标**（C 不允许函数指针与 void*
+   互转，故不走"指针塞 user_data"那条路） */
+#define LAZY_ENTRY_MAX  8
+static lv_obj_t *(*s_lazy_builders[LAZY_ENTRY_MAX])(void);
+static uint8_t s_lazy_count = 0;
+
+/* 子页入口行点击（懒加载）：首次点击才构建子页，随后按 lv_menu 的常规
+   方式加载。等价于 LVGL 的 lv_menu_set_load_page_event（它内部也只是
+   click → lv_menu_set_page），只多一步"按需构建"。 */
+static void lazy_page_row_cb(lv_event_t *e)
+{
+    uint8_t idx = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_obj_t *page = s_lazy_builders[idx]();
+    if (page != NULL) {
+        lv_menu_set_page(s_menu, page);
+    }
+}
+
+/* 创建"子页入口行"（parent 内）：点击时才构建子页。
+   行标记与 lv_menu_set_load_page_event 保持一致（可点击 + 不滚动 +
+   聚焦时滚动），保证视觉与滚动行为不变。 */
+static lv_obj_t *lazy_row_create(lv_obj_t *parent, const char *icon,
+                                 const char *title, lv_obj_t **status_out,
+                                 lv_obj_t *(*build)(void))
+{
+    lv_obj_t *row = menu_row_create(parent, icon, title, status_out);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+
+    if (s_lazy_count >= LAZY_ENTRY_MAX) {
+        ESP_LOGW(TAG, "lazy entry table full, row '%s' cannot open page", title);
+        return row;
+    }
+    s_lazy_builders[s_lazy_count] = build;
+    lv_obj_add_event_cb(row, lazy_page_row_cb, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)s_lazy_count);
+    s_lazy_count++;
+    return row;
+}
+
 /* 根页面：6 个功能行（睡眠定时器 / 屏幕自动息屏 / 虚拟 ClickWheel /
-   按键帮助 / 关于 / 重新扫描），除 ClickWheel 外均为子页入口。
+   按键帮助 / 关于 / 重新扫描），全部为子页入口（子页懒加载，见上）。
    ⚠ 行数增加后根页面内容高度超过可视区（实测 6 行需 426px、可视 357px），
    页面会出现滚动条——这是预期行为，不再压缩行距。 */
 static void root_page_build(void)
@@ -715,8 +789,32 @@ static void root_page_build(void)
     s_root_page = lv_menu_page_create(s_menu, (char *)"设置");
     page_style_apply(s_root_page);
 
-    /* 1. 睡眠定时器：子菜单 = 开机默认开启 + 清醒感知开关，
-       底部放清醒感知与休眠行为说明 */
+    /* 入口行：点击时才构建对应子页 */
+    lazy_row_create(s_root_page, LV_SYMBOL_POWER, "睡眠定时器",
+                    NULL, sleep_page_build);
+    lazy_row_create(s_root_page, LV_SYMBOL_EYE_CLOSE, "屏幕自动息屏",
+                    &s_screen_off_status, screen_off_page_build);
+    /* 入口行：**不显示右侧状态**（开关状态在子页第一行「开启」里看），
+       标题直接点明是"选项"页——2026-09-11 用户要求 */
+    lazy_row_create(s_root_page, LV_SYMBOL_REFRESH, "虚拟 ClickWheel 选项",
+                    NULL, cw_page_build);
+    lazy_row_create(s_root_page, LV_SYMBOL_KEYBOARD, "按键帮助",
+                    NULL, help_page_build);
+    lazy_row_create(s_root_page, LV_SYMBOL_SETTINGS, "关于",
+                    NULL, about_page_build);
+    lazy_row_create(s_root_page, LV_SYMBOL_REFRESH, "重新扫描",
+                    NULL, rescan_page_build);
+
+    menu_refresh_root();
+}
+
+/* 1. 睡眠定时器子页：开机默认开启 + 清醒感知开关，
+   底部放清醒感知与休眠行为说明 */
+static lv_obj_t *sleep_page_build(void)
+{
+    if (s_sleep_page != NULL) {
+        return s_sleep_page;
+    }
     lv_obj_t *sleep_page = lv_menu_page_create(s_menu, (char *)"睡眠定时器");
     page_style_apply(sleep_page);
 
@@ -750,11 +848,18 @@ static void root_page_build(void)
         "睡眠定时到点后，播放器只进入休眠状态（所有外设关闭，低功耗待机，"
         "同时按下两个按键即可唤醒），这是硬件的限制。"
         "如果要彻底关机省电，请在第二天早上长按 3 秒上键手动关机。");
-    lv_obj_t *row1 = menu_row_create(s_root_page, LV_SYMBOL_POWER,
-                                     "睡眠定时器", NULL);
-    lv_menu_set_load_page_event(s_menu, row1, sleep_page);
+    menu_refresh_root();   /* 本页两行的开关状态 */
+    s_sleep_page = sleep_page;
+    ESP_LOGI(TAG, "sleep timer page built");
+    return sleep_page;
+}
 
-    /* 2. 屏幕自动息屏：子页选择档位 */
+/* 2. 屏幕自动息屏子页：选择档位 */
+static lv_obj_t *screen_off_page_build(void)
+{
+    if (s_screen_off_page != NULL) {
+        return s_screen_off_page;
+    }
     lv_obj_t *screen_off_page = lv_menu_page_create(s_menu, (char *)"屏幕自动息屏");
     page_style_apply(screen_off_page);
     for (size_t i = 0; i < SCREEN_OFF_STEP_COUNT; i++) {
@@ -766,15 +871,21 @@ static void root_page_build(void)
         s_screen_off_rows[i] = opt;
     }
     menu_refresh_screen_off_sel();
-    lv_obj_t *row3 = menu_row_create(s_root_page, LV_SYMBOL_EYE_CLOSE,
-                                     "屏幕自动息屏", &s_screen_off_status);
-    lv_menu_set_load_page_event(s_menu, row3, screen_off_page);
+    s_screen_off_page = screen_off_page;
+    ESP_LOGI(TAG, "screen off page built");
+    return screen_off_page;
+}
 
-    /* 3. 虚拟 ClickWheel：子菜单（长列表右下角速滑按钮）。
-        原先是一行"点击即开关"，现改为**子页入口**（本页三项）：
-          开启/关闭、滑动方向（正常/反转）、速度（普通/快速/极速，点击循环）；
-        三项均点击立即生效（写 NVS + 直接驱动 click_wheel，无需重启）。
-        图标与按钮本身一致（LV_SYMBOL_REFRESH） */
+/* 3. 虚拟 ClickWheel 子页（长列表右下角速滑按钮）。
+    原先是一行"点击即开关"，现改为**子页入口**（本页三项）：
+      开启/关闭、滑动方向（正常/反转）、速度（普通/快速/极速，点击循环）；
+    三项均点击立即生效（写 NVS + 直接驱动 click_wheel，无需重启）。
+    图标与按钮本身一致（LV_SYMBOL_REFRESH） */
+static lv_obj_t *cw_page_build(void)
+{
+    if (s_cw_page != NULL) {
+        return s_cw_page;
+    }
     lv_obj_t *cw_page = lv_menu_page_create(s_menu, (char *)"虚拟 ClickWheel");
     page_style_apply(cw_page);
 
@@ -800,15 +911,20 @@ static void root_page_build(void)
     menu_note_row_create(cw_page,
         "开启后，目录/歌曲列表超过 10 页（72 条）时右下角出现黄色圆钮："
         "按住并在屏幕上画圈即可快速翻页。");
-    /* 入口行：**不显示右侧状态**（开关状态在子页第一行「开启」里看），
-        标题直接点明是"选项"页——2026-09-11 用户要求 */
-    lv_obj_t *cw_row = menu_row_create(s_root_page, LV_SYMBOL_REFRESH,
-                                       "虚拟 ClickWheel 选项", NULL);
-    lv_menu_set_load_page_event(s_menu, cw_row, cw_page);
+    menu_refresh_root();   /* 本页三行状态（开关 / 方向 / 速度） */
+    s_cw_page = cw_page;
+    ESP_LOGI(TAG, "click wheel page built");
+    return cw_page;
+}
 
-    /* 4. 按键帮助：子页静态说明。
-       按键命名用社区通用说法：上键 = A 键（电源键），下键 = B 键；
-       "关机"指长按上键进入关机流程（约 3 秒彻底断电）。 */
+/* 4. 按键帮助子页：静态说明。
+    按键命名用社区通用说法：上键 = A 键（电源键），下键 = B 键；
+    "关机"指长按上键进入关机流程（约 3 秒彻底断电）。 */
+static lv_obj_t *help_page_build(void)
+{
+    if (s_help_page != NULL) {
+        return s_help_page;
+    }
     lv_obj_t *help_page = lv_menu_page_create(s_menu, (char *)"按键帮助");
     page_style_apply(help_page);
     menu_text_row_create(help_page,
@@ -817,26 +933,39 @@ static void root_page_build(void)
     menu_text_row_create(help_page,
         "息屏状态：\n上键 短按 播放/暂停\n下键 短按 下一曲\n"
         "下键 长按 上一曲\n两个按键一起按下 亮屏");
-    lv_obj_t *row4 = menu_row_create(s_root_page, LV_SYMBOL_KEYBOARD,
-                                     "按键帮助", NULL);
-    lv_menu_set_load_page_event(s_menu, row4, help_page);
+    s_help_page = help_page;
+    ESP_LOGI(TAG, "key help page built");
+    return help_page;
+}
 
-    /* 5. 关于：子页作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
-        最下方追加"开发者选项"入口子页（dev_options_page_build 内处理） */
+/* 5. 关于子页：作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
+    最下方追加"开发者选项"入口子页（同样懒加载，见 dev_page_build） */
+static lv_obj_t *about_page_build(void)
+{
+    if (s_about_page != NULL) {
+        return s_about_page;
+    }
     lv_obj_t *about_page = lv_menu_page_create(s_menu, (char *)"关于");
     page_style_apply(about_page);
     menu_text_row_create(about_page,
         "FakePodNanoNightPlayer\n基于 NightPlayer 的第三方固件");
     menu_text_row_create(about_page, "作者：ZYFDroid\nAI 协作：DeepSeek");
     menu_text_row_create(about_page, "固件版本：" CONFIG_FIRMWARE_VERSION_STRING);
-    lv_obj_t *row5 = menu_row_create(s_root_page, LV_SYMBOL_SETTINGS,
-                                     "关于", NULL);
-    lv_menu_set_load_page_event(s_menu, row5, about_page);
-    /* 开发者选项子页：在关于页最下方挂入口行（本页最后一行） */
-    dev_options_page_build(about_page);
+    /* 开发者选项：在关于页最下方挂入口行（本页最后一行），同样懒加载 */
+    lazy_row_create(about_page, LV_SYMBOL_WARNING, "开发者选项",
+                    NULL, dev_page_build);
 
-    /* 6. 重新扫描：子页确认（是=停止播放+数据无效化+重启重新扫描；
-       否=返回上一级） */
+    s_about_page = about_page;
+    ESP_LOGI(TAG, "about page built");
+    return about_page;
+}
+
+/* 6. 重新扫描子页：确认（是=停止播放+数据无效化+重启重新扫描；否=返回上一级） */
+static lv_obj_t *rescan_page_build(void)
+{
+    if (s_rescan_page != NULL) {
+        return s_rescan_page;
+    }
     lv_obj_t *rescan_page = lv_menu_page_create(s_menu, (char *)"重新扫描");
     page_style_apply(rescan_page);
     menu_note_row_create(rescan_page,
@@ -851,18 +980,19 @@ static void root_page_build(void)
                                           "否，取消", NULL);
     lv_obj_add_flag(rescan_no, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(rescan_no, rescan_cancel_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *row6 = menu_row_create(s_root_page, LV_SYMBOL_REFRESH,
-                                     "重新扫描", NULL);
-    lv_menu_set_load_page_event(s_menu, row6, rescan_page);
-
-    menu_refresh_root();
+    s_rescan_page = rescan_page;
+    ESP_LOGI(TAG, "rescan page built");
+    return rescan_page;
 }
 
 /* ------------------------------------------------------------------ */
 /* 对外接口                                                             */
 /* ------------------------------------------------------------------ */
 
-void settings_menu_create(void)
+/* 构建菜单外壳（背景层 + lv_menu + header + 根页面），**仅**由首次
+   settings_menu_show() 调用（懒加载，见文件头与 settings_menu_show 注释）。
+   各子页不在这里构建，由 lazy_row_create 的行在首次点进时构建。 */
+static void settings_menu_shell_create(void)
 {
     if (s_menu != NULL) {
         return;
@@ -870,7 +1000,8 @@ void settings_menu_create(void)
 
     /* 全屏黑色背景层：盖住顶层状态栏（边缘露出的区域显示纯黑），
        同时接收"面板外"的点击（边缘点击 = 返回上一级/关闭菜单）。
-       最后创建 → 位于屏幕最上层；默认隐藏，与面板一起 show/hide */
+       ⚠ 本层必须比状态栏/通知栏**晚**创建才能盖住它们：现在改为首次打开
+       菜单时创建，天然晚于它们（也晚于 ClickWheel），层级关系不变 */
     s_menu_bg = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_menu_bg, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     lv_obj_set_pos(s_menu_bg, 0, 0);
@@ -918,14 +1049,23 @@ void settings_menu_create(void)
     lv_obj_add_flag(s_menu_bg, LV_OBJ_FLAG_HIDDEN);
     s_visible = false;
 
-    ESP_LOGI(TAG, "settings menu created (lv_menu, dark theme, margin h=%d v=%d)",
-             MENU_MARGIN_HOR, MENU_MARGIN_VER);
+    ESP_LOGI(TAG, "settings menu shell created (lv_menu, dark theme, "
+                  "margin h=%d v=%d)", MENU_MARGIN_HOR, MENU_MARGIN_VER);
 }
 
 void settings_menu_show(void)
 {
+    /* 懒加载：整个菜单不再开机常驻（见文件头"页面构建"注释）。首次打开时
+       在这里建"外壳 + 根页面"（实测 44ms），各子页在首次点进时才建——开机
+       因此省下约 29KB 内部 RAM（= DMA 池）与约 305ms 的主界面等待。 */
     if (s_menu == NULL) {
-        return;
+        int64_t t0 = esp_timer_get_time();
+        settings_menu_shell_create();
+        ESP_LOGI(TAG, "settings menu created on first open (%d ms)",
+                 (int)((esp_timer_get_time() - t0) / 1000));
+    }
+    if (s_menu == NULL) {
+        return;   /* 创建失败（理论上不会；LVGL 分配失败会直接 assert） */
     }
     /* 隐藏主界面（lv_tabview）：底层页面（尤其播放页 460x460 封面大图）
        不再参与重绘，消除菜单滚动时被底层大图拖慢的卡顿。

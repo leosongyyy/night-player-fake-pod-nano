@@ -5,6 +5,19 @@ extern "C" {
 #endif
 
 /**
+ * @brief 开机封面（splash）：显示默认封面，让屏幕尽早亮起来
+ *
+ * 在 app_main **早期**调用：display_init() + lvgl_port_init() 之后、
+ * touch/audio/pldata/button/SD 初始化之前，**必须持有 LVGL 锁**。
+ * 本函数只创建"全屏黑底 + 默认封面（DEFAULT_COVER_IMG）"，调用方随后
+ * lv_refr_now() 提交首帧、再 display_set_brightness() 点亮（防白屏顺序不变）。
+ *
+ * 之后 boot_flow_run() 的任一分支都会删除本封面容器并替换为对应界面
+ * （低电 / 无卡 / 提示扫描 / 扫描中 / 无音乐 / 常规主界面），无需额外清理。
+ */
+void boot_splash_show(void);
+
+/**
  * @brief 开机流程控制器（电池 / SD 卡 / 播放列表 三重检查）
  *
  * 在 lvgl_port_init() 之后、持有 LVGL 锁的情况下调用。本函数**只创建首屏
