@@ -103,6 +103,33 @@ uint32_t playlist_song_count(void)
     return last->song_start + last->song_count;
 }
 
+bool playlist_dir_is_pl(const char *name)
+{
+    if (name == NULL) {
+        return false;
+    }
+    size_t len = strlen(name);
+    /* 只看结尾 ".pl"（与 dir_list.c 的行图标判定、扫描器 is_pl_file 一致） */
+    return (len >= 3 && strcasecmp(name + len - 3, ".pl") == 0);
+}
+
+uint32_t playlist_song_count_excluding_pl(void)
+{
+    if (s_hdr == NULL || s_dirs == NULL) {
+        return 0;
+    }
+    /* 逐目录累加并跳过 .pl 歌单目录：目录区里文件夹与歌单条目是交错的
+       （见 playlist_dir_is_pl 注释），不能只取最后一个目录的终点 */
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < s_hdr->dir_count; i++) {
+        const char *name = playlist_get_string(s_dirs[i].name_str);
+        if (!playlist_dir_is_pl(name)) {
+            total += s_dirs[i].song_count;
+        }
+    }
+    return total;
+}
+
 const playlist_dir_entry_t *playlist_dir_at(uint32_t i)
 {
     return (s_dirs && i < s_hdr->dir_count) ? &s_dirs[i] : NULL;

@@ -122,6 +122,13 @@ name_str(4) + path_str(4)
 - `playlist_init()`：校验分区有效 → `esp_partition_mmap` 整个分区 → 解析各分区指针。
 - 目录/歌曲/字符串均为**只读指针**访问，数据留在 Flash，不占堆 RAM。
 - `playlist_build_path()`：拼接 `/sdcard` + path + `/` + name 得到完整播放路径。
+- `playlist_dir_is_pl(name)`：按结尾 `.pl`（忽略大小写）判断该目录条目是不是歌单，
+  与 `dir_list.c` 的行图标判定、扫描器 `is_pl_file` 语义一致。
+- `playlist_song_count_excluding_pl()`：**不含歌单目录**的歌曲总数（文件夹里的真实曲目数）。
+  ⚠ 目录区里**文件夹目录与歌单目录是交错的**（每个目录先写本目录的 `.pl` 条目、再写音频
+  文件条目），所以不能像 `playlist_song_count()` 那样只取最后一个目录的终点，必须逐目录
+  累加并跳过 `.pl`。用途：设置菜单「重新扫描」行右侧显示当前曲库规模。
+  实测同一张卡：`song_count()=8965`（含歌单引用）→ `song_count_excluding_pl()=5781`。
 
 ---
 

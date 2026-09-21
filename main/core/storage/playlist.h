@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -54,6 +55,26 @@ uint32_t playlist_dir_count(void);
 
 /** @brief 歌曲总数（= 最后一个目录的 song_start + song_count，无目录时为 0） */
 uint32_t playlist_song_count(void);
+
+/**
+ * @brief 判断目录/歌单条目是否是 .pl 文本歌单（只看名字后缀，忽略大小写）
+ *
+ * 扫描器为每个 .pl 文件建一个"歌单目录"，其歌曲是**对文件夹歌曲的引用**，
+ * 与文件夹目录里的歌曲条目重复，统计曲库规模时需排除。
+ */
+bool playlist_dir_is_pl(const char *name);
+
+/**
+ * @brief 歌曲总数（**不含歌单目录**，即只统计文件夹里的歌曲）
+ *
+ * 目录区里文件夹目录与歌单目录是**交错**的（每个目录先写本目录的 .pl 歌单
+ * 条目、再写本目录的音频文件条目），故不能只取最后一个目录的终点，需逐
+ * 目录累加（排除 .pl 歌单目录）。目录数 ≤ 5457、每项仅一次后缀比较，
+ * 单次调用开销很小；用于设置菜单显示曲库规模。
+ *
+ * @return 非歌单目录的歌曲条目总数；未加载播放列表时为 0
+ */
+uint32_t playlist_song_count_excluding_pl(void);
 
 /** @brief 取第 i 个目录条目（i < playlist_dir_count()） */
 const playlist_dir_entry_t *playlist_dir_at(uint32_t i);

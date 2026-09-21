@@ -5,6 +5,7 @@
 #include "core/hardware/display.h"
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
+#include "core/storage/playlist.h"
 #include "core/storage/playlist_store.h"
 #include "core/ui/click_wheel.h"
 #include "core/ui/lvgl_port.h"
@@ -81,6 +82,8 @@ static lv_point_t s_bg_press_point = { 0, 0 };
 static lv_obj_t *s_sleep_def_on_status = NULL;   /* 睡眠定时器（开机默认开启） */
 static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
 static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
+static lv_obj_t *s_rescan_count_status = NULL;   /* 重新扫描（当前歌曲总数，
+                                                    不含 .pl 歌单目录；进入菜单时统计一次） */
 /* ⚠ 虚拟 ClickWheel 的根行**不再显示开/关状态**（2026-09-11 用户要求）：
    行标题直接写「虚拟 ClickWheel 选项」，开启状态在子页第一行「开启」里看 */
 
@@ -269,6 +272,27 @@ static void screen_off_format(uint32_t sec, char *buf, size_t size)
     } else {
         snprintf(buf, size, "%u 秒", (unsigned)sec);
     }
+}
+
+/* 刷新"重新扫描"行右侧的当前歌曲总数（**不含 .pl 歌单目录**的重复计数）。
+   ⚠ 必须在**菜单显示时**统计：播放列表（playlist mmap）由 boot_flow 初始化，
+   而根页面在 settings_menu_show() 里也是懒加载创建的——首次打开设置菜单时
+   播放列表理论上已就绪，但仍用 s_rescan_count_done 保证"整个会话只统计
+   一次"（曲库只在重新扫描后变化，而重新扫描必然重启，数字不会失真）。 */
+static bool s_rescan_count_done = false;
+
+static void rescan_count_refresh_once(void)
+{
+    if (s_rescan_count_status == NULL || s_rescan_count_done) {
+        return;
+    }
+    uint32_t n = playlist_song_count_excluding_pl();
+    char buf[16];
+    snprintf(buf, sizeof(buf), "当前 %u 首", (unsigned)n);
+    lv_label_set_text(s_rescan_count_status, buf);
+    s_rescan_count_done = true;
+    ESP_LOGI(TAG, "rescan row song count (excluding .pl playlists): %u",
+             (unsigned)n);
 }
 
 /* 刷新根页面各行的状态文字（打开菜单/开关切换后调用） */
@@ -802,8 +826,9 @@ static void root_page_build(void)
                     NULL, help_page_build);
     lazy_row_create(s_root_page, LV_SYMBOL_SETTINGS, "关于",
                     NULL, about_page_build);
+    /* 右侧状态 = 当前歌曲总数（不含 .pl 歌单目录），显示菜单时统计一次 */
     lazy_row_create(s_root_page, LV_SYMBOL_REFRESH, "重新扫描",
-                    NULL, rescan_page_build);
+                    &s_rescan_count_status, rescan_page_build);
 
     menu_refresh_root();
 }
@@ -1086,6 +1111,9 @@ void settings_menu_show(void)
         lv_menu_set_page(s_menu, s_root_page);
     }
     menu_refresh_root();
+    /* 重新扫描行的歌曲总数：整个会话只在首次显示菜单时统计一次
+       （见 rescan_count_refresh_once 注释） */
+    rescan_count_refresh_once();
 
     lv_obj_clear_flag(s_menu_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_menu, LV_OBJ_FLAG_HIDDEN);
