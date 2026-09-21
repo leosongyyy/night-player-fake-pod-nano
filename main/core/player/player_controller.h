@@ -66,6 +66,9 @@ typedef struct {
     char song_name[256];          /* 当前歌曲文件名（含扩展名） */
     char title[128];              /* 歌曲标题（来自 .npd 元数据，无则同 song_name） */
     char subtitle[128];           /* 副标题 = 艺术家 - 专辑（来自 .npd，无则同 dir_name） */
+    bool has_replay_gain;         /* 当前曲是否有回放增益数据（无 .npd 元数据 = false） */
+    uint32_t replay_gain_q16;     /* 当前曲的回放增益（16.16 定点，65536 = 1.0 = 0dB）；
+                                     与"回放增益总开关"无关，开关状态见 config_store */
 } player_controller_status_t;
 
 /**

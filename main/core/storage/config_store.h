@@ -47,6 +47,10 @@ extern "C" {
  *     - 电池电压采样日志 battery_log（bool，默认关）+ 采样间隔
  *       batt_log_min（分钟，默认 5，可调 1/2/3/5/10，见 core/utils/battery_logger）
  *     - 触摸测试白点 touch_test（bool，默认关，见 core/ui/touch_test）
+ *   - 回放增益总开关 replay_gain（bool，默认**开**）：关=所有歌曲按 0dB
+ *     播放（.npd 元数据里的增益值不再应用），开=按元数据增益应用。播放设置页
+ *     第 8 格切换并持久化；控制器轮询到变化后重新应用到音频链路（见
+ *     player_controller 的开关同步），设置页底部文字随之显示"关闭"
  *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
@@ -101,6 +105,7 @@ typedef enum {
 #define CONFIG_STORE_BATT_LOG_MIN_DEFAULT 5u  /* 日志采样间隔默认 5 分钟 */
 #define CONFIG_STORE_BATT_LOG_MIN_MAX     120u /* 日志间隔上限（分钟，防越界） */
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
+#define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
 
 /** 配置变更回调（在调用 set_xxx 的线程上下文中同步执行） */
 typedef void (*config_store_cb_t)(void *ctx);
@@ -164,6 +169,10 @@ uint8_t config_store_get_battery_log_min(void);
 
 /** @brief 触摸测试白点开关（true=开机创建跟随手指的白色圆点；默认关） */
 bool config_store_get_touch_test(void);
+
+/** @brief 回放增益总开关（true=按 .npd 元数据增益应用；false=全部按 0dB 播放。
+ *          默认开） */
+bool config_store_get_replay_gain(void);
 
 /** @brief 关机前是否在播放（true=播放中，开机自动续播；false=已暂停/停止，
  *          开机只恢复现场不自动播放）。无 NVS 记录时默认 true（保持旧行为）。 */
@@ -253,6 +262,11 @@ void config_store_set_battery_log_min(uint8_t minutes);
 /** @brief 设置触摸测试白点开关并持久化（开发者选项；开机检查，重启生效，
  *          仅持久化不通知回调） */
 void config_store_set_touch_test(bool on);
+
+/** @brief 设置回放增益总开关并持久化（播放设置页第 8 格）。
+ *          立即生效：音频链路由控制器轮询到变化后重新应用增益；同时通知
+ *          变更回调，让设置页底部文字立即显示"关闭"/增益值 */
+void config_store_set_replay_gain(bool on);
 
 /** @brief 设置关机前播放状态并持久化（由 player_controller 在伪关机保存
  *          播放位置时一并调用；UI 无展示，不通知回调） */

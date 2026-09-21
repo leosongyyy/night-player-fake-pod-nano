@@ -198,7 +198,7 @@ main/
     dir_list.h/.c           # 目录/歌单列表页（virtual_list，/sdcard 头部 + 行图标）
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
     now_playing.h/.c        # 正在播放页（全屏封面 + 标题栏 + 控制栏/进度条，点击封面隐藏呼出）
-    settings_page.h/.c      # 播放设置页（九宫格：循环/随机/睡眠定时）
+    settings_page.h/.c      # 播放设置页（九宫格：循环/随机/睡眠定时/EQ/回放增益开关）
     settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/按键帮助/关于+开发者选项/重新扫描）；**分级懒加载**：外壳+根页面首次打开时建（44ms），子页首次进入才建，不占开机路径（见 DONE_PLANS #44）
     notification_panel.h/.c # 下拉控制中心（电池/亮度/音量竖条/睡眠开关/设置入口，LVGL 事件驱动）
     key_handler.h/.c        # 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）

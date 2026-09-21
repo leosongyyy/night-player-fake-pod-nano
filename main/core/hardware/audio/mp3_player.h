@@ -105,7 +105,9 @@ void mp3_player_set_stopped_callback(mp3_player_stopped_cb_t cb);
  * PCM 仍会被 consumer 送进 I2S，导致"旧歌内容用新歌增益播放"的音量突变。
  * 延迟应用后旧曲全程保持旧增益，新歌从第一帧起用新增益。
  *
- * @param gain_q16 线性增益 × 65536（与 audio_set_replay_gain 同语义）
+ * @param gain_q16 线性增益 × 65536（与 audio_set_replay_gain 同语义）。
+ *                 ⚠ 由调用方按"回放增益总开关"决定取值：开关关闭时传
+ *                 AUDIO_REPLAY_GAIN_UNITY（0dB），本模块不感知开关状态
  */
 void mp3_player_set_gain(uint32_t gain_q16);
 

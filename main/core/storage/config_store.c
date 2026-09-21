@@ -36,6 +36,7 @@ static const char *TAG = "config_store";
 #define KEY_LAST_VALID       "last_valid"
 #define KEY_EQ_NAME          "eqname"
 #define KEY_EQ_DATA          "eqdata"
+#define KEY_REPLAY_GAIN      "replaygain"   /* 回放增益总开关：0=关，1=开 */
 
 /* 变更回调容量（设置页 + 通知栏等，够用） */
 #define CONFIG_STORE_MAX_CB  4
@@ -70,6 +71,10 @@ static uint8_t  s_batt_log_min = CONFIG_STORE_BATT_LOG_MIN_DEFAULT;
 static bool     s_touch_test  = (CONFIG_STORE_TOUCH_TEST_DEFAULT != 0);
 /* 关机前播放状态：默认 true（无记录时开机自动播放，保持旧行为） */
 static bool     s_was_playing = true;
+/* 回放增益总开关（默认开）：关=所有歌按 0dB 播放，开=按 .npd 元数据增益。
+   设置页第 8 格切换并持久化；控制器轮询到变化后重新应用（见
+   player_controller 的开关同步），故通知回调让设置页立即刷新文本 */
+static bool     s_replay_gain = (CONFIG_STORE_REPLAY_GAIN_DEFAULT != 0);
 static uint32_t s_last_global = 0;
 static uint32_t s_last_pos    = 0;
 static bool     s_last_valid  = false;
@@ -324,6 +329,13 @@ void config_store_init(void)
     } else {
         s_touch_test = (touch_test != 0);
     }
+    /* 回放增益总开关：无记录（首次烧录/升级）时默认开启（保持既有行为） */
+    uint8_t replay_gain = 0;
+    if (nvs_get_u8(s_nvs, KEY_REPLAY_GAIN, &replay_gain) != ESP_OK) {
+        s_replay_gain = (CONFIG_STORE_REPLAY_GAIN_DEFAULT != 0);
+    } else {
+        s_replay_gain = (replay_gain != 0);
+    }
     /* 关机前播放状态：无记录（首次烧录/升级）时保持默认 true（自动播放） */
     uint8_t was_play = 1;
     if (nvs_get_u8(s_nvs, KEY_WAS_PLAYING, &was_play) != ESP_OK) {
@@ -450,6 +462,11 @@ uint8_t config_store_get_click_wheel_speed(void)
 bool config_store_get_battery_log(void)
 {
     return s_batt_log;
+}
+
+bool config_store_get_replay_gain(void)
+{
+    return s_replay_gain;
 }
 
 uint8_t config_store_get_battery_log_min(void)
@@ -619,6 +636,18 @@ void config_store_set_touch_test(bool on)
     }
     s_touch_test = on;
     cfg_write_u8(KEY_TOUCH_TEST, on ? 1 : 0);
+}
+
+/* 回放增益总开关：立即生效（控制器轮询到变化后重新应用到音频链路，且设置页
+   文本随之刷新），故通知回调 */
+void config_store_set_replay_gain(bool on)
+{
+    if (on == s_replay_gain) {
+        return;
+    }
+    s_replay_gain = on;
+    cfg_write_u8(KEY_REPLAY_GAIN, on ? 1 : 0);
+    config_notify();
 }
 
 /* 虚拟 ClickWheel 开关：立即生效（UI 侧回调隐藏/显示速滑按钮），故通知回调 */

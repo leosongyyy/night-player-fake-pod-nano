@@ -208,7 +208,9 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames)
     }
 
     /* 回放增益 float（uint32 原子读）：q16 → 线性（注意无符号增益 × 有符号
-       样本的符号转换统一在 float 域完成，见 audio.h 处理链路说明） */
+       样本的符号转换统一在 float 域完成，见 audio.h 处理链路说明）。
+       增益为直接切换（无平滑过渡）：切歌在"旧曲已停 + ringbuf 已清"的
+       静止点应用，回放增益开关切换也只在队列空闲时应用，不存在跨曲混用。 */
     const float gain_f = (float)replay_gain * (1.0f / 65536.0f);
 
     const int16_t *src = samples;

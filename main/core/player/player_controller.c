@@ -63,6 +63,12 @@ static player_event_type_t player_reason_to_event(mp3_player_stop_reason_t reaso
 /* 命令队列长度（控制命令都很短，队列够深避免高频点按丢弃） */
 #define PLAYER_QUEUE_LEN 8
 
+/* 控制器任务队列空闲等待超时（ms）：命令队列本身是"阻塞等待"模型，用一个
+   有限的超时顺带充当低频轮询点——目前用于回放增益开关的立即生效同步
+   （开关状态只在 config_store 一处，见 s_gain_q16 注释）。取 500ms 与
+   UI 侧的 player_ticker 周期一致，切换开关后最迟半秒内音频链路生效。 */
+#define PLAYER_TASK_TICK_MS 500
+
 /* ---------- 命令定义 ---------- */
 
 typedef enum {
@@ -110,6 +116,16 @@ static char s_path_buf[PLAYER_PATH_MAX];
    JPEG 封面不在此保留——解码放 UI 侧，需要时重新读文件） */
 static char s_meta_title[128];
 static char s_meta_subtitle[128];
+
+/* 当前曲目的回放增益（.npd 元数据，仅控制器任务写入；UI 经 status 快照读）：
+   - s_gain_q16        = 元数据里的真实增益（16.16 定点），与回放增益开关无关；
+   - s_gain_known      = 当前曲是否有增益数据（false = 该曲没被扫描过、
+                         没有 .npd 元数据 → UI 显示"无增益"）
+   ⚠ 开关状态只存在 config_store 一处，不在这里做镜像：应用时（播放静止点与
+     开关同步）都由 config_store_get_replay_gain() 现场决定用真实值还是 0dB，
+     避免"两份开关状态不一致"导致的音量错乱。 */
+static volatile uint32_t s_gain_q16 = AUDIO_REPLAY_GAIN_UNITY;
+static volatile bool     s_gain_known = false;
 
 /* 随机播放状态（s_shuffle 由 NVS 恢复；s_shuffle_pos 为随机序列的逻辑位置，
    仅控制器任务写入；shuffle_player 缓存懒加载。
@@ -359,7 +375,8 @@ static void player_update_meta(uint32_t global)
        ⚠ 在控制器任务里同步读 SD 文件（几十 KB，约几十 ms），切歌本身有
        停止旧曲的等待，这里不会卡 UI；JPEG 封面数据解析后立即释放，
        封面解码放 UI 侧（now_playing 需要时重新读文件）。
-       无元数据时回退显示文件名/目录名，增益回默认 0dB。 */
+       无元数据（该曲没被扫描过）时回退显示文件名/目录名，增益判为"无"，
+       按 0dB 播放。 */
     s_meta_title[0] = '\0';
     s_meta_subtitle[0] = '\0';
     song_meta_t meta;
@@ -370,9 +387,18 @@ static void player_update_meta(uint32_t global)
         if (meta.subtitle != NULL) {
             snprintf(s_meta_subtitle, sizeof(s_meta_subtitle), "%s", meta.subtitle);
         }
-        mp3_player_set_gain(meta.gain_q16);
+        /* 缓存真实增益（元数据有效即视为"有增益数据"，扫描工具对标签缺失的
+           曲目会兜底一个值，所以未扫描过的曲目才是真正的"无增益"）。
+           交给 mp3_player 的 pending 值按开关决定：开关关闭时直接给 0dB，
+           这样 play 的静止点一次应用到位（不必先应用真实值再覆写）。 */
+        s_gain_q16 = meta.gain_q16;
+        s_gain_known = true;
+        mp3_player_set_gain(config_store_get_replay_gain() ? meta.gain_q16
+                                                           : AUDIO_REPLAY_GAIN_UNITY);
         song_meta_free(&meta);
     } else {
+        s_gain_q16 = AUDIO_REPLAY_GAIN_UNITY;
+        s_gain_known = false;
         mp3_player_set_gain(AUDIO_REPLAY_GAIN_UNITY);
     }
 }
@@ -520,8 +546,31 @@ static void player_task(void *arg)
     (void)arg;
     player_cmd_msg_t msg;
 
+    /* 上次同步的回放增益开关值：用于在队列空闲（超时）时发现开关变化 */
+    bool rg_last = config_store_get_replay_gain();
+
     while (true) {
-        if (xQueueReceive(s_queue, &msg, portMAX_DELAY) != pdTRUE) {
+        /* ⚠ 带超时等待：超时（无命令）时顺带做一次"回放增益开关"同步检查，
+           这样开关切换能立即在音频链路上生效，而不必等到下一曲。 */
+        if (xQueueReceive(s_queue, &msg,
+                          pdMS_TO_TICKS(PLAYER_TASK_TICK_MS)) != pdTRUE) {
+            if (config_store_get_replay_gain() != rg_last) {
+                rg_last = config_store_get_replay_gain();
+                if (!rg_last) {
+                    /* 关闭：立即把当前曲的增益切回 0dB（直接切换，无过渡） */
+                    audio_set_replay_gain(AUDIO_REPLAY_GAIN_UNITY);
+                } else if (s_gain_known) {
+                    /* 重新开启：恢复当前曲的真实增益值 */
+                    audio_set_replay_gain(s_gain_q16);
+                } else {
+                    audio_set_replay_gain(AUDIO_REPLAY_GAIN_UNITY);
+                }
+                ESP_LOGI(TAG, "replay gain -> %d (applied %.3f)",
+                         (int)rg_last,
+                         (double)(rg_last && s_gain_known
+                                      ? s_gain_q16 : AUDIO_REPLAY_GAIN_UNITY)
+                             / 65536.0);
+            }
             continue;
         }
         switch (msg.cmd) {
@@ -910,6 +959,8 @@ void player_controller_get_status(player_controller_status_t *out)
     out->position_s = mp3_player_get_position_s();
     out->duration_s = mp3_player_get_duration_s();
     out->has_song = (s_ready && s_song_count > 0);
+    out->has_replay_gain = s_gain_known;
+    out->replay_gain_q16 = s_gain_q16;
 
     snprintf(out->dir_name, sizeof(out->dir_name), "%s", s_dir_name);
     snprintf(out->song_name, sizeof(out->song_name), "%s", s_song_name);
