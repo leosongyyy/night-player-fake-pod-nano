@@ -1419,6 +1419,143 @@ LVGL 默认行为，重建时保留 act_time，所以看不出问题）。修法
 （4.6 节 + 第 6 节改动前后时间线）、`IRAM_DMA_AUDIT.md`（阶段编号重排说明 + 55KB→29KB 修正 +
 P3 标记完成）、`FUTURE_PLAN.md` 第 34 点（② 标记完成）。
 
+## 45. idfc.exe 工具链改进：子命令版重写 + 执行回显 + flash 过期警告 + menuconfig 查询 ✅ 已完成
+
+> **需求来源**：原 `FUTURE_PLAN.md` 第 43 点「idfc.exe 的改进想法（工具链体验）」——2026-09
+> 一次 ClickWheel 会话的摩擦点汇总，共 17 条（当时误编为 #42，与本文档 #42 ClickWheel 撞号，
+> 后更正为 #43）。该清单**已整条移入本条**，`FUTURE_PLAN.md` 不再保留。
+> 分工按 **IDFClientCLI 的 `AGENTS.md`**：需求由 AI 提出、功能由用户（或另一个 Agent）编写，
+> AI 负责使用、验证与记录。清单里**已实现**的内容全部归档在本条；**被砍掉**的那部分另立 **第 46 点**。
+>
+> 原始 4 个最痛的坑（也就是本条的动机）：① 不带 `-B` 时 idfc 静默使用根 `sdkconfig` + 根 `build/`
+> （还顺手跑了一次 cmake 配置），于是构建出的固件带着**过期的堆毒化配置**，连锁出内部 RAM 紧张
+> → 任务建不起来 → SD 读 `allocate_dma_buf` 失败 → 开机跳曲；② 会话中途 IDF 服务器被回收，
+> 只能停下等用户手动启动 VBS；③ `monitor` 永不返回，只能"后台起任务 + sleep + kill + 读增量"；
+> ④ 串口号要靠人告知。
+
+### 45.1 子命令版重写（2026-09-16）
+
+原 17 条中的大半在这一轮落地；其中最痛的几项不是"加参数"而是**从根上消除**：
+
+| 原条目 | 现状与实现方式 |
+|---|---|
+| ① `-B` 缺失/不匹配要报错 | ✅ **从根本消除**：`build`/`flash`/`monitor`/`run`/`size` 自动拼 `-B build/<variant>` 与 `-D SDKCONFIG_DEFAULTS=… -D SDKCONFIG=…`，调用方不再写 `-B`（`idfpy` 仍可绕过，文档已警告） |
+| ④ 配置过期提醒 | ✅ `build` 自动比较 `build/<v>/sdkconfig` 与 `sdkconfig.defaults*`、所有 `Kconfig`/`*.projbuild` 的时间戳；过期即自动 clean + reconfigure 并打印原因。另有 `build --dry-run` / `--reconfigure` / `--no-reconfigure` |
+| ⑧ `monitor --duration` | ✅ `monitor --timeout <ms>`：到点自退，**退出码 1** |
+| ⑨ `--until` / `--no-reset` | ✅ `monitor --wait-for <re>`（命中即退，**退出码 0**）、`--no-reset` |
+| ⑪ `idfc run` 一条龙 | ✅ `run` = 构建 → 体积 → 烧录 → 监视，`--monitor-timeout/-grep/-wait-for` 控制抓取（实测一次约 31 秒跑完并命中 `App started`） |
+| ⑫ `idfc ports` | ✅ `ports` 列出串口 + 设备名 + 设备实例路径（含 Espressif `VID_303A` 可用于识别目标板）；另有 `set-port` 把端口持久化进项目 |
+| ⑮ profile 简写 | ✅ `-t <variant>` + `set-variant`；**比原设想更彻底**——默认值持久化在 `.idfc/idfc_config.json`，日常连 `-t` 都不用带 |
+
+清单外、一并实现的能力：
+
+- **输出折叠**：`build`/`flash` 的刷屏输出被折叠，实测 releasecandidate 全量构建 **1606 行 → 160 行（1:10）**，
+  单块最大折叠 835 行，且标记会报出被隐藏行数；`-v` / `--verbose-build` / `--verbose-flash` 可展开。
+- **`start-server` 就绪轮询 + `stop-server`**：不再"报了成功但服务器其实没起来"；停止不再只能关控制台窗口。
+- **`size` 子命令**：ASCII 表格 / `--detailed` 树形体积分析（依赖 `.elf`+`.bin`+`.map` 三件套）。
+- **未知命令 / 未知参数明确报错**（退出码 1）。历史上曾出现"未知命令静默 exit 0"——最危险的失败模式。
+- **`monitor --grep <re>`**：只输出匹配行（仅过滤 stdout，stderr 与错误信息始终透出）。
+- **项目级配置**：`set-idfenv` / `set-variant` / `set-port` → `.idfc/idfc_config.json`。
+- **`idfpy` 的完整 Windows 命令行转义**（引号、结尾反斜杠、空参数均逐字保真）。
+- **`help` / `help <命令>` / `help --all`** 的分命令帮助体系。
+
+### 45.2 执行回显 + flash 过期警告（2026-09-23）
+
+- **执行回显**：`build`/`flash`/`monitor`/`size` 在真正执行前打印一行
+  `# Executing \`idfc idfpy -B build\debug -D SDKCONFIG_DEFAULTS="…" -D SDKCONFIG="…" <子命令>\``，
+  把本次**实际拼出的完整命令行**暴露出来；`run` 的四个阶段直接调用这些函数，因此同样带回显
+  （源码 `PressF5RunCommand.Main` → `BuildCommand.ExecBuild` / `SizeCommand.ExecSize` /
+  `FlashCommand.ExecFlash` / `MonitorCommand.ExecMonitor`）。
+  这样"我到底在构建哪一套"从隐式约定变成了屏幕上的一行事实。
+- **flash 过期警告**：`flash` 依然**不**清理、**不**重建（`idf.py flash` 会隐式构建，所以直接 flash
+  可能烧出旧配置固件），但现在会先用与 `build` 相同的判定比较 `build/<v>/sdkconfig` 与
+  `sdkconfig.defaults*`、所有 `Kconfig`/`*.projbuild` 的时间戳，过期时打印：
+
+  ```
+  > 警告：当前构建类型 debug 已经过时。当前即将刷入的是旧版的固件。建议重新进行构建，会自动更新配置。
+  ```
+
+### 45.3 实测（2026-09-23，项目 = FakePodNanoNightPlayer，debug，设备未插）
+
+| 命令 | 观察结果 |
+|---|---|
+| `idfc.exe size` | 先回显 `… size --format text --output-file build\debug\size_analysis_report.txt`，随后正常打印体积表（`DIRAM 47.08%`、`IRAM 100%`），退出码 0 |
+| `idfc.exe build` | 先回显 `… build`，增量构建 **1.9 秒**完成，打印 `> 构建完成，用时 1.9 秒` |
+| `idfc.exe build --dry-run`（未过期） | "由于构建相关文件未进行更新。因此不会进行清理和reconfigure" |
+| `idfc.exe build --dry-run`（人为过期） | "由于构建相关文件发生了更新，因此这一步会先进行 `idfc.exe clean`，删掉build里的sdkconfig，然后进行reconfigure" |
+| `idfc.exe flash`（过期态） | 打印上述**警告** → 回显 `… flash -p COM12` → esptool `Could not open COM12`（设备未插）→ 退出码 **2** |
+| `idfc.exe flash`（未过期） | 直接回显 `… flash -p COM12`，**不打印警告**（与上一行形成对照，证明警告只在过期时出现） |
+| `idfc.exe monitor --timeout 4000` | 先回显 `… monitor -p COM12`（末尾带一个多余空格），随后 `could not open port`，退出码 **-1** |
+| `idfc.exe ports` | 输出"当前系统上还没有连接任何串口。"——**正确**：系统里只有 COM3/COM4，都是蓝牙调制解调器（`BthModem`，注册表 `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM` 可证），被 `ports` 按设计过滤（排除 `BTHENUM\`） |
+
+**过期态是"可逆制造"的**：只把构建产物 `build/debug/sdkconfig` 的 mtime 改成 2020-01-01
+（**不碰任何纳入 git 的文件**），验证完再改回当前时间；改回后 `build --dry-run` 立即回到
+"未进行更新"，没有触发 clean/reconfigure，也没有多跑一次全量构建。
+判定逻辑见 `IDFClientCLI/Client/BuildHelper/BuildVariantHelper.cs` 的
+`BuildConfigValidator.IsBuildFileOutdated()`（判据：`buildFileTime - relatedFileTime < 0`，即
+`build/<v>/sdkconfig` 必须**不早于** defaults 与项目内所有 Kconfig/`*.projbuild`）。
+
+### 45.4 `idfc menuconfig`：查询配置项（2026-09-23 完成，由另一个 Agent 实现）
+
+需求就是清单里那条原话：「build 目录下有个 json 记录了所有可用的 menuconfig 设置项，且其中包含详细的描述说明」。
+本轮先在 `tempdir/kconfig_menus/`（**未入库，tempdir 被 .gitignore 忽略**）做了一层解析类原型并测通
+**69 条断言**（结构不变量 / 已知事实 / 边界容错 / 性能），随后正式实现进 IDFClientCLI 仓库：
+`Core/Kconfig/KconfigMenus.cs`、`Core/Kconfig/KconfigValues.cs`、
+`Client/CustomCommands/MenuconfigCommand.cs`（命名空间改为 `IDFClientCLI.Core.Kconfig`，解析逻辑与原型一致）。
+
+命令形态（**纯客户端**：只读 `build/<variant>/config/` 下的两个 json，不经过 IDF 服务器、不触发构建）：
+
+| 子命令 | 行为 |
+|---|---|
+| `menuconfig search "关键词1 关键词2" [--page N]` | 多关键词 **AND** 检索：关键词按**字面**匹配（`Regex.Escape`）、不区分大小写，且必须落在**同一个字段**（`id` / 符号名 / 标题 / 说明）里；每页 20 条，超出时打印匹配总数与翻页提示 |
+| `menuconfig desc <名称>` | 单项详情：名称 / 类型 / 取值范围 / 当前值 / 依赖 / 所在菜单路径 / 说明全文。名称可带可不带 `CONFIG_` 前缀、大小写不限，也接受菜单节点的小写 id（如 `build-type-application-build-type`） |
+
+实现方在边界行为上处理到位、值得留档的两点（均为实现方自己的实测结论）：
+
+- **`\A` 锚点防正则退化**：多关键词用零宽前瞻串联（`\A(?=[\s\S]*K1)(?=[\s\S]*K2)`）。少了开头的 `\A`，
+  前瞻失败会让引擎从**每一个字符位置**重试、每次都线性扫到尾，实现方实测把检索从 ~0.3s 拖到 ~3.3s（O(n²)）；
+  用 `[\s\S]` 而不是 `.`，才能跨过 help 里那 1298 条含换行的说明。
+- **`-t` 会把自己的位置置 null**，所以 `menuconfig desc -t debug X` 不能用 `PopFirstArg` 取名称（已改为取"第一个非 null 参数"）。
+
+数据规模与性能（实测 debug 构建）：`kconfig_menus.json` **2.6MB / 4079 节点**，
+`sdkconfig.json` **1730 个键**；解析约 52~58ms、全字段扫描约 1ms —— **每次命令现读现解析即可，无需缓存**。
+
+退出码：`0` 成功；`1` = 参数错误 / 缺 json（提示先构建）/ 没有匹配项 / 页码越界。
+⚠ 它依赖**该构建类型至少成功构建过一次**（两个 json 由 ESP-IDF 在配置阶段生成）。
+其余边界行为由实现方单独测过，本次未重复测试。
+
+### 45.5 已砍掉的剩余想法 → 见第 46 点
+
+按用户决定（2026-09-23）：**idfc.exe 目前已经足够有用，剩余想法不再跟进**。清单里当时还没做的条目
+（解析结果摘要行、`idfc version`、`flash -b`、`status` 扩展，以及验证时发现的两处小瑕疵）
+全部归档为"已砍掉"，理由逐条记在 **第 46 点**。
+
+- 本次仍未复验的：`flash` / `monitor` 的**成功路径**与 `run` 全链路（验证时设备未连接）。
+
+### 45.6 文档同步
+
+`IDFC_USAGE.md`（flash 过期警告 + 执行回显 + 波特率决策 + `menuconfig` 命令写进速查表、用法说明与排错表）、
+`BUILD_CONFIG.md`（§3/§4/§5 的示例命令从**已失效的旧语法** `-B … build` 改为子命令版，
+reconfigure 指引改为 `build --reconfigure`，端口确认改用 `idfc ports`）、
+`README.md`（开发环境一节的 idfc 示例命令）、`MARQUEE_STYLE.md`（§8 验证记录里的构建命令）、
+`AGENTS.md`（idfc 使用说明补"执行回显 / flash 只警告不重建 / 查配置项用 `menuconfig`"）、
+`FUTURE_PLAN.md`（第 43 点整条已移入本文档，那边不再保留 idfc 内容）。
+
+## 46. idfc.exe 剩余改进想法 ⛔ 已砍掉（2026-09-23）
+
+> 来源：idfc 改进清单（原 17 条，原 `FUTURE_PLAN.md` 第 43 点，**现整条移入本文档**）
+> 在 2026-09-23 收敛时剩下的条目。
+> **用户决定：idfc.exe 目前已经足够有用，这些不再跟进**——理由逐条记录如下。
+
+| 原条目 | 砍掉的理由 |
+|---|---|
+| 命令开头的**解析结果摘要行**（`[idfc] build dir=… sdkconfig=… (mtime …) target=… idf=…`） | 2026-09-23 起 `build`/`flash`/`monitor`/`size` 已回显**完整命令行**，配合 `build --dry-run` 足以看清"在构建哪一套"，摘要行的边际收益不大 |
+| `idfc version`：从 ELF 读 app version + `git describe` + 编译时间 | 直接读 `build/<variant>/project_description.json` 前 20 行就能拿到同样的信息，不值得为它单开子命令 |
+| `flash -b <baud>` | 用户：通常不会改波特率，刷了这么多板子都没动过，也没遇到需要改的场景；真要用就 `idfc idfpy` 自己带 |
+| `status` 扩展成"多构建状态仪表盘"（各 `build/<cfg>` 是否存在 / sdkconfig 是否过期 / 产物是否比源码新） | 用户在 2026-09-16 直接删除了该条；实际使用时 `build --dry-run` 已经回答了同一问题 |
+| 两处小瑕疵：`# Executing` 回显行末尾多一个空格；`ports` 过滤蓝牙串口后仍说"当前系统上还没有连接任何串口" | 都是文案级瑕疵、不影响使用，不值得为此再动一次工具链 |
+
+
 
 
 

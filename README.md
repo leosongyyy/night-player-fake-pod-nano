@@ -174,9 +174,9 @@
 也可以直接用项目自带的 `idfc.exe`（多配置说明见 `ideas_and_exps/BUILD_CONFIG.md`）：
 
 ```powershell
-.\idfc.exe -B build/debug build          # 构建（默认调试版）
-.\idfc.exe -B build/release build        # 构建发布版（完整字体、调试全关）
-.\idfc.exe -B build/debug -p COMx flash  # 烧录
+.\idfc.exe build                       # 构建（默认调试版）
+.\idfc.exe build -t release            # 构建发布版（完整字体、调试全关）
+.\idfc.exe flash -p COMx               # 烧录（COMx 换成实际串口号）
 ```
 
 ## 📱 兼容设备

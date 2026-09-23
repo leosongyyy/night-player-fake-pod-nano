@@ -58,6 +58,14 @@
   .\idfc.exe idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
   ```
 - ⚠ 在使用 `.\idfc.exe idfpy <任意 idf.py 参数...>` 之前，请务必阅读 IDFC_USAGE.md，查看此前旧版本踩过的坑。
+- 💡 **执行回显**：`build`/`flash`/`monitor`/`size`（以及 `run` 的各阶段）执行前会打印一行 `# Executing \`idfc idfpy -B build\<cfg> … <子命令>\``，即本次**实际使用**的完整命令——想确认"到底在构建哪一套"或手工复现，直接看这一行。
+- ⚠ **`flash` 只警告、不重建**：若 `build/<cfg>/sdkconfig` 早于 `sdkconfig.defaults*` 或任何 `Kconfig`/`*.projbuild`，`flash` 会打印"当前构建类型 … 已经过时"的警告，**但仍会把旧产物烧进去**。要烧新配置就得先 `build`（或直接 `run`）。
+- 🔎 **查 menuconfig 配置项**（标题 / 说明全文 / 当前值，**纯客户端命令**，不触发构建）：
+  ```powershell
+  .\idfc.exe menuconfig search "IRAM SPIRAM"          # 多关键词 AND 检索（每页 20 条，--page N 翻页）
+  .\idfc.exe menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
+  ```
+  ⚠ 需要该构建类型**至少成功构建过一次**（`kconfig_menus.json` / `sdkconfig.json` 由 ESP-IDF 在配置阶段生成）；缺失时会提示先 `build` 并退出码 1。没有匹配项同样退出码 1。想改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先用它确认"这项是干什么的、现在是多少"。
 - **⚠ 若提示 `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1）**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.cmd` 或 `start-server`），或者按照说明使用完整权限重启，由用户确认启动。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
 - 未用 `-t` 指定时，构建类型取自 `.idfc/idfc_config.json` 的 `ActiveBuildVariant`（默认为 `debug`）；串口取自 `LastComPort`。**这两个是隐式状态，不确定时先跑 `.\idfc.exe status`。**
 

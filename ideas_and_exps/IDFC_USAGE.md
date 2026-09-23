@@ -104,6 +104,8 @@
 .\idfc.exe flash                                 # 烧录到已保存的串口
 .\idfc.exe monitor --wait-for "App started"      # 串口监视，命中后退出
 .\idfc.exe run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
+.\idfc.exe menuconfig search "IRAM SPIRAM"        # 查配置项（标题/说明/当前值），纯客户端
+.\idfc.exe menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
 .\idfc.exe idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
 ```
 
@@ -118,9 +120,10 @@
 | `help [命令名\|--all]` | 查看帮助 |
 | `idfpy <idf.py 参数...>` | 原样透传（`menuconfig`、`erase-flash`、`efuse-*` 等走这里） |
 | `build [-t T] [--reconfigure\|--no-reconfigure\|--fullclean] [-v] [--dry-run]` | 构建（过期检测 + 输出折叠） |
-| `flash [-t T] [-p COMx] [-v]` | 烧录（**不检测构建是否过期**，建议先 `build`） |
+| `flash [-t T] [-p COMx] [-v]` | 烧录（**会检测构建是否过期并打印警告**，但不会自动重建；建议先 `build`） |
 | `monitor [-t T] [-p COMx] [--no-reset] [--timeout ms] [--grep RE] [--wait-for RE]` | 串口监视（有界） |
 | `size [-t T] [--detailed]` | 固件体积分析（`--detailed` 输出极长，谨慎） |
+| `menuconfig search "<关键词…>" [--page N]` / `menuconfig desc <名称>` | 查构建产物里的 menuconfig 配置项（标题 / 说明全文 / 当前值）——**纯客户端**，只读 `build/<T>/config/` 的两个 json，不触发构建 |
 | `run [-t T] [-p COMx] [--clean] [--no-size] [--verbose-build] [--verbose-flash] [--monitor-*]` | 构建+体积+烧录+监视一条龙 |
 | `clean [-t T]` | 删除 `build/<T>/sdkconfig` 与 `build/<T>/config` |
 | `fullclean [-t T]` | 删除整个 `build/<T>/` |
@@ -131,6 +134,15 @@
 
 **共用参数**：`-t <build-type>` 指定构建类型；`-p COMx` 指定串口。**未知命令与未知参数会被明确拒绝**（退出码 1）。
 
+**执行回显（2026-09-23 起）**：`build` / `flash` / `monitor` / `size`（以及 `run` 的各个阶段）在真正执行前会打印一行
+
+```
+# Executing `idfc idfpy -B build\debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" -D SDKCONFIG="build\debug\sdkconfig" <子命令>`
+```
+
+这行就是本次**实际使用**的完整命令——想手工复现、贴进文档、或确认"到底在构建哪一套"，抄它即可，
+不必再去猜隐式状态。⚠ 回显行末尾可能带一个多余空格，复制时无碍。
+
 **关于 monitor 的三个有界参数**（对自动化尤其重要）：
 
 | 参数 | 行为 | 退出码 |
@@ -140,6 +152,18 @@
 | `--grep <regex>` | 只输出匹配内容（仅过滤 stdout，stderr 与错误信息始终透出） | — |
 
 两者可同时使用，先满足者生效。客户端退出时（超时、命中或被强杀），服务端都会自动终止进程树并释放串口。
+
+**关于 `menuconfig`（查配置项，2026-09-23 起）**：
+
+| 用法 | 行为 |
+|---|---|
+| `menuconfig search "关键词1 关键词2" [--page N]` | 多关键词 **AND** 检索：关键词按**字面**匹配（不按正则）、不区分大小写，且必须落在**同一个字段**（`id` / 符号名 / 标题 / 说明）里。每页 20 条，超出时打印匹配总数与翻页提示 |
+| `menuconfig desc <名称>` | 单项详情：名称 / 类型 / 取值范围 / 当前值 / 依赖 / 所在菜单路径 / **说明全文**。名称可带可不带 `CONFIG_` 前缀、大小写不限，也接受菜单节点的小写 id（如 `build-type-application-build-type`） |
+
+- **纯客户端命令**：只读 `build/<构建类型>/config/` 下的 `kconfig_menus.json`（全部选项 + 标题 + 说明全文 + 依赖）与 `sdkconfig.json`（当前生效值），**不经过 IDF 服务器、也不触发构建**。
+- ⚠ **必须先成功构建过一次**：这两个 json 由 ESP-IDF 在**配置阶段**生成（实测 debug 版 `kconfig_menus.json` 2.6MB / 4079 个节点、`sdkconfig.json` 1730 个键）。缺失时命令会提示先 `build` 并以退出码 1 退出。
+- 退出码：`0` 成功；`1` = 参数错误 / 缺少构建产物 / **没有匹配项** / 页码越界。
+- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `.\idfc.exe menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS` 会连说明全文一起打出来。
 
 ---
 
@@ -165,11 +189,19 @@
 
 **新版的处理**：`build` 会自动比较 `build/<variant>/sdkconfig` 与 `sdkconfig.defaults`、`sdkconfig.defaults.<variant>`、项目中所有 `Kconfig` / `*.projbuild` 的时间戳，**过期就自动清理并重新配置**（会打印"检测到构建文件已过时，因此进行清理并重新配置"）。想强制重配用 `build --reconfigure`；想跳过检测走纯增量用 `build --no-reconfigure`。
 
+⚠ **`flash` 只警告、不重建**：`idf.py flash` 会隐式构建，所以"改了 defaults 直接 flash"会烧出**旧配置的固件**。现在 `flash` 会先用与 `build` 相同的判定做过期检查，过期时打印：
+
+```
+> 警告：当前构建类型 debug 已经过时。当前即将刷入的是旧版的固件。建议重新进行构建，会自动更新配置。
+```
+
+但它**不会**替你 clean/reconfigure，也会照常把旧产物烧进去。正确姿势始终是**先 `build` 再 `flash`**（或直接用 `run`，它内部就是这个顺序）。
+
 > 旧文档里"必须先删 `build/<cfg>/sdkconfig` 再带 `-D` reconfigure"这句操作指导已被上面两条命令取代；但**它背后的原因（合并优先级）依然成立**，手工绕过时仍然适用。
 
 ### 6.3 串口、波特率与启动器
 
-- **波特率**：`idf.py` 的 `-b/--baud` 是一个声明了 `envvar: ESPBAUD` 的全局选项，所以 `ESPBAUD` 确实有效——但受限于 §2 的环境变量快照机制，**必须在启动服务器之前设置**，否则无效。
+- **波特率**：`idf.py` 的 `-b/--baud` 是一个声明了 `envvar: ESPBAUD` 的全局选项，所以 `ESPBAUD` 确实有效——但受限于 §2 的环境变量快照机制，**必须在启动服务器之前设置**，否则无效。⚠ idfc **不提供** `flash -b <baud>` 参数：**用户已决定不做**——日常不会改波特率（刷过很多板子都没动过），不必为这条不常走的路线单独加参数；真要用就自己走 `idfpy`。
 - **`idf.py.exe` 启动器会按空格重新拆分参数**：这是 `idf-exe` 启动器自身的行为（不是 idfc 的问题）。实测 `idf.py.exe "a b"` 会变成两个参数，而 `python idf.py "a b"` 正常。因此**含空格的参数无法可靠透传**；monitor/flash 的参数（构建类型、COM 口）都经过校验不含空格，不受影响。
 - **串口释放有约 1 秒延迟**：客户端退出后服务端会自动清理 `idf.py` 进程树并释放串口（实测约 1.1 秒）。若紧接着执行下一个串口命令遇到"串口被占用"，稍等即可。
 
@@ -184,7 +216,7 @@
 | 退出码 | 含义 |
 |---|---|
 | `0` | 成功（含 `monitor --wait-for` 命中） |
-| `1` | 参数无效 / 校验失败 / `monitor --timeout` 超时 / 激活脚本未找到 |
+| `1` | 参数无效 / 校验失败 / `monitor --timeout` 超时 / 激活脚本未找到 / `menuconfig` 无匹配项或缺构建产物 |
 | `2` | 沙箱权限探测失败（服务器未启动）；也会作为 `idf.py` 的退出码透传（如烧录失败） |
 | `-1` | 服务器未运行 / 连接错误，或输出流结束但未收到退出码 |
 | `<n>` | 透传的 ESP-IDF 命令退出码 |
@@ -202,6 +234,8 @@
 | 激活脚本无法加载（ExecutionPolicy 报错） | 执行策略限制 | `start-server` 内部已用 `-ExecutionPolicy Bypass`；手工启动时需自己带上 |
 | 端口被占用 | 已有服务器实例 | `.\idfc.exe stop-server` 后重启 |
 | 改了 `sdkconfig.defaults*` 但固件行为没变 | 已有 sdkconfig 优先级更高（§6.2） | `.\idfc.exe build`（自动检测）或 `build --reconfigure` |
+| `flash` 打印"当前构建类型 … 已经过时" | 构建产物早于 defaults/Kconfig（§6.2），而 `flash` 只警告不重建 | 先 `.\idfc.exe build` 再 `flash`（或直接用 `run`） |
+| `menuconfig` 报"缺少 menuconfig 查询所需的数据文件" | 该构建类型还没成功构建过（两个 json 由配置阶段生成） | 先 `.\idfc.exe build -t <构建类型>`，再重试 |
 | `-t <V>` 报"配置文件尚不存在" | 缺少 `sdkconfig.defaults.<V>`，或构建类型拼错 | 确认该文件存在；构建类型只能由字母、数字、下划线组成 |
 | 串口被占用 | 上一次 monitor 的进程尚未完全退出 | 约 1 秒内自动清理；仍占用则 `stop-server` 后重启 |
 | 想临时改波特率 | 环境变量快照机制（§2） | 在**启动服务器之前**设置 `ESPBAUD`，然后重启服务器 |
