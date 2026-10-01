@@ -1,10 +1,12 @@
-# idfc.exe 使用说明（ESP-IDF 命令行客户端 / 服务器）
+# idfc 使用说明（ESP-IDF 命令行客户端 / 服务器）
 
-`idfc.exe` 是 ESP-IDF 的命令行客户端/服务器工具，用于在 DeepSeek Harness 环境下便捷地执行 `idf.py` 构建、烧录、监视等命令。它采用 **服务器 + 客户端** 架构：服务器一次性激活 ESP-IDF 环境，然后通过 HTTP + SSE（Server-Sent Events）把 `idf.py` 命令的输出流式回传给客户端。
+`idfc.exe` 是 ESP-IDF 的命令行客户端/服务器工具，用于便捷地执行 `idf.py` 构建、烧录、监视等命令。它采用 **服务器 + 客户端** 架构：服务器一次性激活 ESP-IDF 环境，然后通过 HTTP + SSE（Server-Sent Events）把 `idf.py` 命令的输出流式回传给客户端。
 
-> ⚠ **本文档对应当前的「子命令版」idfc.exe。**
+> 📥 **下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**。下载后把 `idfc.exe` 放到 **PATH 中的某个目录**（例如 `C:\Users\<你>\ProgramFiles\bin\`），然后在**项目目录**里直接用 `idfc <子命令>` 调用即可（见 §3）。
+
+> ⚠ **本文档对应当前的「子命令版」idfc。**
 > 旧版语法（`--server` / `-B build/<cfg> build` / `-B ... reconfigure` / `raw-idf`）**已全部失效**，现在一律报 `没有这样的命令`（退出码 1）。历史对话、旧文档、旧笔记里的 idfc 命令**不要照抄**——先看 §1 的迁移对照。
-> 全部命令与参数请用 `.\idfc.exe help --all` 查询（它是唯一的事实源）。
+> 全部命令与参数请用 `idfc help --all` 查询（它是唯一的事实源）。
 
 ---
 
@@ -30,7 +32,7 @@
 ```
 ┌──────────────────────┐        HTTP + SSE         ┌────────────────────────────────────┐
 │  客户端（idfc.exe）   │ ────────────────────────▶ │  服务器（idfc.exe __server_child）  │
-│  仅需 workspace-write │ ◀──────────────────────── │  由 powershell 承载，满权限常驻     │
+│  仅需 workspace-write │ ◀──────────────────────── │  由 powershell 承载，常驻           │
 │                      │     逐行流式回传输出       │  · 已激活 ESP-IDF 环境              │
 │  build / flash /     │                           │  · 监听 localhost:19781            │
 │  monitor / run / …   │                           │  · 每条请求 spawn 一个 idf.py.exe   │
@@ -43,6 +45,8 @@
 
 > ⚠ **重要推论**：服务器是**常驻进程**，在启动时**快照了环境变量**，之后每条命令都把自己那份环境整份复制给 `idf.py` 子进程。
 > 因此 **在客户端 shell 里临时 `set` 的环境变量不会影响命令**。需要 `ESPBAUD` 之类的环境变量时，必须在**启动服务器之前**设置好，然后重启服务器。
+>
+> ⚠ 另一条推论：**服务器的控制台就是启动它的那个窗口**，关掉窗口服务器就会一起停止（它挂在那个控制台上）。要长期挂着就别关窗口；要停就 `idfc stop-server`。
 
 ---
 
@@ -50,20 +54,31 @@
 
 - 已安装 ESP-IDF（含工具链、Python 虚拟环境）。
 - 已具备一份 **ESP-IDF 激活脚本**（`.ps1`），例如 `C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1`（本项目中可能是 5.5.4 或 5.5.5）。
-- 本工具面向 **DeepSeek Harness 沙箱** 设计：服务器绑定 HTTP.sys 监听端口通常需要 `danger-full-access` 权限。
+- **`idfc.exe` 必须放在 PATH 中的目录**（从上面的发布页下载）。这样在项目目录里直接 `idfc build` / `idfc start-server` 就能用。
+- ⚠ **不要把 `idfc.exe` 放在 DeepSeek Harness 的工作区里**：DSH v0.1.7-rc.1 起会给工作区打上可继承的 **Low 完整性标签**（`icacls` 可见 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`），而 Windows 派生进程的完整性取 `min(创建者令牌, 映像文件)`。工作区内的 exe 因此只能以 Low 启动，写不了 `%LOCALAPPDATA%`，服务器的权限自检会直接拒绝启动；**`danger-full-access` 也解决不了**（它只解除 DSH 沙箱，不解除完整性标签）。放到工作区外的 PATH 目录即可，**不需要管理员权限**。
 
 ---
 
 ## 4. 快速开始
 
+### 4.0 安装（每台开发机做一次）
+
+从 <https://gitee.com/ZYFDroid/idf-client-cli/releases/> 下载 `idfc.exe`，放到 PATH 里的某个目录，然后**新开一个终端**验证：
+
+```powershell
+idfc help --all          # 有输出即安装成功（注意：不要写 .\idfc.exe，它不在项目里）
+```
+
+> 💡 之后所有命令都在**项目目录**里执行，直接写 `idfc …`。客户端靠当前工作目录找到 `.idfc/idfc_config.json`，所以同一份 exe 可以服务多个项目。
+
 ### 4.1 首次配置项目（每个项目目录做一次）
 
 ```powershell
-.\idfc.exe set-idfenv "C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1"
-.\idfc.exe set-variant debug          # 需存在 sdkconfig.defaults.debug
-.\idfc.exe ports                      # 列出串口（需服务器已启动）
-.\idfc.exe set-port COM12
-.\idfc.exe status                     # 复核当前生效的构建类型与串口
+idfc set-idfenv "C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1"
+idfc set-variant debug          # 需存在 sdkconfig.defaults.debug
+idfc ports                      # 列出串口（需服务器已启动）
+idfc set-port COM12
+idfc status                     # 复核当前生效的构建类型与串口
 ```
 
 配置写入项目目录的 `.idfc/idfc_config.json`：
@@ -76,37 +91,36 @@
 }
 ```
 
-> ⚠ 这三个字段是**隐式状态**：不带 `-t`/`-p` 时命令的行为由它们决定。**不确定时先跑 `.\idfc.exe status`**。
+> ⚠ 这三个字段是**隐式状态**：不带 `-t`/`-p` 时命令的行为由它们决定。**不确定时先跑 `idfc status`**。
 
 ### 4.2 启动 / 停止服务器
 
 ```powershell
-.\idfc.exe start-server                          # 已 set-idfenv 时可省略参数
-.\idfc.exe start-server --idfenv "<激活脚本路径>"  # 或显式指定本次使用的脚本
-.\idfc.exe stop-server                           # 停止（会连带终止正在运行的 build/monitor）
+idfc start-server                          # 已 set-idfenv 时可省略参数
+idfc start-server --idfenv "<激活脚本路径>"  # 或显式指定本次使用的脚本
+idfc stop-server                           # 停止（会连带终止正在运行的 build/monitor）
 ```
-
-也可以让用户直接运行项目根目录的 `StartIDFCServer.vbs`。
 
 要点：
 
 - 该命令会派生一个 PowerShell，**dot-source 激活脚本**，再运行常驻工作进程 `__server_child` 监听端口。
-- **`start-server` 会轮询服务器状态，确认就绪后才返回**（不再出现"报了成功但服务器其实没起来"）。
-- **沙箱权限检查**：启动前服务器会探测能否在 `%LOCALAPPDATA%\IdfClientCLI` 写入文件。若当前沙箱禁止写入，服务器会**拒绝启动**（退出码 2）——这是有意为之，见 §8。跳过检查用 `--skip-permission-check`（不建议）。
-- **DeepSeek Harness 实测**：要让监听端口正常绑定，需在 **`danger-full-access`** 权限下运行服务器，否则 `HttpListener` 会因无法绑定 HTTP.sys 而崩溃（.NET 异常 `0xe0434352`）。
-- 服务器是**常驻后台进程**，会话结束后可能被回收；每次遇到连接错误都应先检查/提醒启动服务器。
+- **`start-server` 会轮询服务器状态，确认就绪后才返回**（不会出现"报了成功但服务器其实没起来"）。
+- **普通权限即可，无需管理员、无需 `danger-full-access`**——前提是 exe 在 PATH 目录而不是工作区内（见 §3）。
+- **权限自检**：启动前服务器会探测能否在 `%LOCALAPPDATA%\IdfClientCLI` 写入文件。若写不了（典型原因是 exe 位于带 Low 完整性标签的工作区），服务器会**拒绝启动**（退出码 2）——这是有意为之，见 §8。跳过检查用 `--skip-permission-check`（不推荐）。
+- **服务器是常驻进程，但它挂在启动它的控制台上**：**关掉那个窗口服务器就停了**。要长期挂着就别关窗口。
+- 想换环境变量（如 `ESPBAUD`）：先设好变量再 `stop-server` → `start-server`（见 §2 的快照机制）。
 
 ### 4.3 日常命令
 
 ```powershell
-.\idfc.exe build                                 # 构建（自动检测配置是否过期）
-.\idfc.exe size                                  # 固件体积分析
-.\idfc.exe flash                                 # 烧录到已保存的串口
-.\idfc.exe monitor --wait-for "App started"      # 串口监视，命中后退出
-.\idfc.exe run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
-.\idfc.exe menuconfig search "IRAM SPIRAM"        # 查配置项（标题/说明/当前值），纯客户端
-.\idfc.exe menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
-.\idfc.exe idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
+idfc build                                 # 构建（自动检测配置是否过期）
+idfc size                                  # 固件体积分析
+idfc flash                                 # 烧录到已保存的串口
+idfc monitor --wait-for "App started"      # 串口监视，命中后退出
+idfc run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
+idfc menuconfig search "IRAM SPIRAM"        # 查配置项（标题/说明/当前值），纯客户端
+idfc menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
+idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
 ```
 
 ---
@@ -130,7 +144,7 @@
 | `status` | 查看项目配置与服务器状态 |
 | `ports` | 列出系统串口（含设备名与实例路径） |
 | `set-port COMx` / `set-idfenv <ps1>` / `set-variant <T>` | 记住项目默认配置 |
-| `powershell` / `vscode` | 由服务器（满权限）在当前目录打开 PowerShell / VS Code |
+| `powershell` / `vscode` | 由服务器（以启动它那个进程的权限）在当前目录打开 PowerShell / VS Code |
 
 **共用参数**：`-t <build-type>` 指定构建类型；`-p COMx` 指定串口。**未知命令与未知参数会被明确拒绝**（退出码 1）。
 
@@ -163,7 +177,7 @@
 - **纯客户端命令**：只读 `build/<构建类型>/config/` 下的 `kconfig_menus.json`（全部选项 + 标题 + 说明全文 + 依赖）与 `sdkconfig.json`（当前生效值），**不经过 IDF 服务器、也不触发构建**。
 - ⚠ **必须先成功构建过一次**：这两个 json 由 ESP-IDF 在**配置阶段**生成（实测 debug 版 `kconfig_menus.json` 2.6MB / 4079 个节点、`sdkconfig.json` 1730 个键）。缺失时命令会提示先 `build` 并以退出码 1 退出。
 - 退出码：`0` 成功；`1` = 参数错误 / 缺少构建产物 / **没有匹配项** / 页码越界。
-- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `.\idfc.exe menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS` 会连说明全文一起打出来。
+- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `idfc menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS` 会连说明全文一起打出来。
 
 ---
 
@@ -217,7 +231,7 @@
 |---|---|
 | `0` | 成功（含 `monitor --wait-for` 命中） |
 | `1` | 参数无效 / 校验失败 / `monitor --timeout` 超时 / 激活脚本未找到 / `menuconfig` 无匹配项或缺构建产物 |
-| `2` | 沙箱权限探测失败（服务器未启动）；也会作为 `idf.py` 的退出码透传（如烧录失败） |
+| `2` | 权限探测失败：exe 位于带 Low 完整性标签的目录（如 DSH 工作区），服务器未启动；也会作为 `idf.py` 的退出码透传（如烧录失败） |
 | `-1` | 服务器未运行 / 连接错误，或输出流结束但未收到退出码 |
 | `<n>` | 透传的 ESP-IDF 命令退出码 |
 
@@ -227,19 +241,19 @@
 
 | 现象 | 原因 | 解决办法 |
 |---|---|---|
-| `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1） | 服务器未启动或被回收 | `.\idfc.exe start-server`（或让用户运行 `StartIDFCServer.cmd`） |
-| `.NET 异常 0xe0434352` / `HttpListener` 崩溃 | 沙箱阻止 HTTP.sys 端口绑定 | 用 `danger-full-access` 权限启动服务器 |
-| `[ERROR] 测试权限时写入到 … 失败`（退出码 2） | 当前处于 `workspace-write` 沙箱，服务器**主动拒绝**启动 | 用满权限启动；仅临时调试时可加 `--skip-permission-check`（**不推荐**，受限沙箱里起的服务器会让后续构建出现难以归因的失败） |
+| `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1） | 服务器未启动，或启动它的窗口被关掉了 | `idfc start-server`（普通权限即可） |
+| `[ERROR] 测试权限时写入到 … 失败`（退出码 2） | `idfc.exe` 放在带 **Low 完整性标签**的目录里（典型是 DSH 工作区），写不了 `%LOCALAPPDATA%`，服务器**主动拒绝**启动 | 把 `idfc.exe` 移到 **PATH 中的工作区外目录**再启动（见 §3）。`danger-full-access` 无效，因为拦路的是完整性标签而不是 DSH 沙箱；仅临时调试时可加 `--skip-permission-check`（**不推荐**） |
+| `.NET 异常 0xe0434352` / `HttpListener` 崩溃 | 端口绑定失败（通常是被占用，或运行环境异常） | 先 `idfc stop-server` 再重启；确认没有别的进程占用 19781 |
 | `没有这样的命令：\`-B\`` / `\`--server\`` | 用了旧版语法 | 见 §1 的迁移对照表 |
 | 激活脚本无法加载（ExecutionPolicy 报错） | 执行策略限制 | `start-server` 内部已用 `-ExecutionPolicy Bypass`；手工启动时需自己带上 |
-| 端口被占用 | 已有服务器实例 | `.\idfc.exe stop-server` 后重启 |
-| 改了 `sdkconfig.defaults*` 但固件行为没变 | 已有 sdkconfig 优先级更高（§6.2） | `.\idfc.exe build`（自动检测）或 `build --reconfigure` |
-| `flash` 打印"当前构建类型 … 已经过时" | 构建产物早于 defaults/Kconfig（§6.2），而 `flash` 只警告不重建 | 先 `.\idfc.exe build` 再 `flash`（或直接用 `run`） |
-| `menuconfig` 报"缺少 menuconfig 查询所需的数据文件" | 该构建类型还没成功构建过（两个 json 由配置阶段生成） | 先 `.\idfc.exe build -t <构建类型>`，再重试 |
+| 端口被占用 | 已有服务器实例 | `idfc stop-server` 后重启 |
+| 改了 `sdkconfig.defaults*` 但固件行为没变 | 已有 sdkconfig 优先级更高（§6.2） | `idfc build`（自动检测）或 `build --reconfigure` |
+| `flash` 打印"当前构建类型 … 已经过时" | 构建产物早于 defaults/Kconfig（§6.2），而 `flash` 只警告不重建 | 先 `idfc build` 再 `flash`（或直接用 `run`） |
+| `menuconfig` 报"缺少 menuconfig 查询所需的数据文件" | 该构建类型还没成功构建过（两个 json 由配置阶段生成） | 先 `idfc build -t <构建类型>`，再重试 |
 | `-t <V>` 报"配置文件尚不存在" | 缺少 `sdkconfig.defaults.<V>`，或构建类型拼错 | 确认该文件存在；构建类型只能由字母、数字、下划线组成 |
 | 串口被占用 | 上一次 monitor 的进程尚未完全退出 | 约 1 秒内自动清理；仍占用则 `stop-server` 后重启 |
 | 想临时改波特率 | 环境变量快照机制（§2） | 在**启动服务器之前**设置 `ESPBAUD`，然后重启服务器 |
-| 需要跑 idfc 未封装的命令 | —— | `.\idfc.exe idfpy <idf.py 参数…>` |
+| 需要跑 idfc 未封装的命令 | —— | `idfc idfpy <idf.py 参数…>` |
 
 ---
 
@@ -254,4 +268,4 @@ build/debug/partition_table/partition-table.bin 分区表
 build/debug/size_analysis_report.txt            size 命令生成的分析报告
 ```
 
-烧录：`.\idfc.exe flash`（或 `.\idfc.exe run` 一条龙）。
+烧录：`idfc flash`（或 `idfc run` 一条龙）。

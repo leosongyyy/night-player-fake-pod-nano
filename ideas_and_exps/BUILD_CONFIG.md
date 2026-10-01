@@ -45,7 +45,7 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 
 ## 3. 构建命令
 
-所有命令通过项目自带的 `idfc.exe`（客户端-服务器架构）执行，在项目根目录运行。
+所有命令通过 **PATH 中的 `idfc.exe`**（客户端-服务器架构，下载与安装见 `IDFC_USAGE.md` §3）执行，在项目根目录运行、直接写 `idfc` 即可（项目里不再自带这个 exe）。
 
 ### 3.1 构建：参数由 idfc 自动拼装
 
@@ -54,30 +54,30 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 `-D SDKCONFIG="build/<variant>/sdkconfig"`）。首建与增量构建是同一条命令：
 
 ```powershell
-.\idfc.exe build                      # 当前构建类型（.idfc 里保存的，默认 debug）
-.\idfc.exe build -t releasecandidate  # 指定类型
-.\idfc.exe build -t release
+idfc build                      # 当前构建类型（.idfc 里保存的，默认 debug）
+idfc build -t releasecandidate  # 指定类型
+idfc build -t release
 ```
 
-> ⚠ 旧写法（`.\idfc.exe -B build/debug -D SDKCONFIG_DEFAULTS="…" build`）**已全部失效**，
+> ⚠ 旧写法（`idfc -B build/debug -D SDKCONFIG_DEFAULTS="…" build`）**已全部失效**，
 > 现在报 `没有这样的命令`（退出码 1）。历史文档/旧笔记里的这类命令不要照抄，完整说明见 `IDFC_USAGE.md`。
 
 ### 3.2 增量构建
 
 ```powershell
-.\idfc.exe build -t debug                     # debug 增量构建（默认类型，可省 -t）
-.\idfc.exe build -t releasecandidate          # RC 增量构建
-.\idfc.exe build -t release                   # release 增量构建
+idfc build -t debug                     # debug 增量构建（默认类型，可省 -t）
+idfc build -t releasecandidate          # RC 增量构建
+idfc build -t release                   # release 增量构建
 ```
 
 ### 3.3 重新配置 / 强制全量 / 只看会做什么
 
 ```powershell
-.\idfc.exe build --reconfigure        # 强制 clean + reconfigure 后再构建（改了 defaults 之后）
-.\idfc.exe build --no-reconfigure     # 跳过过期检测，纯增量
-.\idfc.exe build --fullclean          # 删掉整个 build/<variant> 再从零构建
-.\idfc.exe build --dry-run            # 不构建，只报告"是否要清理"与将要执行的完整命令
-.\idfc.exe clean -t debug             # 只删 build/debug/sdkconfig 与 build/debug/config
+idfc build --reconfigure        # 强制 clean + reconfigure 后再构建（改了 defaults 之后）
+idfc build --no-reconfigure     # 跳过过期检测，纯增量
+idfc build --fullclean          # 删掉整个 build/<variant> 再从零构建
+idfc build --dry-run            # 不构建，只报告"是否要清理"与将要执行的完整命令
+idfc clean -t debug             # 只删 build/debug/sdkconfig 与 build/debug/config
 ```
 
 这些命令实际执行的完整 `idf.py` 命令行，会在开头以 ``# Executing `idfc idfpy …` `` 回显，可直接照抄复用。
@@ -92,7 +92,7 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 - 想强制重配用 `build --reconfigure`，想从最干净状态开始用 `build --fullclean`。
 - 需要"只 reconfigure、不编译"时没有专门子命令，走逃生舱——**路径参数必须自己写全**：
   ```powershell
-  .\idfc.exe idfpy -B build/debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" -D SDKCONFIG="build/debug/sdkconfig" reconfigure
+  idfc idfpy -B build/debug -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.debug" -D SDKCONFIG="build/debug/sdkconfig" reconfigure
   ```
 - 裸 `idfpy` 绕过 `build` 时，`-B`/`-D` 的正确性由你自己负责（历史上"堆毒化仍开"的事故就是这么来的）。
 
@@ -101,9 +101,9 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 烧录前先确认设备串口号（如 `COM12`）。构建类型与串口都由 idfc 拼装，`-p` 只在你没 `set-port` 时才需要：
 
 ```powershell
-.\idfc.exe flash                      # 烧录 .idfc 里保存的类型 + 串口（默认 debug / COM12）
-.\idfc.exe flash -t releasecandidate -p COM12
-.\idfc.exe flash -t release -p COM12
+idfc flash                      # 烧录 .idfc 里保存的类型 + 串口（默认 debug / COM12）
+idfc flash -t releasecandidate -p COM12
+idfc flash -t release -p COM12
 ```
 
 ⚠ **`flash` 不重建**：若 `build/<variant>/sdkconfig` 早于 defaults 或任何 `Kconfig`/`*.projbuild`，
@@ -111,24 +111,24 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 要烧新配置就得先 `build`，或直接用 `run`（构建 → 体积 → 烧录 → 监视一条龙）：
 
 ```powershell
-.\idfc.exe run --monitor-wait-for "App started"
+idfc run --monitor-wait-for "App started"
 ```
 
 ⚠ 不确定端口时先列串口（`ports` 会过滤掉蓝牙串口，并给出设备名与实例路径，便于认板子）：
 
 ```powershell
-.\idfc.exe ports
-.\idfc.exe set-port COM12      # 记住本项目的默认串口，之后 flash/monitor/run 都不用带 -p
+idfc ports
+idfc set-port COM12      # 记住本项目的默认串口，之后 flash/monitor/run 都不用带 -p
 ```
 
 ## 5. 串口监视
 
 ```powershell
-.\idfc.exe monitor                              # .idfc 里保存的类型与串口（默认 debug / COM12）
-.\idfc.exe monitor -t releasecandidate -p COM12
-.\idfc.exe monitor --wait-for "App started"     # 命中即退出（退出码 0），适合自动化
-.\idfc.exe monitor --timeout 15000              # 到点退出（退出码 1）
-.\idfc.exe monitor --grep "MEM:"                # 只显示匹配行
+idfc monitor                              # .idfc 里保存的类型与串口（默认 debug / COM12）
+idfc monitor -t releasecandidate -p COM12
+idfc monitor --wait-for "App started"     # 命中即退出（退出码 0），适合自动化
+idfc monitor --timeout 15000              # 到点退出（退出码 1）
+idfc monitor --grep "MEM:"                # 只显示匹配行
 ```
 
 退出：`Ctrl+]`（`--wait-for` / `--timeout` 会自行退出）。观察要点：
@@ -151,8 +151,8 @@ sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后
 
 ## 7. 常见问题
 
-- **改了 `sdkconfig.defaults.*` 后不生效**：已有 sdkconfig 优先级高于 defaults，仅 reconfigure 不会覆盖旧值。**现在只需 `.\idfc.exe build`**——它会自动检测过期并 clean + reconfigure（见 §3.4）；要手工处理才需要 `build --reconfigure` 或删掉 `build/<v>/sdkconfig`。
-- **换了新电脑/删了 build 目录**：直接 `.\idfc.exe build -t <类型>` 即可，参数会重新生成（见 §3.1）。
+- **改了 `sdkconfig.defaults.*` 后不生效**：已有 sdkconfig 优先级高于 defaults，仅 reconfigure 不会覆盖旧值。**现在只需 `idfc build`**——它会自动检测过期并 clean + reconfigure（见 §3.4）；要手工处理才需要 `build --reconfigure` 或删掉 `build/<v>/sdkconfig`。
+- **换了新电脑/删了 build 目录**：直接 `idfc build -t <类型>` 即可，参数会重新生成（见 §3.1）。
 - **想调整某配置项**：编辑对应的 `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release`（只写差异项），或公共项编辑 `sdkconfig.defaults`。
 - **`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` 与 performance_monitor 的关系**：release 关闭 performance_monitor 时也一并关闭了 runtime stats（`ulTaskGetIdleRunTimeCounter` 仅 performance_monitor 使用），二者必须同开同关。
 

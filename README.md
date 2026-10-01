@@ -166,17 +166,23 @@
 
 ## 🔧 开发环境
 
-1. 安装 **ESP-IDF 5.5.4 或 5.5.5**（默认路径 `C:\esp`）；以及Deepseek Harness
-2. 双击 `StartIDFCServer.vbs` 启动构建服务；
-3. 用 Deepseek Harness 打开本项目文件夹，在对话框输入"帮我构建这个项目"；
-4. 设备连接电脑后，输入"帮我构建release并烧录到 COMx"（COMx 换成实际串口号）。
+1. 安装 **ESP-IDF 5.5.4 或 5.5.5**（默认路径 `C:\esp`）；
+2. 从 **<https://gitee.com/ZYFDroid/idf-client-cli/releases/>** 下载 `idfc.exe`，放到 **PATH 里的某个目录**（例如 `C:\Users\<你>\ProgramFiles\bin\`）——这是本项目构建/烧录/监视的统一入口，**不要放进项目目录**（工作区带的低级完整性标签会让它无法启动服务器，详见 [AGENTS.md](AGENTS.md)）；
+3. 在项目目录里启动一次构建服务（**普通权限即可，不需要管理员**）：
+   ```powershell
+   idfc start-server
+   ```
+4. 用 Deepseek Harness 打开本项目文件夹，在对话框输入"帮我构建这个项目"；
+5. 设备连接电脑后，输入"帮我构建 release 并烧录到 COMx"（COMx 换成实际串口号）。
 
-也可以直接用项目自带的 `idfc.exe`（多配置说明见 `ideas_and_exps/BUILD_CONFIG.md`）：
+多配置说明见 [ideas_and_exps/BUILD_CONFIG.md](ideas_and_exps/BUILD_CONFIG.md)，也可以自己敲（都在项目目录下执行）：
 
 ```powershell
-.\idfc.exe build                       # 构建（默认调试版）
-.\idfc.exe build -t release            # 构建发布版（完整字体、调试全关）
-.\idfc.exe flash -p COMx               # 烧录（COMx 换成实际串口号）
+idfc build                       # 构建（默认调试版）
+idfc build -t release            # 构建发布版（完整字体、调试全关）
+idfc flash -p COMx               # 烧录（COMx 换成实际串口号）
+idfc run -t release --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
+idfc help --all                  # 全部命令与参数
 ```
 
 ## 📱 兼容设备

@@ -15,9 +15,10 @@
 
 **2. 开发环境**
 
-- ESP-IDF **5.5.X**（安装于 `C:\esp\v5.5.X\esp-idf`，本机已验证 5.5.4 与 5.5.5），激活脚本 `C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1`。不同的开发电脑上可能是5.5.4也可能是5.5.5。这里统一使用idfc.exe进行调用。
+- ESP-IDF **5.5.X**（安装于 `C:\esp\v5.5.X\esp-idf`，本机已验证 5.5.4 与 5.5.5），激活脚本 `C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1`。不同的开发电脑上可能是5.5.4也可能是5.5.5。这里统一使用idfc进行调用。
 - LVGL **8.4.0**（managed component，`lvgl/lvgl`）
-- 构建/烧录通过项目自带的 **`idfc.exe`**（客户端-服务器架构）完成，详见下方"idfc.exe 使用说明"。
+- 构建/烧录通过 **`idfc.exe`**（客户端-服务器架构）完成，详见下方"idfc 使用说明"。**下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，把它放到 PATH 中的某个目录（本机为 `C:\Users\ZYFDroid\ProgramFiles\bin\idfc.exe`），随后**在项目目录里直接用 `idfc <子命令>` 调用**（不需要写 `.\idfc.exe`，项目里也不再自带这个 exe）。
+- ⚠ **千万不要把 `idfc.exe` 放在本项目工作区内**：DeepSeek Harness v0.1.7-rc.1 起会给工作区打可继承的 **Low 完整性标签**，工作区内的 exe 只能以 Low 启动，服务器的权限自检（写 `%LOCALAPPDATA%\IdfClientCLI`）会失败并拒绝启动，且 **`danger-full-access` 也无法挽救**（它只解除 DSH 沙箱，不解除完整性标签）。放在 PATH 目录里就没有这个问题。
 
 **3. 参考资料**
 
@@ -26,48 +27,50 @@
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：三套构建配置（debug/releasecandidate/release）的完整说明
 
-**4. idfc.exe 使用说明（重要）**
+**4. idfc 使用说明（重要）**
 
-`idfc.exe` 是 ESP-IDF 命令行的**服务器 + 客户端**封装：服务器一次性激活 IDF 环境并常驻监听 `http://localhost:19781/idf-client-cli/`（HTTP + SSE 流式输出），客户端把 `idf.py` 命令发给服务器执行。
+`idfc.exe` 是 ESP-IDF 命令行的**服务器 + 客户端**封装：服务器一次性激活 IDF 环境并常驻监听 `http://localhost:19781/idf-client-cli/`（HTTP + SSE 流式输出），客户端把 `idf.py` 命令发给服务器执行。**下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**（项目仓库里不再自带该 exe）。
 
-> ⚠ **本项目用的是「子命令版」idfc，旧语法已全部失效**：`--server`、`-B build/<cfg> build`、`-B ... reconfigure` 等写法现在一律报 `没有这样的命令`（退出码 1，不会静默成功）。**历史文档、旧对话记录里的 idfc 命令不要照抄**；完整说明见 `ideas_and_exps/IDFC_USAGE.md`，全部命令与参数用 `.\idfc.exe help --all` 查。
+> ⚠ **本项目用的是「子命令版」idfc，旧语法已全部失效**：`--server`、`-B build/<cfg> build`、`-B ... reconfigure` 等写法现在一律报 `没有这样的命令`（退出码 1，不会静默成功）。**历史文档、旧对话记录里的 idfc 命令不要照抄**；完整说明见 `ideas_and_exps/IDFC_USAGE.md`，全部命令与参数用 `idfc help --all` 查。
 
+- **安装（每台开发机一次）**：从上面的发布页下载 `idfc.exe`，解压/复制到 **PATH 中的某个目录**（本机是 `C:\Users\ZYFDroid\ProgramFiles\bin\`）。之后**在项目目录里直接用 `idfc`，不要写路径**（`idfc build`、`idfc status`…）——客户端通过当前工作目录找到 `.idfc/idfc_config.json` 并自动带 `-B build/<cfg> …` 参数，不需要 `.\idfc.exe`。验证：`idfc help --all` 有输出即可。
+- 🚨 **若 PATH 里找不到 `idfc.exe`（报 `无法将“idfc.exe”项识别为 cmdlet…` / `CommandNotFoundException`，或 `Get-Command idfc.exe` 无结果）**：**不要自己去找、不要拿别处的旧版顶替、也不要改用 `.\idfc.exe`**（工作区里已经没有这个文件了）。此时应**提醒用户下载**，并给出地址 **<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，请用户把它放到 PATH 中的目录（工作区外），然后重试。
 - **首次配置项目**（每个项目目录做一次，写入 `.idfc/idfc_config.json`）：
   ```powershell
-  .\idfc.exe set-idfenv "C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1"   # 版本号按本机安装（5.5.4 或 5.5.5）
-  .\idfc.exe set-variant debug
-  .\idfc.exe ports          # 列出串口（需服务器已启动）
-  .\idfc.exe set-port COMn
-  .\idfc.exe status         # 复核当前生效的构建类型与串口
+  idfc set-idfenv "C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1"   # 版本号按本机安装（5.5.4 或 5.5.5）
+  idfc set-variant debug
+  idfc ports          # 列出串口（需服务器已启动）
+  idfc set-port COMn
+  idfc status         # 复核当前生效的构建类型与串口
   ```
-
-- **启动服务器**（需要 `danger-full-access` 权限，否则 HTTP.sys 端口绑定会失败）：
+- **启动服务器（普通权限即可，不需要管理员）**：
   ```powershell
-  .\idfc.exe start-server                          # 已 set-idfenv 时可省略参数
-  .\idfc.exe start-server --idfenv "<激活脚本路径>"  # 或显式指定本次使用的脚本
+  idfc start-server                          # 已 set-idfenv 时可省略参数
+  idfc start-server --idfenv "<激活脚本路径>"  # 或显式指定本次使用的脚本
   ```
-  也可以让用户直接运行项目根目录的 `StartIDFCServer.vbs`。`start-server` 会轮询服务器状态，**确认就绪后才返回**；停止用 `.\idfc.exe stop-server`。
+  ⚠ **前提是 `idfc.exe` 位于 PATH 目录而不是项目工作区内**：DeepSeek Harness v0.1.7-rc.1 起会给工作区打可继承的 **Low 完整性标签**（`icacls` 可见 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`），而 Windows 派生进程的完整性取 `min(创建者令牌, 映像文件)`——工作区内的 exe 必定以 Low 启动，写不了 `%LOCALAPPDATA%`（服务器的权限自检正在探测这个），于是启动被拒绝。**`danger-full-access` 也救不了**，它只解除 DSH 沙箱、不解除完整性标签；唯一出路就是把 exe 放到工作区外的 PATH 目录（已实测：普通权限、无提权、无 `danger-full-access` 也能正常启动并长期存活）。
+  `start-server` 会轮询服务器状态，**确认就绪后才返回**；服务器控制台就是启动它的那个窗口，**关窗口=停服务器**，停止用 `idfc stop-server`（普通权限即可，它会 `taskkill /t` 自刎）。
 
-- **执行命令**（客户端，在 `workspace-write` 权限下运行）：
+- **执行命令**（客户端，在 `workspace-write` 权限下运行，无需提权、无需 `danger-full-access`）：
   ```powershell
-  .\idfc.exe build                                 # 构建（自动检测配置是否过期）
-  .\idfc.exe size                                  # 固件体积分析
-  .\idfc.exe flash                                 # 烧录到已保存的串口
-  .\idfc.exe monitor --wait-for "App started"      # 串口监视，命中后退出
-  .\idfc.exe run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
-  .\idfc.exe idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
+  idfc build                                 # 构建（自动检测配置是否过期）
+  idfc size                                  # 固件体积分析
+  idfc flash                                 # 烧录到已保存的串口
+  idfc monitor --wait-for "App started"      # 串口监视，命中后退出
+  idfc run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
+  idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
   ```
-- ⚠ 在使用 `.\idfc.exe idfpy <任意 idf.py 参数...>` 之前，请务必阅读 IDFC_USAGE.md，查看此前旧版本踩过的坑。
+- ⚠ 在使用 `idfc idfpy <任意 idf.py 参数...>` 之前，请务必阅读 IDFC_USAGE.md，查看此前旧版本踩过的坑。
 - 💡 **执行回显**：`build`/`flash`/`monitor`/`size`（以及 `run` 的各阶段）执行前会打印一行 `# Executing \`idfc idfpy -B build\<cfg> … <子命令>\``，即本次**实际使用**的完整命令——想确认"到底在构建哪一套"或手工复现，直接看这一行。
 - ⚠ **`flash` 只警告、不重建**：若 `build/<cfg>/sdkconfig` 早于 `sdkconfig.defaults*` 或任何 `Kconfig`/`*.projbuild`，`flash` 会打印"当前构建类型 … 已经过时"的警告，**但仍会把旧产物烧进去**。要烧新配置就得先 `build`（或直接 `run`）。
 - 🔎 **查 menuconfig 配置项**（标题 / 说明全文 / 当前值，**纯客户端命令**，不触发构建）：
   ```powershell
-  .\idfc.exe menuconfig search "IRAM SPIRAM"          # 多关键词 AND 检索（每页 20 条，--page N 翻页）
-  .\idfc.exe menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
+  idfc menuconfig search "IRAM SPIRAM"          # 多关键词 AND 检索（每页 20 条，--page N 翻页）
+  idfc menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
   ```
   ⚠ 需要该构建类型**至少成功构建过一次**（`kconfig_menus.json` / `sdkconfig.json` 由 ESP-IDF 在配置阶段生成）；缺失时会提示先 `build` 并退出码 1。没有匹配项同样退出码 1。想改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先用它确认"这项是干什么的、现在是多少"。
-- **⚠ 若提示 `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1）**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**（运行 `StartIDFCServer.cmd` 或 `start-server`），或者按照说明使用完整权限重启，由用户确认启动。服务器是常驻后台进程，会话结束后可能被回收，每次遇到连接错误都应先检查/提醒启动服务器。
-- 未用 `-t` 指定时，构建类型取自 `.idfc/idfc_config.json` 的 `ActiveBuildVariant`（默认为 `debug`）；串口取自 `LastComPort`。**这两个是隐式状态，不确定时先跑 `.\idfc.exe status`。**
+- **⚠ 若提示 `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1）**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**：在任意目录执行 `idfc start-server`（普通权限即可；也可以让用户开一个终端自己跑）。服务器是常驻进程、且**它的控制台就是启动它的那个窗口，窗口一关就停**，所以每次遇到连接错误都应先检查/提醒启动服务器。
+- 未用 `-t` 指定时，构建类型取自 `.idfc/idfc_config.json` 的 `ActiveBuildVariant`（默认为 `debug`）；串口取自 `LastComPort`。**这两个是隐式状态，不确定时先跑 `idfc status`。**
 
 **5. 开发命令**
 
@@ -76,37 +79,37 @@
 ** debug（精简字体 + 非极速封面 + 调试全开）** —— 当前项目默认
 
 ```powershell
-.\idfc.exe build                      # 增量构建（自动检测配置是否过期）
-.\idfc.exe build --reconfigure        # 强制重新配置（改了 sdkconfig.defaults* 之后）
-.\idfc.exe build --dry-run            # 只看"会做什么"，不实际构建
-.\idfc.exe flash                      # 烧录（串口取自 .idfc 配置）
-.\idfc.exe monitor --wait-for "App started"   # 监视并在命中后退出
+idfc build                      # 增量构建（自动检测配置是否过期）
+idfc build --reconfigure        # 强制重新配置（改了 sdkconfig.defaults* 之后）
+idfc build --dry-run            # 只看"会做什么"，不实际构建
+idfc flash                      # 烧录（串口取自 .idfc 配置）
+idfc monitor --wait-for "App started"   # 监视并在命中后退出
 ```
 
 ** releasecandidate（完整字体 + 极速封面 + 调试全开） **
 
 ```powershell
-.\idfc.exe build -t releasecandidate
-.\idfc.exe build -t releasecandidate --reconfigure
-.\idfc.exe flash -t releasecandidate -p COMn
+idfc build -t releasecandidate
+idfc build -t releasecandidate --reconfigure
+idfc flash -t releasecandidate -p COMn
 ```
 
 ** release（完整字体 + 极速封面 + 调试全关） **
 
 ```powershell
-.\idfc.exe build -t release
-.\idfc.exe build -t release --reconfigure
-.\idfc.exe flash -t release -p COMn
+idfc build -t release
+idfc build -t release --reconfigure
+idfc flash -t release -p COMn
 ```
 
 **其它常用**
 
 ```powershell
-.\idfc.exe run -t debug --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
-.\idfc.exe size -t debug                                   # 固件体积分析
-.\idfc.exe clean -t debug        # 删 build/debug/sdkconfig 与 build/debug/config
-.\idfc.exe fullclean -t debug    # 删整个 build/debug
-.\idfc.exe help --all            # 全部命令与参数
+idfc run -t debug --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
+idfc size -t debug                                   # 固件体积分析
+idfc clean -t debug        # 删 build/debug/sdkconfig 与 build/debug/config
+idfc fullclean -t debug    # 删整个 build/debug
+idfc help --all            # 全部命令与参数
 ```
 
 **备注**：
@@ -316,4 +319,4 @@ components/
 ### 回复/行动说明
 
 - 推理/思考及回复均使用中文。
-- 若 IDF 服务器未运行（`idfc` 报 `IDF 服务器可能尚未运行` / 退出码 -1），请提示用户手动启动 `StartIDFCServer.cmd`（或按照提示使用完整权限运行 `idfc.exe start-server`，由用户点击确认。）
+- 若 IDF 服务器未运行（`idfc` 报 `IDF 服务器可能尚未运行` / 退出码 -1），请提示用户手动启动：执行 `idfc start-server`（普通权限即可；服务器控制台就是启动它的那个窗口，**关掉窗口服务器即停止**）。

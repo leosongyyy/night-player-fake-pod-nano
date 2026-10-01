@@ -189,7 +189,7 @@ void global_style_marquee_set_text(lv_obj_t *label, const char *text);
 
 ## 8. 验证记录
 
-1. 编译：debug 构建（`.\idfc.exe build`）通过，无新增警告；
+1. 编译：debug 构建（`idfc build`）通过，无新增警告；
 2. 启动日志：`gstyle: marquee style: rounds=3, pause=1000ms, start delay=1000ms, speed=0px/s`
    （懒初始化，首次 `attach` 时打印一次），随后整机启动、播放、列表加载全部正常；
 3. **设备实测（debug 版烧录到 COM12，用户确认）**：跑马灯如预期工作——
