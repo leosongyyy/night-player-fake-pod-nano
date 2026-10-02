@@ -4,6 +4,8 @@
 
 **FakePodNano** 是由 B 站 UP 主「[萨那兰的黄昏](https://space.bilibili.com/18598545)」设计的开源成品播放器硬件（ESP32-S3 + AMOLED 触摸屏 + A/B 双物理按键 + TF 卡 + CS43131，[项目介绍视频](https://www.bilibili.com/video/BV1FKMQzSEvY/)、[开源硬件主页（嘉立创）](https://oshwhub.com/planevina/fakepodnano-lossless-audioplayer)）。本固件为其重写了以"听歌"为核心的整套体验：滑动浏览音乐库、全屏封面正在播放页、下拉控制中心，以及专为夜间场景设计的睡眠定时与息屏盲操作。
 
+> **⚠ 目前仅支持 CS43131 版本硬件**：FakePodNano 另有 **PCM5102** 版本（耳放芯片不同），本固件**尚未真正支持**、也从未在实机验证过，**请勿刷入 PCM5102 版本的机器**，详见下方「📱 兼容设备」。
+
 ## 人类作者寄语
 
 > 不得不说有了符合习惯的固件之后，从原来的吃灰变成了每天平均听三个小时起步
@@ -188,6 +190,26 @@ idfc help --all                  # 全部命令与参数
 ## 📱 兼容设备
 
 本固件面向开源项目 **FakePodNano** 的成品播放器：ESP32-S3、460×460 圆角 AMOLED 触摸屏、A/B 双键、TF 卡。不同批次硬件可能存在差异，刷机前请先核对设备参数。
+
+### ⚠️ 关于 PCM5102 版本：本固件目前**并未真正支持**
+
+FakePodNano 存在**两种 DAC（耳放芯片）版本**：
+
+| 版本 | 控制方式 | 本固件支持情况 |
+|---|---|---|
+| **CS43131** | I²C 控制（端口 0x30）+ I2S | ✅ 开发与实测均基于此版本 |
+| **PCM5102** | 仅 I2S，无 I²C 控制 | ❌ **尚未支持**（未开发、未实机验证） |
+
+- **PCM5102 版本的机器请不要刷本固件**：固件的音频链路完全按 CS43131 初始化（I²C 控制 + I2S 写入），而 PCM5102 没有对应的 I²C 控制端口，音频部分无法正常工作；且该版本从未在实机上验证过。
+- 构建系统里虽然预留了 `pcm5102` 的构建维度（`idfc_buildconfig.json` 的 `dac_chip` 维度，见 [BUILD_MATRIX.md](ideas_and_exps/BUILD_MATRIX.md)），但**选它不会做任何真正的切换**：Kconfig 项 `CONFIG_AUDIO_DAC_PCM5102` 目前**只在启动日志里打印一行**
+
+  ```
+  DAC chip: PCM5102 (build-time selection only, real switching not implemented)
+  ```
+
+  音频初始化仍然走 CS43131 的路径。反过来，`CONFIG_AUDIO_DAC_CS43131` 与 `CONFIG_AUDIO_DAC_PCM5102` **同时开启或同时关闭都会直接编译报错**——这是有意为之，防止"构建配置没生效却静默烧出一版选错芯片的固件"。
+- 真正的切换（跳过 CS43131 的 I²C 初始化与控制、按 PCM5102 调整 I2S 与时钟策略、把音量/静音改到 I2S 数据侧处理等）**尚未实现**；固件侧的配置约定见 [BUILD_CONFIG.md](ideas_and_exps/BUILD_CONFIG.md) §8。
+- 如果你手上有 PCM5102 版本的设备并愿意协助验证，欢迎提 issue。
 
 **FakePodNano 原始项目（硬件作者）：**
 

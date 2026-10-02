@@ -7,6 +7,15 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_UI_COVER_FLASH=y
+# 音频 DAC 芯片（构建期二选一，配置项定义见 main/Kconfig.projbuild 的
+# "音频 DAC 芯片选择"）：这里声明的是**当前真实硬件**——FakePodNano 成品机为
+# CS43131（I2C 控制端口 0x30 + I2S）。两项必须且只能开一个：同时开启或同时
+# 关闭都会在 main/main.c 的 app_main 结尾编译报错。
+# ⚠ 配置矩阵构建（idfc_buildconfig.json 的 dac_chip 维度）会在本文件之后叠加
+#    sdkconfig.dac_chip.<类型>，从而切到 pcm5102；该维度目前**只影响启动日志**
+#    （真正的 DAC 切换尚未实现）。
+CONFIG_AUDIO_DAC_CS43131=y
+# CONFIG_AUDIO_DAC_PCM5102 is not set
 CONFIG_COMPILER_ORPHAN_SECTIONS_PLACE=y
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=512

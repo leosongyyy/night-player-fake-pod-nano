@@ -221,4 +221,29 @@ void app_main(void)
     startPerformanceMonitor();
     mem_trace_log("17-perf_monitor");
 #endif
+
+    /* ------------------------------------------------------------------
+       音频 DAC 芯片选择（构建期二选一，见 main/Kconfig.projbuild）
+       ⚠ 当前**并未实现真正的 DAC 切换**：无论选中哪一项，上面的音频初始化
+         链路都完全一致（I2S 主机 + CS43131 的 I2C 控制），这两项不改变任何
+         驱动或初始化行为；这里只把构建期选中的芯片名打印到日志，用于验证
+         idfc 的配置矩阵（idfc_buildconfig.json 的 dac_chip 维度）是否按预期
+         生效：日志出现 "DAC chip: CS43131" 说明合并进去的是
+         sdkconfig.dac_chip.cs43131，"DAC chip: PCM5102" 则对应
+         sdkconfig.dac_chip.pcm5102。
+       两项是**独立**的 bool，但必须且只能开一个：同时开启或同时关闭都在
+       这里编译报错（避免"配置矩阵没生效"被静默忽略——那正是最坏的情况）。
+       真正的切换（PCM5102 无 I2C 控制 / I2S 配置差异 / 时钟策略等）待实现。
+       ------------------------------------------------------------------ */
+#if defined(CONFIG_AUDIO_DAC_CS43131) && defined(CONFIG_AUDIO_DAC_PCM5102)
+#error "音频 DAC 芯片选择错误：CONFIG_AUDIO_DAC_CS43131 与 CONFIG_AUDIO_DAC_PCM5102 不能同时开启（必须二选一）"
+#elif !defined(CONFIG_AUDIO_DAC_CS43131) && !defined(CONFIG_AUDIO_DAC_PCM5102)
+#error "音频 DAC 芯片选择错误：必须开启 CONFIG_AUDIO_DAC_CS43131 或 CONFIG_AUDIO_DAC_PCM5102 中的一项（必须二选一）"
+#elif defined(CONFIG_AUDIO_DAC_CS43131)
+    // ⚠ 仅日志：真正的 DAC 切换尚未实现（音频链路仍按 CS43131 初始化）
+    ESP_LOGI(TAG, "DAC chip: CS43131 (build-time selection only, real switching not implemented)");
+#else
+    // ⚠ 仅日志：真正的 DAC 切换尚未实现（音频链路仍按 CS43131 初始化）
+    ESP_LOGI(TAG, "DAC chip: PCM5102 (build-time selection only, real switching not implemented)");
+#endif
 }

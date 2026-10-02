@@ -88,6 +88,57 @@ menu "FakePodNanoNightPlayer 应用配置"
             0 = 关闭该功能。⚠ 本固件暂无充电检测：充电器接入时电压被抬高
             （高于 3.2V）不会触发；若后续接入充电状态检测，应排除充电态。
 
+    menu "音频 DAC 芯片选择（构建期二选一）"
+
+        # ⚠ 下面两项是**相互独立**的 bool 开关，但必须且只能开启一个：
+        #   · 同时开启 → 编译报错
+        #   · 同时关闭 → 编译报错
+        #   检查就写在 main/main.c 的 app_main 结尾（#if/#error）。
+        #
+        # ⚠ **目前尚未实现真正的 DAC 切换**：无论选中哪一项，音频链路都完全
+        #   按原样初始化（I2S 主机 + CS43131 的 I2C 控制），两项都不改变任何
+        #   驱动或初始化行为；选中结果**只在 app_main 结尾打印一行日志**。
+        #   这两项当前的用途是验证 idfc 的配置矩阵
+        #   （idfc_buildconfig.json 的 dac_chip 维度）是否按预期生效：
+        #   构建日志里出现 "DAC chip: CS43131" / "DAC chip: PCM5102" 即说明
+        #   配置矩阵选中的 sdkconfig.dac_chip.<类型> 被正确合并。
+        #   真正的切换（PCM5102 无 I2C 控制 / I2S 配置差异 / 时钟策略等）待实现。
+
+        config AUDIO_DAC_CS43131
+            bool "音频 DAC 使用 CS43131（I2C 控制 + I2S）"
+            default n
+            help
+                ⚠ 本项目前**不会真的切换 DAC**，只在 app_main 结尾打印
+                "DAC chip: CS43131"，用于确认配置矩阵选中的是 cs43131 类型。
+
+                语义（待真正实现后的预期行为）：使用板载 CS43131——I2C 控制
+                端口 0x30 + I2S 从机接收音频（见 core/hardware/audio/cs43131.c）。
+                这是本项目当前真实硬件（FakePodNano 成品机）。
+
+                与 AUDIO_DAC_PCM5102 必须且只能开启一个：两者都开或都关都会
+                在编译期报错（#error）。公共默认（sdkconfig.defaults）已选中
+                本项；配置矩阵构建时由 sdkconfig.dac_chip.<类型> 覆盖。
+
+        config AUDIO_DAC_PCM5102
+            bool "音频 DAC 使用 PCM5102（仅 I2S，无 I2C 控制）"
+            default n
+            help
+                ⚠ 本项目前**不会真的切换 DAC**，只在 app_main 结尾打印
+                "DAC chip: PCM5102"，用于确认配置矩阵选中的是 pcm5102 类型。
+
+                语义（待真正实现后的预期行为）：使用 PCM5102 版本芯片——该
+                芯片没有 I2C 控制端口，音量/静音等只能靠 I2S 数据侧处理，
+                因此切换后需要跳过 CS43131 的 I2C 初始化与控制路径。
+
+                ⚠ 作者目前只有 CS43131 版本的设备，**PCM5102 版本无法实机
+                验证**；本项在真正实现前只做日志打印。
+
+                与 AUDIO_DAC_CS43131 必须且只能开启一个：两者都开或都关都会
+                在编译期报错（#error）。配置矩阵构建时由
+                sdkconfig.dac_chip.pcm5102 选中本项。
+
+    endmenu
+
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
         default "0.9.0.0 alpha 5"

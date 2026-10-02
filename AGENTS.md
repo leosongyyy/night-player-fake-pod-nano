@@ -26,6 +26,7 @@
 - `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_sh8601、esp_lcd_touch、cmake_utilities、chmorgan__esp-libhelix-mp3）
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：三套构建配置（debug/releasecandidate/release）的完整说明
+- `BUILD_MATRIX.md`（`ideas_and_exps/`）：**配置矩阵**（`idfc_buildconfig.json`）的定义、配置文件格式规范、给 idfc 仓库的逐文件修改说明，以及 **2026-10-02 的新版 idfc 验收记录**（§7，含实测证据与已知小问题）
 
 **4. idfc 使用说明（重要）**
 
@@ -33,7 +34,7 @@
 
 > ⚠ **本项目用的是「子命令版」idfc，旧语法已全部失效**：`--server`、`-B build/<cfg> build`、`-B ... reconfigure` 等写法现在一律报 `没有这样的命令`（退出码 1，不会静默成功）。**历史文档、旧对话记录里的 idfc 命令不要照抄**；完整说明见 `ideas_and_exps/IDFC_USAGE.md`，全部命令与参数用 `idfc help --all` 查。
 
-- **安装（每台开发机一次）**：从上面的发布页下载 `idfc.exe`，解压/复制到 **PATH 中的某个目录**（本机是 `C:\Users\ZYFDroid\ProgramFiles\bin\`）。之后**在项目目录里直接用 `idfc`，不要写路径**（`idfc build`、`idfc status`…）——客户端通过当前工作目录找到 `.idfc/idfc_config.json` 并自动带 `-B build/<cfg> …` 参数，不需要 `.\idfc.exe`。验证：`idfc help --all` 有输出即可。
+- **安装（每台开发机一次）**：从上面的发布页下载 `idfc.exe`，解压/复制到 **PATH 中的某个目录**（本机是 `C:\Users\ZYFDroid\ProgramFiles\bin\`）。之后**在项目目录里直接用 `idfc`，不要写路径**（`idfc build`、`idfc status`…）——客户端通过当前工作目录找到 `.idfc/idfc_config.json` 并自动带 `-B build/<cell> …` 参数，不需要 `.\idfc.exe`。验证：`idfc help --all` 有输出即可。
 - 🚨 **若 PATH 里找不到 `idfc.exe`（报 `无法将“idfc.exe”项识别为 cmdlet…` / `CommandNotFoundException`，或 `Get-Command idfc.exe` 无结果）**：**不要自己去找、不要拿别处的旧版顶替、也不要改用 `.\idfc.exe`**（工作区里已经没有这个文件了）。此时应**提醒用户下载**，并给出地址 **<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，请用户把它放到 PATH 中的目录（工作区外），然后重试。
 - **首次配置项目**（每个项目目录做一次，写入 `.idfc/idfc_config.json`）：
   ```powershell
@@ -61,8 +62,8 @@
   idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
   ```
 - ⚠ 在使用 `idfc idfpy <任意 idf.py 参数...>` 之前，请务必阅读 IDFC_USAGE.md，查看此前旧版本踩过的坑。
-- 💡 **执行回显**：`build`/`flash`/`monitor`/`size`（以及 `run` 的各阶段）执行前会打印一行 `# Executing \`idfc idfpy -B build\<cfg> … <子命令>\``，即本次**实际使用**的完整命令——想确认"到底在构建哪一套"或手工复现，直接看这一行。
-- ⚠ **`flash` 只警告、不重建**：若 `build/<cfg>/sdkconfig` 早于 `sdkconfig.defaults*` 或任何 `Kconfig`/`*.projbuild`，`flash` 会打印"当前构建类型 … 已经过时"的警告，**但仍会把旧产物烧进去**。要烧新配置就得先 `build`（或直接 `run`）。
+- 💡 **执行回显**：`build`/`flash`/`monitor`/`size`（以及 `run` 的各阶段）执行前会打印一行 `# Executing \`idfc idfpy -B build\<cell> -D SDKCONFIG_DEFAULTS="…" -D SDKCONFIG="…" <子命令>\``，即本次**实际使用**的完整命令——想确认"到底在构建哪一套"或手工复现，直接看这一行（启用配置矩阵后是单元格目录，如 `build\cs43131.debug`）。
+- ⚠ **`flash` 只警告、不重建**：若 `build/<cell>/sdkconfig` 早于 `sdkconfig.defaults*`、overlay 配置、`idfc_buildconfig.json` 或任何 `Kconfig`/`*.projbuild`，`flash` 会打印"当前构建目标 … 已经过时"的警告，**但仍会把旧产物烧进去**。要烧新配置就得先 `build`（或直接 `run`）。
 - 🔎 **查 menuconfig 配置项**（标题 / 说明全文 / 当前值，**纯客户端命令**，不触发构建）：
   ```powershell
   idfc menuconfig search "IRAM SPIRAM"          # 多关键词 AND 检索（每页 20 条，--page N 翻页）
@@ -107,16 +108,16 @@ idfc flash -t release -p COMn
 ```powershell
 idfc run -t debug --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
 idfc size -t debug                                   # 固件体积分析
-idfc clean -t debug        # 删 build/debug/sdkconfig 与 build/debug/config
-idfc fullclean -t debug    # 删整个 build/debug
+idfc clean -t debug        # 删当前单元格的 sdkconfig 与 config（如 build/cs43131.debug/…）
+idfc fullclean -t debug    # 删当前单元格整个目录（如 build/cs43131.debug）
 idfc help --all            # 全部命令与参数
 ```
 
 **备注**：
 
-- **过期检测已自动化**：改了 `sdkconfig.defaults*` 或 `main/Kconfig.projbuild` 后，`build` 会自动发现并清理+重新配置，**不需要再手工删 `build/<cfg>/sdkconfig`**。想强制全量重配用 `build --reconfigure`，想跳过检测走纯增量用 `build --no-reconfigure`，想从最干净状态开始用 `build --fullclean`。
-- ⚠ 原理仍值得知道（历史事故的根因）：**已存在的 `build/<cfg>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），所以只跑普通增量构建时新配置**不会生效、也不会报错**。历史上曾因此产出"堆毒化仍开"的固件（内部 RAM 紧张、任务建不起来、SD 读 DMA 失败）。**手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意这一点。**
-- 串口优先级：`-p` > `.idfc` 里 `set-port` 保存的值。构建类型优先级：`-t` > `.idfc` 里 `set-variant` 保存的值（当前 `debug`）。
+- **过期检测已自动化**：改了 `sdkconfig.defaults*`、任何 overlay 配置（`sdkconfig.<维度>.<类型>`）、`idfc_buildconfig.json` 或 `main/Kconfig.projbuild` 后，`build` 会自动发现并清理+重新配置，**不需要再手工删 `build/<cell>/sdkconfig`**。想强制全量重配用 `build --reconfigure`，想跳过检测走纯增量用 `build --no-reconfigure`，想从最干净状态开始用 `build --fullclean`。
+- ⚠ 原理仍值得知道（历史事故的根因）：**已存在的 `build/<cell>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），所以只跑普通增量构建时新配置**不会生效、也不会报错**。历史上曾因此产出"堆毒化仍开"的固件（内部 RAM 紧张、任务建不起来、SD 读 DMA 失败）。**手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意这一点。**
+- 串口优先级：`-p` > `.idfc` 里 `set-port` 保存的值。构建类型优先级：`-t` > `.idfc` 里 `set-variant` 保存的值（当前 `debug`）；overlay 维度优先级：`-o <维度>=<类型>` > `.idfc` 里 `set-overlay` 保存的 `ActiveOverlays` > 矩阵定义里的 `DefaultType`（当前 `dac_chip=cs43131`）。
 - 默认构建idfc当前默认构建类型，除非用户指定。
 - `idfc -B build/<cfg> build` 之类的旧写法已全部失效（见第 4 节）。
 - 已开放 `C:\esp\` 与 `C:\Espressif\` 的读取权限，可查阅 IDF 源码。
@@ -125,7 +126,8 @@ idfc help --all            # 全部命令与参数
 
 - `main/Kconfig.projbuild`：应用配置项（menuconfig）。配置项目请阅读该文件获得配置项的详细信息。常用配置组合均已使用三套构建配置切换。
 - `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.releasecandidate` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、LVGL 刷新 33ms / indev 轮询 33ms、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、LVGL 字体（12/16/20/24/28/32/48，默认 18）、**`CONFIG_LV_USE_LARGE_COORD=y`**（lv_coord_t 升为 int32_t，600+ 歌曲列表必需，见 virtual_list）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192` 等
-- **版本管理：配置事实源只有 `sdkconfig.defaults*` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cfg>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个 build 目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cfg>/sdkconfig` 指定）；`fullclean` 只清 `build/`，不会删 sdkconfig。改配置的正确姿势：改 `sdkconfig.defaults*` 或 `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
+- **版本管理：配置事实源只有 `sdkconfig.defaults*`、`sdkconfig.<维度>.<类型>`（overlay 配置）、`idfc_buildconfig.json` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cell>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个单元格目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cell>/sdkconfig` 指定）；`fullclean` 只清当前单元格目录。改配置的正确姿势：改 `sdkconfig.defaults*` / overlay 配置 / `idfc_buildconfig.json` / `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
+- **配置矩阵（`idfc_buildconfig.json`）—— 已在新版 idfc 中实现并验收通过（2026-10-02）**：除 debug/releasecandidate/release 三个 variant 外，另有 `dac_chip` 维度（`cs43131` / `pcm5102`）。⚠ **构建目录是 `build/<dac_chip>.<variant>`，不再是 `build/<variant>`**：`idfc build` 实际构建 `build/cs43131.debug`（首次切换会从零全量构建），旧的 `build/debug`、`build/release*` 目录**不再被复用**（`build` 会打印提示，可手工删除）。常用命令：`-o dac_chip=pcm5102` 临时指定维度、`idfc set-overlay dac_chip pcm5102`（`--default` 清除）永久保存、`idfc matrix` 查看全部 6 个单元格与当前选择、`idfc status` 看当前单元格。overlay 配置命名约定为 `sdkconfig.dac_chip.<类型>`，在 BaseConfig 与 variant 之后叠加。该维度目前**只影响启动日志**（`main/main.c` 末尾用 `#if` 打印 `DAC chip: CS43131/PCM5102`），配合 `main/Kconfig.projbuild` 的 `AUDIO_DAC_CS43131` / `AUDIO_DAC_PCM5102`（两个独立 bool，必须且只能开一个，同时开/同时关都 `#error`）；公共默认在 `sdkconfig.defaults` 选 `AUDIO_DAC_CS43131=y`。真正的 DAC 切换尚未实现。详见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 `ideas_and_exps/BUILD_MATRIX.md`（定义/格式/修改说明 + §7 验收记录）。
 - `partitions.csv`（**显式静态布局**，偏移写死不随自动分配漂移）：bootloader@0x0 / 分区表@0x8000（两者由 sdkconfig 默认 `BOOTLOADER_OFFSET_IN_FLASH`、`PARTITION_TABLE_OFFSET` 控制，不在 CSV 内）→ `nvs`@0x9000(0x6000) / `phy_init`@0xf000(0x1000) / `factory`(app，6M)@0x10000 / `pldata`(data 0x40，4M)@0x610000（播放列表数据结构分区，内存映射只读访问）。
 - 调试版的字体可能不全，请无视这一点，优先调试为主。实际效果会在发布版确认。用户会不定期更新调试版的字库。
 

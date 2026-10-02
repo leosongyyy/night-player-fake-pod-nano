@@ -1,0 +1,28 @@
+# ============================================================================
+# dac_chip 维度 = pcm5102（idfc 配置矩阵 overlay 配置）
+# ----------------------------------------------------------------------------
+# 用途：声明音频 DAC 使用 PCM5102 版本芯片——该芯片没有 I2C 控制端口，
+#       音量/静音等只能靠 I2S 数据侧处理。它是 CS43131 之外的另一个硬件变种。
+#
+# 合并顺序（由 idfc 配置矩阵决定）：
+#   sdkconfig.defaults                       （BaseConfig，公共配置）
+#   sdkconfig.defaults.<variant>             （debug / releasecandidate / release）
+#   sdkconfig.dac_chip.<类型>  ← 本文件       （Overlay，最后叠加、可覆盖前两者）
+# 因此这里必须**显式关掉**公共默认开启的 CONFIG_AUDIO_DAC_CS43131，否则两项
+# 同时为 y，会在 main/main.c 的 app_main 结尾触发 #error（编译失败）。
+#
+# 使用方式：idfc_buildconfig.json → Overlays → dac_chip → 类型 pcm5102 的
+#          ConfigFile 字段。构建产物目录为 build/{dac_chip}.{variant}
+#          （如 build/pcm5102.debug）。
+#
+# ⚠ 目前**尚未实现真正的 DAC 切换**：本文件不改变任何驱动或初始化行为
+#   （音频链路仍按 CS43131 的 I2C + I2S 初始化），只决定 main/main.c 的
+#   app_main 结尾打印哪一行日志——选本文件时应看到：
+#   DAC chip: PCM5102 (build-time selection only, real switching not implemented)。
+#   真正的切换（跳过 CS43131 的 I2C 初始化与控制路径等）待实现。
+# ⚠ 作者目前只有 CS43131 版本的设备，**PCM5102 版本无法实机验证**，本文件仅
+#   用于验证配置矩阵能否正确选中该维度类型。
+# ============================================================================
+
+CONFIG_AUDIO_DAC_PCM5102=y
+# CONFIG_AUDIO_DAC_CS43131 is not set

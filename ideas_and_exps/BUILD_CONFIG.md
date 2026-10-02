@@ -1,6 +1,6 @@
 # BUILD_CONFIG —— 多配置构建与烧录指南
 
-本文档说明 FakePodNanoNightPlayer 的 **debug / releasecandidate / release 三套构建配置**体系：配置文件、构建/烧录/监视命令、配置差异与工作原理。
+本文档说明 FakePodNanoNightPlayer 的 **debug / releasecandidate / release 三套构建配置**体系：配置文件、构建/烧录/监视命令、配置差异与工作原理。另见 §8：**配置矩阵**（在构建类型之外新增 DAC 芯片维度，`idfc_buildconfig.json` 描述，idfc 侧功能尚未实现）。
 
 ## 1. 概述
 
@@ -22,6 +22,8 @@ sdkconfig.defaults            公共配置（esp32s3、QIO 16MB Flash、PSRAM、
 sdkconfig.defaults.debug      debug 差异配置（叠加在公共配置之后）
 sdkconfig.defaults.releasecandidate  RC 差异配置（叠加在公共配置之后）
 sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后）
+sdkconfig.dac_chip.cs43131    dac_chip 维度 = cs43131（配置矩阵 overlay，见 §8）
+sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（配置矩阵 overlay，见 §8）
 ```
 
 合并规则：`sdkconfig.defaults` + 差异文件按顺序合并生成各配置的最终 `sdkconfig`，**后加载的文件覆盖先加载的**。最终 sdkconfig 生成在各自构建目录（`build/debug/sdkconfig`、`build/releasecandidate/sdkconfig`、`build/release/sdkconfig`），根目录 `sdkconfig` 已移出版本控制、不参与多配置构建。
@@ -156,9 +158,50 @@ idfc monitor --grep "MEM:"                # 只显示匹配行
 - **想调整某配置项**：编辑对应的 `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release`（只写差异项），或公共项编辑 `sdkconfig.defaults`。
 - **`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` 与 performance_monitor 的关系**：release 关闭 performance_monitor 时也一并关闭了 runtime stats（`ulTaskGetIdleRunTimeCounter` 仅 performance_monitor 使用），二者必须同开同关。
 
-## 8. 相关文件
+## 8. 配置矩阵（`idfc_buildconfig.json`）
 
-- 配置：`sdkconfig.defaults` / `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release`
-- 应用配置项定义：`main/Kconfig.projbuild`（`PERFORMANCE_MONITOR`、`UI_SYSTEM_FONT_FULL`、`UI_COVER_FLASH` 等；触摸测试/电池日志已移除 Kconfig，改运行时开关，见上方说明）
-- 构建产物：`build/debug/`、`build/releasecandidate/`、`build/release/`
+> 📄 **矩阵的定义、`idfc_buildconfig.json` 的完整格式规范、给 idfc 仓库的逐文件修改说明，以及新版 idfc 的验收记录，见 `ideas_and_exps/BUILD_MATRIX.md`。** 本节只讲**本项目固件侧**的约定与用法。
+
+除三套构建类型外，项目还准备了 **DAC 芯片维度**，与构建类型组合成配置矩阵，由根目录的 `idfc_buildconfig.json` 描述。
+
+> ✅ **该功能已于 2026-10-02 在新版 `idfc.exe` 中实现并验收通过**（实测记录见 `BUILD_MATRIX.md` §7）。因此：
+> - **构建目录不再是一维的 `build/<variant>`**，而是 `build/<dac_chip>.<variant>`（例：`idfc build` 实际构建 `build/cs43131.debug`，首次切换会从零全量构建）；
+> - 可用 `-o dac_chip=pcm5102` 临时指定维度、`idfc set-overlay dac_chip pcm5102` 永久保存选择、`idfc matrix` 查看全部 6 个单元格与当前选择；
+> - 旧的 `build/debug`、`build/releasecandidate`、`build/release` 目录**不再被复用**（`build` 会打印提示），可手工删除。
+
+```
+OutputDir        build/{dac_chip}.{variant}      → build/cs43131.debug、build/pcm5102.release …
+BaseConfig       sdkconfig.defaults
+BuildVariants    debug / releasecandidate / release   （ConfigFile: sdkconfig.defaults.<variant>）
+Overlays         dac_chip: cs43131 / pcm5102          （ConfigFile: sdkconfig.dac_chip.<类型>）
+```
+
+合并顺序（**后加载的覆盖先加载的**，与现有 defaults 链一致）：
+
+```
+sdkconfig.defaults  →  sdkconfig.defaults.<variant>  →  sdkconfig.dac_chip.<类型>
+```
+
+### 8.1 DAC 芯片选择（当前只打印日志）
+
+| 配置项（`main/Kconfig.projbuild`） | cs43131 | pcm5102 |
+|---|---|---|
+| `AUDIO_DAC_CS43131` —— I2C 控制端口 0x30 + I2S（当前真实硬件） | **y** | 关 |
+| `AUDIO_DAC_PCM5102` —— 仅 I2S，无 I2C 控制 | 关 | **y** |
+
+- 两项是**相互独立**的 bool，但**必须且只能开一个**：同时开启或同时关闭都会在 `main/main.c` 的 `app_main` 结尾触发 `#error` → **编译失败**（这是有意的：配置矩阵没生效时宁可构建失败，也不要静默用错芯片的固件）。
+- ⚠ **目前并未实现真正的 DAC 切换**：两项都不改变任何驱动或初始化行为（音频链路始终是 I2S 主机 + CS43131 的 I2C 控制），选中的结果**只在 `app_main` 结尾打印一行日志**：
+  - `DAC chip: CS43131 (build-time selection only, real switching not implemented)`
+  - `DAC chip: PCM5102 (build-time selection only, real switching not implemented)`
+
+  它的用途是**验证配置矩阵选中的维度类型是否正确合并**（`idfc monitor --grep "DAC chip"` 即可看到）。真正的切换（PCM5102 无 I2C 控制、I2S 配置差异、时钟策略等）待实现。
+- 公共默认（`sdkconfig.defaults`）选 `CONFIG_AUDIO_DAC_CS43131=y`（当前真实硬件），因此**不涉及配置矩阵的普通构建（`idfc build -t debug` 等）行为完全不变**；`sdkconfig.dac_chip.pcm5102` 会显式 `# CONFIG_AUDIO_DAC_CS43131 is not set`，否则两项同为 y 会编译报错。
+- ⚠ 作者只有 CS43131 版本的设备，**PCM5102 版本无法实机验证**，`pcm5102` 维度目前只用于验证矩阵选型。
+
+## 9. 相关文件
+
+- 配置矩阵：`idfc_buildconfig.json`（idfc 侧功能尚未实现，见 §8）
+- 配置：`sdkconfig.defaults` / `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release` / `sdkconfig.dac_chip.cs43131` / `sdkconfig.dac_chip.pcm5102`
+- 应用配置项定义：`main/Kconfig.projbuild`（`PERFORMANCE_MONITOR`、`UI_SYSTEM_FONT_FULL`、`UI_COVER_FLASH`、`AUDIO_DAC_CS43131`/`AUDIO_DAC_PCM5102` 等；触摸测试/电池日志已移除 Kconfig，改运行时开关，见上方说明）
+- 构建产物：`build/debug/`、`build/releasecandidate/`、`build/release/`（配置矩阵启用后另有 `build/<dac_chip>.<variant>/`）
 - 固件：`build/debug/FakePodNanoNightPlayer.bin`、`build/releasecandidate/FakePodNanoNightPlayer.bin`、`build/release/FakePodNanoNightPlayer.bin`
