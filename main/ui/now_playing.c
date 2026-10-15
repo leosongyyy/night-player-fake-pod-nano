@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "core/fonts/system_font.h"
-#include "core/fonts/system_smaller_font.h"
 #include "core/hardware/display.h"
 #include "core/image/cover_jpeg.h"
 #include "core/utils/mem_trace.h"
@@ -655,8 +654,9 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
                                           UI_SYSTEM_FONT, lv_color_white());
     lv_obj_set_pos(s_title_label, 0, 0);
 
-    /* 专辑/艺术家：普通大小字体 + 灰色（小字体 system_smaller_font 字不全，
-       用户数据可能含生僻字/日文，改用与标题同族的 UI_SYSTEM_FONT），滚动 */
+    /* 专辑/艺术家：普通大小字体 + 灰色（20px 的 UI_SMALL_FONT 只含系统 UI 用字，
+       回退态下字不全；用户数据可能含生僻字/日文，改用与标题同族的
+       UI_SYSTEM_FONT —— TTF 正常时两者本就是同一个字体文件，只是字号不同），滚动 */
     s_sub_label = np_make_marquee_label(s_title_bar, st.dir_name,
                                         UI_SYSTEM_FONT,
                                         lv_palette_main(LV_PALETTE_GREY));
@@ -676,16 +676,16 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
     lv_obj_set_scrollbar_mode(s_control_bar, LV_SCROLLBAR_MODE_OFF);
 
     /* 第一行：当前时长（左）+ 上一曲/播放/下一曲（居中）+ 总时长（右）。
-       时长用 system_smaller_font（MiSans-Bold 20px，比内置 14px 更大更协调） */
+       时长用 UI_SMALL_FONT（20px 系统字体，比内置 montserrat 的 14px 更大更协调） */
     s_cur_time = lv_label_create(s_control_bar);
     lv_label_set_text(s_cur_time, "0:00");
-    lv_obj_set_style_text_font(s_cur_time, &system_smaller_font, 0);
+    lv_obj_set_style_text_font(s_cur_time, UI_SMALL_FONT, 0);
     lv_obj_set_style_text_color(s_cur_time, lv_color_white(), 0);
     lv_obj_align(s_cur_time, LV_ALIGN_LEFT_MID, NP_SIDE_PAD, NP_ROW1_OFFSET);
 
     s_total_time = lv_label_create(s_control_bar);
     lv_label_set_text(s_total_time, "0:00");
-    lv_obj_set_style_text_font(s_total_time, &system_smaller_font, 0);
+    lv_obj_set_style_text_font(s_total_time, UI_SMALL_FONT, 0);
     lv_obj_set_style_text_color(s_total_time, lv_color_white(), 0);
     lv_obj_align(s_total_time, LV_ALIGN_RIGHT_MID, -NP_SIDE_PAD, NP_ROW1_OFFSET);
 

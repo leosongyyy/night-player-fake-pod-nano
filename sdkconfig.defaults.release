@@ -5,8 +5,11 @@
 # 编译优化：Performance（-O2）—— 运行性能优先（公共默认已是，显式声明）
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# 完整字体：全量中文/日文/阿拉伯文/藏文等（编译进固件）
-CONFIG_UI_SYSTEM_FONT_FULL=y
+# 完整字体（内嵌位图）：**已停用**（2026-10 字体 TTF 化）。
+# 界面字体改由 font 分区的 MiSans TTF + FreeType 提供，汉字覆盖比内嵌完整版
+# 字库更全且不占固件（原完整版字库 2.4MB 把固件顶到 4.1MB，现在整份不参与构建）。
+# 若要把 UI_FONT_TTF 关掉退回内嵌字体，再打开本项（回退字体用完整版）：
+# CONFIG_UI_SYSTEM_FONT_FULL=y
 # 极速版封面：RGB565 真彩色 default_cover_flash（与屏幕像素格式一致）
 CONFIG_UI_COVER_FLASH=y
 

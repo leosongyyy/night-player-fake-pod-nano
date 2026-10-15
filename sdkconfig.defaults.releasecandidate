@@ -9,8 +9,12 @@
 # 编译优化：Performance（-O2）—— 与 release 一致（公共默认已是，显式声明）
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# 完整字体：与 release 一致（PSRAM 占用大，模拟 release 内存环境）
-CONFIG_UI_SYSTEM_FONT_FULL=y
+# 完整字体（内嵌位图）：**已停用**（2026-10 字体 TTF 化，与 release 一致）。
+# 界面字体改由 font 分区的 MiSans TTF + FreeType 提供。⚠ 本变体原本靠"完整字体
+# 经 SPIRAM_RODATA 拷进 PSRAM 2.6MB"来模拟 release 的低内存环境，那个手段随字体
+# 迁移消失了；要继续压 PSRAM 请用其它手段（例如 CONFIG_UI_COVER_FLASH=y 的
+# 423KB 封面同样是 SPIRAM_RODATA，仍在）。
+# CONFIG_UI_SYSTEM_FONT_FULL=y
 # 极速版封面：RGB565 真彩色 default_cover_flash（与 release 一致）
 CONFIG_UI_COVER_FLASH=y
 

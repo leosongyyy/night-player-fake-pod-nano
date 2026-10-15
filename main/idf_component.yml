@@ -17,3 +17,12 @@ dependencies:
   lvgl/lvgl:
     version: "9.4.0"
     public: true
+
+  # FreeType 字体引擎（系统字体 TTF 化，2026-10）：
+  # LVGL 自己的 env_support/cmake/esp.cmake 在 LV_USE_FREETYPE=y 时**只编译源码、
+  # 不加任何依赖**，ft2build.h 的 include 路径必须由外部把本组件链接给 lvgl 组件——
+  # 本项目没用 esp_lvgl_adapter，所以在 main/CMakeLists.txt 里自己注入
+  # （target_link_libraries(lvgl__lvgl PUBLIC idf::espressif__freetype)）。
+  # ⚠ 只开 CONFIG_LV_USE_FREETYPE 而不链接本组件，会在编译 lv_freetype.c 时报找不到 ft2build.h。
+  espressif/freetype:
+    version: "^2.14.0"

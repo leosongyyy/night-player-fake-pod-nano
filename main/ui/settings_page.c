@@ -1,7 +1,6 @@
 #include "ui/settings_page.h"
 
 #include "core/fonts/system_font.h"
-#include "core/fonts/system_smaller_font.h"
 #include "core/hardware/audio/eq.h"
 #include "core/hardware/display.h"
 #include "core/player/player_controller.h"
@@ -42,13 +41,16 @@ static const char *TAG = "settings_page";
 #define SETTINGS_GRID_PAD_BOT   24
 
 /* 图标区统一尺寸（px，见 settings_icon_area_create）：
-   双行文字图标（回放增益的"回放\n增益"用 system_smaller_font 20px，
-   行高 24）需要 24×2 = 48px；其它格子是单行 Montserrat 24（行高 29px）。
+   双行文字图标（回放增益的"回放\n增益"用 UI_SMALL_FONT 20px）需要放得下两行；
+   其它格子是单行 Montserrat 24（行高 29px）。
    若不统一，格子内"图标 + 状态文字"的总高不同，flex 居中后各格子的
    图标/文字基线互相错开（矮格子的状态文字被往下推）。这里让所有格子的
    图标区都是 48×48，内部单行文字自行垂直居中，从而各格子完全对齐。
-   ⚠ 若把"回放/增益"改用 UI_SYSTEM_FONT（完整字库 24px 行高 33），两行要
-   66px，需同步把这里加到 66——否则两行文字会溢出图标区。 */
+   ⚠ 行高随字体变化：20px 点阵行高 24（两行 48 正好），换成 TTF 后行高 26
+   （两行 52 超 4px；MiSans 时代是 27、超 6px），所以 settings_icon_label_create
+   里对两行文字加了 text_line_space=-6 收紧到 46。改字体/字号时两处要一起看。
+   ⚠ 若把"回放/增益"改用 UI_SYSTEM_FONT（24px，TTF 行高 31），两行要 62px，
+   需同步把这里加到 64（并去掉那个 -6 的行距修正）。 */
 #define SETTINGS_ICON_W         48
 #define SETTINGS_ICON_H         48
 
@@ -451,25 +453,27 @@ static lv_obj_t *settings_icon_area_create(lv_obj_t *cell)
 
 /* 图标标签：
    - ascii=true 用 LVGL 内置 Montserrat 24（含 PUA 区图标字形，如 ↻ / ⇄）；
-   - ascii=false 用状态栏同款小字体 system_smaller_font（20px，带中文字形），
-     供"文字图标"格使用（回放增益格的 "回放\n增益"）——该字体没有 PUA
-     图标字形，只能排文字。
-   ⚠ 图标里的文字若要跟系统 UI 统一取字（UI_SYSTEM_FONT，随 sdkconfig 在
-     完整/精简字库间切换），改传 ascii=false 并在这里换字体；目前"回放增益"
-     用 20px 小字体是为了让两行塞进 48px 的图标区（UI_SYSTEM_FONT 完整版
-     行高 33，两行要 66px）。返回句柄供切换。
+   - ascii=false 用 20px 系统字体 UI_SMALL_FONT，供"文字图标"格使用
+     （回放增益格的 "回放\n增益"）——系统字体不含 PUA 图标字形，只能排文字。
+   ⚠ 图标里的文字若要跟系统正文统一取 24px 的 UI_SYSTEM_FONT，两行就会超框：
+     24px 系统字体行高 31（TTF 实测），两行 62px > SETTINGS_ICON_H(48)；
+     20px 字体行高 26，两行 52px，仍超 4px —— 所以下面用 text_line_space=-4
+     把两行压到 48px 正好塞满（TTF 迁移前 20px 点阵行高是 24，两行 48 刚好，
+     换 TTF 后行高变 26 才需要这一行修正）。
    ⚠ 换行只能用 "\n"：LVGL 只认 \n 为换行符，"\r\n" 里的 \r 会被当成普通
-     字符排版（本字体 cmap 范围是 ASCII 32~127，\r 无字形），表现为字间
-     多出一段空隙。 */
+     字符排版，表现为字间多出一段空隙。 */
 static lv_obj_t *settings_icon_label_create(lv_obj_t *cell, const char *icon,
                                             bool ascii)
 {
     lv_obj_t *area = settings_icon_area_create(cell);
     lv_obj_t *lbl = lv_label_create(area);
     lv_label_set_text(lbl, icon);
-    lv_obj_set_style_text_font(lbl,
-                               ascii ? &lv_font_montserrat_24
-                                     : &system_smaller_font, 0);
+    lv_obj_set_style_text_font(lbl, ascii ? &lv_font_montserrat_24 : UI_SMALL_FONT, 0);
+    if (!ascii) {
+        /* 两行文字图标：把行距收紧 6px，保证 2×27-6 = 48px 正好放进图标区
+           （27 = 20px TTF 字体实测行高，见 font_ttf.c 启动日志） */
+        lv_obj_set_style_text_line_space(lbl, -6, 0);
+    }
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
     return lbl;
 }

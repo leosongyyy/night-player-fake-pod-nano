@@ -29,17 +29,45 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ release 构建关闭（正式版不需要这些诊断日志）。
             关闭时所有调用点编译为空语句，不产生任何代码与日志。
 
-    config UI_SYSTEM_FONT_FULL
-        bool "系统默认字体使用完整版（编译进固件，体积大）"
+    # ⚠ 字体文件**写死**为 ../spiffs/system.ttf（见 main/CMakeLists.txt 的 font-flash 目标）：
+    #   换字体 = 用新字体文件**改名覆盖** spiffs/system.ttf，然后 idfc build +
+    #   idfc idfpy font-flash（见 ideas_and_exps/FontSystem.md §6）。
+    #   当前内容是 Droid Sans Fallback（AOSP/Apache-2.0，50951 字形，3.55MiB，
+    #   24px 行高 31 / 20px 行高 26）；许可文本入库在 spiffs/DroidSansFallback-LICENSE.txt。
+    #   2026-10 实测它同一手势下滚动帧率明显高于此前的 MiSans（单字形轮廓数据只有
+    #   约 1/4，光栅化更便宜 + flash 局部性更好），故固定使用。
+
+    config UI_FONT_TTF
+        bool "系统字体改用 TTF（FreeType，字体在 font 分区）"
         default y
+        help
+            开启（推荐，2026-10 起默认）：界面字体由 font 分区里的 MiSans TTF
+                  经 FreeType 按需光栅化（见 core/fonts/font_ttf.c 与
+                  ideas_and_exps/FontSystem.md）。字形按需读取、任意字号复用同一
+                  文件、汉字覆盖全（29758 字形），固件里不再需要内嵌大字库。
+                  用 CONFIG_LV_USE_FREETYPE 编译引擎，字体文件由 partitions.csv 的
+                  font 分区承载（裸二进制，8MiB，见该文件注释）。
+            关闭：回到内嵌位图字体（由下面的 UI_SYSTEM_FONT_FULL 决定用完整版
+                  还是精简版），此时 font 分区与 FreeType 都不参与，界面与
+                  迁移前完全一致——留作字体文件损坏时的对照/兜底方案。
+            ⚠ 无论开关如何，精简版 system_global_font_lite 都会编进固件作为
+              **回退字体**（TTF 打不开时 UI 仍有字），所以下方选项只影响
+              "TTF 不可用时用哪套位图字体"。
+
+    config UI_SYSTEM_FONT_FULL
+        bool "回退字体使用完整版（编译进固件，体积大）"
+        default y
+        depends on !UI_FONT_TTF
         help
             开启：把完整版 system_global_font 编译进固件
                   （字体数据约 2.4MB，含全量中文/日文/阿拉伯文/藏文等，
                    固件约 4.1MB、烧录慢），启动时经 SPIRAM_RODATA 复制进
-                   PSRAM 约 2.6MB；正常使用。
-            关闭：始终使用精简版 system_global_font_lite
-                  （仅含系统 UI 所需文字 + ASCII，固件小、烧录快，适合调试；
+                   PSRAM 约 2.6MB。
+            关闭：回退字体用精简版 system_global_font_lite
+                  （仅含系统 UI 所需文字 + ASCII，固件小、烧录快；
                    注意音乐文件名等用户数据的汉字不在精简字体内）。
+            ⚠ UI_FONT_TTF=y 时本项被依赖屏蔽（TTF 覆盖全部汉字，无需 2.4MB
+              内嵌字库），sdkconfig 里写 y 会被 Kconfig 静默忽略。
 
     config UI_COVER_FLASH
         bool "默认封面使用极速版（RGB565 真彩色，体积大）"

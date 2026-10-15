@@ -41,16 +41,21 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-/* ⚠ 栈 12KB（LVGL 9 迁移时由 6KB 上调）：
+/* ⚠ 栈 20KB（LVGL 9 迁移时 6KB→12KB；2026-10 TTF 迁移再 12KB→20KB）：
    栈里要跑 lv_timer_handler 的整条渲染链（控件事件回调 → 布局/重绘 →
    各 draw unit → 刷屏 esp_lcd_panel_draw_bitmap 的 QSPI DMA 链）。
    LVGL 8.4 下实测高水位约 3.3KB，6KB 足够；**LVGL 9 的绘制管线明显更深**
    （draw task / layer / 混合函数层层下探），6KB 会在"首次渲染设置页"
    这种重页面时溢出 —— 实测现象：从主界面滑到第 4 页（播放设置）必定
    `A stack overflow in task LVGL has been detected` 并 panic 重启。
-   改到 12KB 后不再溢出。⚠ 若后续再放宽到十几 KB，注意内部 RAM 余量
-   （内部栈不能走 PSRAM，见 AGENTS.md），并重新看 mem_monitor 的 stk 高水位。 */
-#define EXAMPLE_LVGL_TASK_STACK_SIZE   (12 * 1024)
+   改到 12KB 后位图字体时代不再溢出。
+   ⚠ **换成 TTF 字体后 12KB 又不够了**：光栅化字形会进 FreeType 的
+   smooth 光栅化器，而它把渲染池当栈上局部变量用（见 core/fonts/ftoption_lvgl.h，
+   池子已从默认 16KB 压到 4KB），叠加深层绘制链后实测 12KB 只剩 **172 字节**，
+   所以再上调到 20KB（余量 ~8KB）。
+   ⚠ 内部栈不能走 PSRAM（见 AGENTS.md），加栈会吃内部 RAM，改动前先看
+   mem_monitor 的 stk 行与内部 RAM 余量。 */
+#define EXAMPLE_LVGL_TASK_STACK_SIZE   (20 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
 /* ESP-IDF 面板 IO 的"传输完成"回调（中断上下文）：

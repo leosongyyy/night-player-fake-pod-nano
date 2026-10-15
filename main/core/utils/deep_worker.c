@@ -17,17 +17,22 @@ static const char *TAG = "deep_worker";
    停外设/渲染提示等），以及设置菜单"重新扫描"的关缓存段
    （player_controller_deinit → playlist_deinit → pldata_munmap →
    esp_partition_munmap：关缓存要求当前任务栈在内部 RAM）。
-   ⚠ **曾把栈提到 12KB 导致任务创建静默失败**：内部 RAM 在开机末期高度
-   碎片化（最大连续块约 8.6KB），12KB 内部栈分配不出来，而当时未检查
-   xTaskCreatePinnedToCore 返回值 → 任务根本不存在 → 每次 deep_worker_call
-   都等满 5s 超时（表现为"按键息屏/亮屏明显延迟 5 秒"）。
-   8KB 实测 HWM 约 7.4KB，够用；需要更大栈时**不能加大本任务**，
-   而应把新链拆到独立任务（栈从 PSRAM 分配，见 core/utils/task_psram.h）。
+   ⚠ **栈 12KB（2026-10 TTF 迁移由 8KB 上调）**：本任务要跑 `lv_refr_now`
+   全屏重刷（息屏唤醒）与伪关机提示渲染，这条链里包含 **FreeType 光栅化字形**
+   —— 光栅化器把渲染池放栈上（见 core/fonts/ftoption_lvgl.h），加上深层绘制链
+   实测 LVGL 任务同样场景要吃掉近 12KB。8KB 会在"息屏唤醒重刷 + 有未缓存字形"
+   时溢出（栈在内部 RAM，溢出会踩着相邻内存）。⚠ 改到 12KB 后**必须确认任务
+   创建成功**（下面有返回值检查与失败日志）。
+   ⚠ **历史坑**：创建位置一旦挪到开机末期（内部 RAM 高度碎片化、最大连续块
+   约 8.6KB）就会静默失败 → 每次深调用等满 5s 超时（按键息屏/亮屏延迟 5 秒）。
+   所以本任务必须在 `app_main` 早期创建（config_store 之后、硬件初始化之前，
+   此时内部 RAM 还有约 200KB 空闲/118KB 连续），并且检查 xTaskCreatePinnedToCore
+   的返回值（失败时置 s_exec_task=NULL，deep_worker_call 快速失败 + 就地兜底）。
    ⚠ 优先级 6（沿用原伪关机任务参数）：高于 LVGL(2)/按键(4)，保证息屏/
    关机动作不被拖延；低于音频(8)，不会饿死解码。
    ⚠ 固定 Core0（与原伪关机任务一致；app_main 于 Core0 初始化全部驱动
    与中断，面板命令/全屏重刷在此核执行与现状等价）。 */
-#define DEEP_WORKER_TASK_STACK  (8 * 1024)
+#define DEEP_WORKER_TASK_STACK  (12 * 1024)
 #define DEEP_WORKER_TASK_PRIO   6
 #define DEEP_WORKER_TASK_CORE   0
 

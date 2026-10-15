@@ -320,6 +320,21 @@ LVGL 自带的 `stdlib/*/lv_mem_core_*.c` 会提供同名符号，不包就会�
 
 SD 的 `allocate_dma_buf` 失败与 newlib 建锁 abort 随之消失。
 
+> ⚠ **上表是"加栈之前"的数字**（那时 LVGL 任务栈还是 6 KB）。为修 §11 的栈溢出把栈加到 12 KB
+> 之后（任务栈从内部堆分配，而本板 `int` 与 `dma` 两池高度重叠、两者 free 只差固定 7716 B，
+> 所以两边会同步下降），2026-10-15 复测**连续 4 次开机**（`idfc monitor --timeout`，每次均 reset）：
+>
+> | 时刻 | 内部 RAM 空闲 | DMA 空闲 | 最大连续块 |
+> |---|---|---|---|
+> | `ui:after app_ui_create` | **35.3 KB** | **27.6 KB** | **22.0 KB** |
+> | 开机完成 `17-perf_monitor` | **29.5 KB** | **21.3 KB** | **20.0 KB** |
+>
+> 比上表低约 7 KB，其中 6 KB 就是栈本身（6→12 KB），残余约 1 KB 未逐一归因。
+> 4 次开机的**空闲字节与内部最大连续块完全相同**（仅第 3 次的 DMA 最大连续块是 21.0 KB 而非
+> 20.0 KB，属驱动侧分配次序的 1 KB 抖动），说明开机内存剖面基本是确定的——
+> 将来这个数字一旦漂移，就是排查内存问题的第一现场。
+> 结论不变：最大连续块仍 ≥ 20 KB，远高于本项目 4 KB 的底线（SD 读 512 B / 内部任务栈 4 KB）。
+
 ### 10.5 ⚠ 链接顺序坑：`undefined reference to 'lv_malloc_core'`
 
 符号由 `main` 组件提供，但 LVGL 组件引用它，而 IDF 生成的最终链接顺序是
@@ -357,7 +372,8 @@ target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,-u,lv_malloc_core")
 
 **处理**：`EXAMPLE_LVGL_TASK_STACK_SIZE` 6 KB → **12 KB**（`core/ui/lvgl_port.c`）。
 改后实测高水位仍是 5532 B（余量 6.5 KB）。⚠ LVGL 任务栈不能走 PSRAM（每帧刷屏、
-实时性要求），加大栈会吃内部 RAM，当前内部空闲约 36 KB，够用。
+实时性要求），加大栈会吃内部 RAM：加栈前后内部空闲实测差约 6 KB（开机完成 36 KB → 29.5 KB，
+最大连续块 27 KB → 20 KB，见 §10.4 的复测表），当前余量仍然充足。
 
 ---
 
@@ -426,6 +442,9 @@ v8 时代这个模块存在的唯一理由是 **8.4 的 `lv_label` 不认动画�
    当时 DMA 空闲 73 KB、最大连续块 31 KB，而失败路径理论上最多只要 512 B，**不像内存压力**。
    该报错在 v8 时代同样存在于本项目记录中（见 AGENTS.md 的 DMA 相关条目）。
    两轮共约 2.7 分钟的操作日志里只出现 1 次，未再复现，暂按"驱动侧瞬时失败"归档。
+   2026-10-15 迁移完成后又连测 4 次开机（1×20 s + 3×15 s，含 reset）：**4/4 干净挂载**
+   （`ZTPro / SDHC / 40 MHz / bus_width=4`），无 `allocate_dma_buf`、无 `diskio_sdmmc` 失败，
+   4 次里唯一的 `W` 是下面第 6 条的 legacy i2c 驱动警告，**0 条 `E`**。
    若后续出现"随机跳曲/误判坏曲"，优先看这里。
 2. **`releasecandidate` / `release` 两套配置尚未构建验证**（本次只要求 debug）。
    差异点在 Kconfig 覆盖（字体完整版、封面变体、`LV_USE_PERF_MONITOR` 关）。
@@ -439,4 +458,8 @@ v8 时代这个模块存在的唯一理由是 **8.4 的 `lv_label` 不认动画�
    由 `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y` 触发，不影响功能。
 5. **可选优化**：现在 LVGL 对象在 PSRAM，样式/布局访问会走外部内存。若后续发现帧率不足，
    可把 `lvgl_mem.c` 改成"小分配走内部、大分配走 PSRAM"的分流策略（v9 的 CUSTOM 模式下改一处即可），
-   但要重新量内部 RAM 余量（当前约 36 KB）。
+   但要重新量内部 RAM 余量（当前开机完成约 29.5 KB、最大连续块 20 KB）。
+6. **每次开机 1 条 legacy i2c 驱动警告**（与本次升级无关，预存在）：
+   `W (303) i2c: This driver is an old driver, please migrate your application code to adapt driver/i2c_master.h`
+   —— 来自 `components/i2c_bsp` 用的旧版 `driver/i2c.h`（触摸 I²C 总线）。功能无影响；
+   想消掉需要把 i2c_bsp 迁到 `driver/i2c_master.h`（独立任务，不在本次迁移范围内）。

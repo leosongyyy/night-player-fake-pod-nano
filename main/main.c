@@ -18,6 +18,7 @@
 #include "core/hardware/pldata.h"
 #include "core/hardware/sd_card.h"
 #include "core/hardware/touch.h"
+#include "core/fonts/font_ttf.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/battery_logger.h"
@@ -92,6 +93,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Initialize LVGL port");
     lvgl_port_init(panel_handle, NULL);
     mem_trace_log("04-lvgl_port");
+
+    /* 系统字体（TTF / FreeType）：在 LVGL 起来之后、画第一帧之前初始化。
+       它做的事：校验 font 分区（裸二进制 system.ttf）→ 注册 lv_fs 驱动 'F'
+       → 预创建 24px/20px 两个字号（字体对象在 PSRAM）。
+       ⚠ 必须晚于 lvgl_port_init：lv_init() 会自己初始化 FreeType 引擎，
+         应用侧只调 lv_freetype_font_create()，不要再调 lv_freetype_init()。
+       ⚠ 字体不可用时本函数只报错并返回错误码，界面会自动回退内嵌位图字体，
+         不阻塞开机（字体不是"没它就开不了机"的硬件）。 */
+    ESP_LOGI(TAG, "Initialize system font (TTF from font partition)");
+    font_ttf_init();
 
     /* 开机封面（默认封面）：此时面板亮度仍为 0，先把整屏写满再点亮——与原
        来"全黑启动防白屏"的顺序完全一致。

@@ -7,9 +7,22 @@
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # 精简字体：仅系统 UI 用字 + ASCII，固件小、烧录快（覆盖公共默认的完整版）
+# ⚠ 2026-10 起界面字体走 TTF（公共默认 CONFIG_UI_FONT_TTF=y），完整版字库已被
+#    Kconfig 的 depends on !UI_FONT_TTF 屏蔽；精简版**始终编进固件**，它是
+#    TTF 打不开时的回退字体。所以这里保留"不用完整版"的意图（等于回退字体用精简版）。
 # CONFIG_UI_SYSTEM_FONT_FULL is not set
 # 非极速版封面：2bit 索引色 default_cover，省 Flash（覆盖公共默认的极速版）
 # CONFIG_UI_COVER_FLASH is not set
+
+# LVGL 日志（**仅 debug**）：字体迁移排障用。两个都要开——LV_USE_LOG 负责编入
+# 日志宏，LV_LOG_PRINTF 负责输出（LVGL 默认打印回调是空的，只开前者日志会被
+# 静默丢弃）。⚠ 级别数字是反的：TRACE(0) < INFO(1) < WARN(2) < ERROR(3) < USER(4)，
+# 过滤条件是 level >= LV_LOG_LEVEL，所以默认的 WARN(2) 能放行 ERROR，把它"调高"
+# 到 USER(4) 反而会把 ERROR 一起过滤掉。FreeType 的失败原因（LV_LOG_ERROR）就靠
+# 这一档看，遇到"字体明明在却加载失败"先看串口这里。
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_PRINTF=y
+CONFIG_LV_LOG_LEVEL_WARN=y
 
 # 触摸区域测试（白点）与电池电压日志已改为运行时开关（设置→关于→开发者
 # 选项，NVS 持久化，重启生效），不再属于构建配置差异。
