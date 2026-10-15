@@ -171,9 +171,9 @@ static bool parse_band_line(char *line, eq_band_param_t *bp)
         !parse_float_token(toks[2], &db)) {
         return false;
     }
-    /* 参数范围校验（FUTURE_PLAN 第 10 点） */
+    /* 参数范围校验（Q值在0.1-20之间，频率在16-20000之间，dB要在正负15范围内） */
     if (fc < 16.0f || fc > 20000.0f ||
-        invq < 0.2f || invq > 5.0f ||
+        invq < 0.05f || invq > 10.0f ||
         db < -15.0f || db > 15.0f) {
         return false;
     }
