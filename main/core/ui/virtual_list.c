@@ -60,12 +60,13 @@ static virtual_list_state_t *vlist_get_state(lv_obj_t *list)
     return (virtual_list_state_t *)lv_obj_get_user_data(list);
 }
 
-/* 占位对象点击穿透：不拦截其上层行的点击（纯视觉对象惯例） */
-static void vlist_pass_through_cb(lv_event_t *e)
-{
-    lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
-    info->res = false;
-}
+/* 占位/图标/文本等纯视觉对象一律"点击穿透"（不拦截其上层行容器的点击）。
+   ⚠ LVGL 9 不再支持自己改命中结果：`lv_hit_test_info_t` 变成了不透明类型
+   （定义在私有头 lv_obj_event_private.h），而且 lv_obj_hit_test() 的第一道
+   判据就是 LV_OBJ_FLAG_CLICKABLE（lv_obj_pos.c：没有该标志直接返回 false，
+   连 LV_EVENT_HIT_TEST 都不会派发）。因此 v8 时代那套
+   "clear_flag(CLICKABLE) + HIT_TEST 回调置 res=false" 在这里只需保留前者，
+   本文件里各视觉对象的 clear_flag 调用即为其全部实现。 */
 
 /* 把跑马灯开关应用到所有行槽的文本 label：
    开启 → 循环滚动（图标保持不动）；关闭 → 裁剪。
@@ -246,8 +247,9 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
 
-    /* 分配并初始化状态结构体，挂到列表 user_data 上 */
-    virtual_list_state_t *st = lv_mem_alloc(sizeof(*st));
+    /* 分配并初始化状态结构体，挂到列表 user_data 上
+       （v9：lv_mem_alloc → lv_malloc） */
+    virtual_list_state_t *st = lv_malloc(sizeof(*st));
     if (st == NULL) {
         ESP_LOGE(TAG, "alloc state failed");
         lv_obj_del(list);
@@ -276,19 +278,20 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
     lv_obj_set_style_border_width(ph, 0, 0);
     lv_obj_set_style_pad_all(ph, 0, 0);
     lv_obj_clear_flag(ph, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(ph, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(ph, vlist_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
+    lv_obj_clear_flag(ph, LV_OBJ_FLAG_CLICKABLE);   /* 点击穿透：见文件上方说明 */
     st->placeholder = ph;
 
     /* 创建固定数量行槽（可见数 + 2 缓冲），每行 = 图标 + 文本两个 label */
     st->row_count = (uint32_t)((h + item_height - 1) / item_height) + 2;
-    st->rows       = lv_mem_alloc(sizeof(vlist_row_t) * st->row_count);
-    st->row_indices = lv_mem_alloc(sizeof(uint32_t) * st->row_count);
+    /* v9 把 lv_mem_alloc/lv_mem_free 改名为 lv_malloc/lv_free（v8 名字在
+       lv_api_map_v8.h 里没有兼容别名，必须改） */
+    st->rows       = lv_malloc(sizeof(vlist_row_t) * st->row_count);
+    st->row_indices = lv_malloc(sizeof(uint32_t) * st->row_count);
     if (st->rows == NULL || st->row_indices == NULL) {
         ESP_LOGE(TAG, "alloc rows failed");
-        lv_mem_free(st->rows);
-        lv_mem_free(st->row_indices);
-        lv_mem_free(st);
+        lv_free(st->rows);
+        lv_free(st->row_indices);
+        lv_free(st);
         lv_obj_del(list);
         return NULL;
     }
@@ -330,8 +333,7 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         lv_obj_set_style_text_font(icon, VLIST_ICON_FONT, 0);
         lv_obj_set_style_text_color(icon, lv_color_white(), 0);
         lv_obj_align(icon, LV_ALIGN_LEFT_MID, VLIST_ICON_X, 0);
-        lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(icon, vlist_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
+        lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);   /* 点击穿透：见文件上方说明 */
 
         /* 名称文本 label：图标右侧起，超长跑马灯/裁剪，同样不拦截点击 */
         lv_obj_t *text = lv_label_create(root);
@@ -342,8 +344,7 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         lv_obj_set_style_pad_top(text, pad_top, 0);
         lv_obj_set_style_pad_bottom(text, 0, 0);
         lv_label_set_long_mode(text, LV_LABEL_LONG_SCROLL_CIRCULAR);
-        lv_obj_clear_flag(text, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(text, vlist_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
+        lv_obj_clear_flag(text, LV_OBJ_FLAG_CLICKABLE);   /* 点击穿透：见文件上方说明 */
         /* 登记到全局跑马灯管理（此刻还没有文本、不会滚动；文本绑定后由
            vlist_bind_row 重新接管并开始滚动）。登记一次即可，之后由守护
            定时器兜底，无需每个行槽反复登记 */

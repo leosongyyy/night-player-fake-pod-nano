@@ -48,14 +48,10 @@ static bool         s_hidden    = true; /* 完全隐藏（含滑出动画完成�
 /* 事件透传                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Toast 纯展示不接收触摸：命中测试直接放行，下层控件照常响应 */
-static void toast_pass_through_cb(lv_event_t *e)
-{
-    lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
-    if (info != NULL) {
-        info->res = false;
-    }
-}
+/* Toast 纯展示不接收触摸：各对象都 clear 掉 LV_OBJ_FLAG_CLICKABLE
+   —— LVGL 9 里这就足够让命中测试直接放行（lv_obj_hit_test 没有该标志即返回
+   false），v8 时代额外挂的 LV_EVENT_HIT_TEST 回调已删除：v9 的
+   lv_hit_test_info_t 变成了不透明类型（私有头 lv_obj_event_private.h）。 */
 
 /* ------------------------------------------------------------------ */
 /* 动画                                                               */
@@ -162,7 +158,6 @@ static void toast_create(void)
     lv_obj_clear_flag(s_toast, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_scrollbar_mode(s_toast, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(s_toast, toast_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
 
     /* 文本：白色（需求指定），系统字体（中文等宽适用） */
     s_label = lv_label_create(s_toast);
@@ -177,7 +172,6 @@ static void toast_create(void)
     lv_obj_set_size(s_arc, TOAST_RING_SIZE, TOAST_RING_SIZE);
     lv_obj_remove_style(s_arc, NULL, LV_PART_KNOB); /* 无旋钮 */
     lv_obj_clear_flag(s_arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_arc, toast_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
     lv_obj_set_style_arc_color(s_arc, TOAST_RING_BG_COLOR, LV_PART_MAIN);
     lv_obj_set_style_arc_width(s_arc, TOAST_RING_WIDTH, LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(s_arc, true, LV_PART_MAIN);

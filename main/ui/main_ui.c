@@ -124,7 +124,10 @@ void main_ui_create(void)
        0=目录/歌单列表 / 1=歌曲列表 / 2=正在播放 / 3=播放设置。
        容器撑满全屏（460x460），页面内容由各页内部偏移避开顶部状态栏区，
        为后续沉浸式封面（内容延伸到状态栏下方）做准备。 */
-    lv_obj_t *tv = lv_tabview_create(scr, LV_DIR_TOP, 0);
+    /* v9 的 lv_tabview_create() 不再接收方向与尺寸参数，改为创建后单独设置 */
+    lv_obj_t *tv = lv_tabview_create(scr);
+    lv_tabview_set_tab_bar_position(tv, LV_DIR_TOP);
+    lv_tabview_set_tab_bar_size(tv, 0);
     lv_obj_set_pos(tv, 0, 0);
     lv_obj_set_size(tv, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     s_tv = tv;

@@ -30,21 +30,21 @@ dependencies:
       type: service
     version: 1.3.1
   espressif/esp_lcd_sh8601:
-    component_hash: 9597cce74af4bae0ec423ee819a2916b995ff3e5bb8d590bdb0a27fa9e715dab
+    component_hash: 18245cd23204eefb67f61b362405f78364fa13b13cdedda5f7546d89701c506b
     dependencies:
-    - name: idf
-      require: private
-      version: '>5.0.4,!=5.1.1'
     - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
       require: private
       version: 0.*
+    - name: idf
+      require: private
+      version: '>=5.3'
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.0.0
+    version: 2.0.1~1
   espressif/esp_lcd_touch:
-    component_hash: 779b4ba2464a3ae85681e4b860caa5fdc35801458c23f3039ee761bae7f442a4
+    component_hash: 3f85a7d95af876f1a6ecca8eb90a81614890d0f03a038390804e5a77e2caf862
     dependencies:
     - name: idf
       require: private
@@ -52,18 +52,18 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.1.2
+    version: 1.2.1
   idf:
     source:
       type: idf
     version: 5.5.5
   lvgl/lvgl:
-    component_hash: d7c1ac037ae6e85d94897f807d6e7ba0946a83e720074fc95a4f6241da9f9f53
+    component_hash: 17e68bfd21f0edf4c3ee838e2273da840bf3930e5dbc3bfa6c1190c3aed41f9f
     dependencies: []
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 8.4.0
+    version: 9.4.0
 direct_dependencies:
 - chmorgan/esp-libhelix-mp3
 - espressif/cmake_utilities
@@ -72,6 +72,6 @@ direct_dependencies:
 - espressif/esp_lcd_touch
 - idf
 - lvgl/lvgl
-manifest_hash: 031435bd6a0aea0d6dc74559821215edb60da9abd74603702e9910695a44137f
+manifest_hash: f34076adf881d4320007916001ad50191413f53470c00015f34e18f81806cce9
 target: esp32s3
 version: 2.0.0

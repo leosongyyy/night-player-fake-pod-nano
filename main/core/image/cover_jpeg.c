@@ -26,7 +26,7 @@ static uint8_t *cover_alloc(size_t size)
     return buf;
 }
 
-esp_err_t cover_jpeg_decode(const uint8_t *jpeg, uint32_t len, lv_img_dsc_t *out)
+esp_err_t cover_jpeg_decode(const uint8_t *jpeg, uint32_t len, lv_image_dsc_t *out)
 {
     if (jpeg == NULL || len == 0 || out == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -40,7 +40,12 @@ esp_err_t cover_jpeg_decode(const uint8_t *jpeg, uint32_t len, lv_img_dsc_t *out
         .out_format = JPEG_IMAGE_FORMAT_RGB565,
         .out_scale = JPEG_IMAGE_SCALE_0,
         .flags = {
-            .swap_color_bytes = 1,   /* 高字节在前，匹配 LV_COLOR_16_SWAP */
+            /* ⚠ LVGL 9 迁移：v8 靠 CONFIG_LV_COLOR_16_SWAP=y 让渲染管线直接
+               消费"高字节在前"的 RGB565，故那时这里要 swap_color_bytes=1；
+               v9 改为渲染本机字节序、在 flush 回调里整体交换一次
+               （core/ui/lvgl_port.c），所以解码必须输出本机（小端）字节序，
+               这里改回 0，否则颜色会整体错乱（等于被交换两次）。 */
+            .swap_color_bytes = 0,
         },
     };
     esp_jpeg_image_output_t info;
@@ -78,11 +83,14 @@ esp_err_t cover_jpeg_decode(const uint8_t *jpeg, uint32_t len, lv_img_dsc_t *out
         memset(buf + outimg.output_len, 0, pixel_bytes - outimg.output_len);
     }
 
-    /* 封装为 LVGL 真彩色图片（RGB565，数据缓冲即像素） */
-    out->header.always_zero = 0;
+    /* 封装为 LVGL 图片（LVGL 9：描述符类型为 lv_image_dsc_t，色彩格式用
+       LV_COLOR_FORMAT_* 枚举，需要 magic，且显式给出 stride = 宽 × 2B） */
+    out->header.magic = LV_IMAGE_HEADER_MAGIC;
     out->header.w = outimg.width;
     out->header.h = outimg.height;
-    out->header.cf = LV_IMG_CF_TRUE_COLOR;
+    out->header.cf = LV_COLOR_FORMAT_RGB565;
+    out->header.flags = 0;
+    out->header.stride = outimg.width * 2;
     out->data_size = pixel_bytes;
     out->data = buf;
 
@@ -92,7 +100,7 @@ esp_err_t cover_jpeg_decode(const uint8_t *jpeg, uint32_t len, lv_img_dsc_t *out
     return ESP_OK;
 }
 
-void cover_jpeg_free(lv_img_dsc_t *img)
+void cover_jpeg_free(lv_image_dsc_t *img)
 {
     if (img == NULL) {
         return;

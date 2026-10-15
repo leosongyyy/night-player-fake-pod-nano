@@ -12,15 +12,6 @@ static const char *TAG = "touch_test";
 static lv_obj_t *s_dot = NULL;     /* 白色圆点 */
 static bool s_prev_pressed = false;
 
-/* 事件穿透：圆点只是视觉指示，绝不参与命中测试、不拦截下层控件 */
-static void pass_through_hit_test_cb(lv_event_t *e)
-{
-    lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
-    if (info != NULL) {
-        info->res = false;
-    }
-}
-
 /* 淡出动画执行回调：设置透明度 */
 static void dot_fade_anim_cb(void *var, int32_t value)
 {
@@ -80,7 +71,13 @@ void touch_test_create(void)
     lv_obj_set_style_border_width(s_dot, 0, 0);
     lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(s_dot, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
+
+    /* 事件穿透：圆点只是视觉指示，绝不参与命中测试、不拦截下层控件。
+       v8 时代额外挂了一个 LV_EVENT_HIT_TEST 回调把结果置 false；LVGL 9 里
+       `lv_hit_test_info_t` 变成了不透明类型（定义在私有头 lv_obj_event_private.h），
+       而且命中测试的第一道判据就是 LV_OBJ_FLAG_CLICKABLE（见 lv_obj_pos.c 的
+       lv_obj_hit_test：无该标志直接返回 false，连 HIT_TEST 事件都不会发），
+       所以上面这条 clear_flag 已经足够，回调就此删除。 */
 
     /* 注册触摸事件回调：复用 lvgl_port 的触摸轮询，不再单独创建定时器 */
     lvgl_port_register_touch_cb(touch_test_touch_cb, NULL);

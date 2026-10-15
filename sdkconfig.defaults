@@ -49,19 +49,38 @@ CONFIG_LWIP_HOOK_IP6_INPUT_NONE=y
 CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM=y
 CONFIG_WS_TRANSPORT=n
 CONFIG_ULP_COPROC_ENABLED=y
-CONFIG_LV_COLOR_16_SWAP=y
-CONFIG_LV_COLOR_SCREEN_TRANSP=y
-CONFIG_LV_MEM_CUSTOM=y
-CONFIG_LV_MEMCPY_MEMSET_STD=y
-CONFIG_LV_DISP_DEF_REFR_PERIOD=33
-CONFIG_LV_INDEV_DEF_READ_PERIOD=33
+# ==================== LVGL 9 配置 ====================
+# 自 LVGL 8.4 迁移到 9.4，若干 Kconfig 项已改名/移除（详见
+# ideas_and_exps/LVGL9_MIGRATION.md 的"配置项对照"表）：
+#   LV_COLOR_16_SWAP          → 已移除，改由移植层在 flush 回调里调用
+#                               lv_draw_sw_rgb565_swap()（见 core/ui/lvgl_port.c）
+#   LV_COLOR_SCREEN_TRANSP    → 已移除（v9 由屏幕/图层的 bg_opa 表达）
+#   LV_MEM_CUSTOM             → LV_USE_CLIB_MALLOC（下面的 choice）
+#   LV_MEMCPY_MEMSET_STD      → LV_USE_CLIB_STRING（下面的 choice）
+#   LV_DISP_DEF_REFR_PERIOD   → LV_DEF_REFR_PERIOD
+#   LV_INDEV_DEF_READ_PERIOD  → 已移除（v9 输入设备复用 LV_DEF_REFR_PERIOD）
+#   LV_USE_LARGE_COORD        → 已移除（v9 的坐标天然是 int32_t）
+# 像素格式：RGB565（LV_COLOR_DEPTH 默认为 16，与本板 16bpp QSPI 面板一致）
+# 内存：LVGL 9 支持把对象堆整个换到外部内存——用 CUSTOM 模式，
+# 由 core/ui/lvgl_mem.c 实现 lv_malloc_core/lv_free_core/... 把 LVGL 的
+# 对象/样式/中间绘制层全部放到 8MB PSRAM（内部 RAM 留给 DMA 绘制缓冲与
+# 实时任务栈）。⚠ 不加这一条时实测开机完成内部 RAM 只剩 23 字节、
+# DMA 只剩 19 字节、最大连续块为 0，会引发 SD 读失败与 newlib 建锁 abort。
+# （v8 无此能力，只能用 LV_MEM_CUSTOM 走标准 malloc = 内部 RAM）
+CONFIG_LV_USE_CUSTOM_MALLOC=y
+# 字符串函数：用标准 C 的 memcpy/memset（对应 v8 的 LV_MEMCPY_MEMSET_STD=y）
+CONFIG_LV_USE_CLIB_STRING=y
+# 刷新周期：v9 显示刷新与输入设备轮询共用这一个周期（原先两个 33ms）
+CONFIG_LV_DEF_REFR_PERIOD=33
 CONFIG_LV_DPI_DEF=160
+# v9 起性能监视器挂在 SYSMON 之下（SYSMON 默认 n，不显式打开则下面的
+# LV_USE_PERF_MONITOR 会被 Kconfig 静默丢弃，屏幕角落就没有 FPS 了）
+CONFIG_LV_USE_SYSMON=y
 CONFIG_LV_USE_PERF_MONITOR=y
 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
-# 大坐标（int32_t）：虚拟列表真实内容高度 = 条目数 × 行高，600+ 歌曲即超过
-# int16 上限 32767（611×56=34216），必须开启才能撑开内容驱动原生滚动条
-# （曾于提交 4e5baf0 误删，导致 600+ 长列表滚不到底部，第 14 点）
-CONFIG_LV_USE_LARGE_COORD=y
+# 坐标：v9 的 lv_coord_t 固定为 int32_t，不再需要 LV_USE_LARGE_COORD。
+# 虚拟列表真实内容高度 = 条目数 × 行高，600+ 歌曲即超过 int16 上限
+# （611×56=34216），v9 天然支持（v8 时代曾因误删该配置导致长列表滚不到底部）
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y

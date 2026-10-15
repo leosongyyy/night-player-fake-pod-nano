@@ -437,9 +437,9 @@ static void boot_progress_timer_cb(lv_timer_t *timer)
    user_data 携带开机自动开启的分钟数（boot_enter_normal 创建时传入）。 */
 static void boot_sleep_toast_timer_cb(lv_timer_t *timer)
 {
-    /* LVGL 8.4 的 lv_timer_t.user_data 是公开字段（无 getter），直接读取；
-       先取出参数再自删定时器 */
-    uint32_t minutes = (uint32_t)(uintptr_t)timer->user_data;
+    /* v9 的 lv_timer_t 是不透明类型，user_data 只能通过 getter 读
+       （v8 时代是公开字段）；先取出参数再自删定时器 */
+    uint32_t minutes = (uint32_t)(uintptr_t)lv_timer_get_user_data(timer);
     lv_timer_del(timer);   /* 一次性定时器 */
 
     /* 延迟期间用户可能已手动关闭定时（播放设置页长按睡眠格子）：

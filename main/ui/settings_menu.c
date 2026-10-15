@@ -167,7 +167,7 @@ static void header_style_apply(lv_obj_t *menu)
     uint32_t cnt = lv_obj_get_child_cnt(header);
     for (uint32_t i = 0; i < cnt; i++) {
         lv_obj_t *child = lv_obj_get_child(header, i);
-        if (lv_obj_check_type(child, &lv_btn_class)) {
+        if (lv_obj_check_type(child, &lv_button_class)) {   /* v9: lv_btn_class → lv_button_class */
             lv_obj_set_style_bg_opa(child, LV_OPA_TRANSP, 0);
             lv_obj_set_style_border_width(child, 0, 0);
             lv_obj_set_style_pad_all(child, 8, 0);
@@ -175,9 +175,9 @@ static void header_style_apply(lv_obj_t *menu)
             uint32_t icnt = lv_obj_get_child_cnt(child);
             for (uint32_t j = 0; j < icnt; j++) {
                 lv_obj_t *icon = lv_obj_get_child(child, j);
-                if (lv_obj_check_type(icon, &lv_img_class)) {
-                    lv_obj_set_style_img_recolor(icon, TEXT_COLOR, 0);
-                    lv_obj_set_style_img_recolor_opa(icon, LV_OPA_COVER, 0);
+                if (lv_obj_check_type(icon, &lv_image_class)) {   /* v9: lv_img_class → lv_image_class */
+                    lv_obj_set_style_image_recolor(icon, TEXT_COLOR, 0);
+                    lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
                 }
             }
         } else if (lv_obj_check_type(child, &lv_label_class)) {
@@ -429,7 +429,7 @@ static void screen_off_row_cb(lv_event_t *e)
 static void back_btn_cb(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
-    if (lv_menu_back_btn_is_root(s_menu, btn)) {
+    if (lv_menu_back_button_is_root(s_menu, btn)) {   /* v9: lv_menu_back_btn_is_root → ..._button_... */
         settings_menu_hide();
     }
 }
@@ -565,8 +565,11 @@ static void menu_bg_click_cb(lv_event_t *e)
     ESP_LOGI(TAG, "edge click (%d,%d): back one level or close",
              (int)s_bg_press_point.x, (int)s_bg_press_point.y);
     /* 触发与 header 返回按钮相同的行为（复用 back_btn_cb 的关闭逻辑） */
-    lv_obj_t *back = lv_menu_get_main_header_back_btn(s_menu);
-    lv_event_send(back, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *back = lv_menu_get_main_header_back_button(s_menu);   /* v9 改名 */
+    /* ⚠ v9 的 lv_event_send() 已是底层接口（参数为事件链表、lv_event_t 与布尔量），
+       向对象派发事件必须用 lv_obj_send_event()。v8 的 lv_event_send(obj, code, param)
+       写法在 v9 里参数个数相同但含义完全不同，能编过却会跑飞 */
+    lv_obj_send_event(back, LV_EVENT_CLICKED, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1055,8 +1058,10 @@ static void settings_menu_shell_create(void)
     lv_obj_set_style_pad_all(s_menu, 0, 0);
     lv_obj_set_scrollbar_mode(s_menu, LV_SCROLLBAR_MODE_OFF);
 
-    /* 根页面也显示返回按钮（= 关闭菜单），子页面返回按钮 = 返回上级 */
-    lv_menu_set_mode_root_back_btn(s_menu, LV_MENU_ROOT_BACK_BTN_ENABLED);
+    /* 根页面也显示返回按钮（= 关闭菜单），子页面返回按钮 = 返回上级
+       （v9 改名：lv_menu_set_mode_root_back_btn → ..._button，枚举也由
+        LV_MENU_ROOT_BACK_BTN_* 改为 LV_MENU_ROOT_BACK_BUTTON_*） */
+    lv_menu_set_mode_root_back_button(s_menu, LV_MENU_ROOT_BACK_BUTTON_ENABLED);
 
     /* 构建页面 */
     root_page_build();
@@ -1064,8 +1069,8 @@ static void settings_menu_shell_create(void)
     /* header 暗色化（返回按钮 + 标题） */
     header_style_apply(s_menu);
 
-    /* 根页面返回按钮：点击 = 关闭菜单 */
-    lv_obj_t *back = lv_menu_get_main_header_back_btn(s_menu);
+    /* 根页面返回按钮：点击 = 关闭菜单（v9: ..._back_btn → ..._back_button） */
+    lv_obj_t *back = lv_menu_get_main_header_back_button(s_menu);
     lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
 
     /* 初始显示根页面 */

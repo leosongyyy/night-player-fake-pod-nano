@@ -21,11 +21,11 @@ extern "C" {
  */
 
 /** 2bit 索引色版默认封面（始终编译，省空间调试用） */
-extern const lv_img_dsc_t default_cover;
+extern const lv_image_dsc_t default_cover;
 
 #ifdef CONFIG_UI_COVER_FLASH
 /** RGB565 真彩色版默认封面（极速，条件编译） */
-extern const lv_img_dsc_t default_cover_flash;
+extern const lv_image_dsc_t default_cover_flash;
 #endif
 
 #ifdef CONFIG_UI_COVER_FLASH

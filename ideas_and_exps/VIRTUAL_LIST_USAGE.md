@@ -1,12 +1,18 @@
 # 虚拟滚动列表（virtual_list）使用手册
 
+> ⚠ **LVGL 9 迁移提醒（2026-10）**：本文写于 LVGL 8.4 时代。**v9 的坐标天然是
+> `int32_t`，`CONFIG_LV_USE_LARGE_COORD` 已删除**，所以"必须开 LARGE_COORD"这类
+> 结论不再适用（长列表依旧可靠）；点击穿透的实现也从"`LV_EVENT_HIT_TEST` 回调改
+> res"改成了仅 `clear_flag(CLICKABLE)`。详见 **`LVGL9_MIGRATION.md`** §2/§9。
+
 通用虚拟滚动列表组件，用**固定数量的控件**承载海量数据：滚动时把滚出视口的
 cell 复用（重新赋值）到新条目上，从而以十几个控件显示几千上万条数据，同时保留
 LVGL 原生滚动条、惯性滑动与点击选中。
 
 - 文件位置：`main/core/ui/virtual_list.h` / `main/core/ui/virtual_list.c`
 - 当前用例：目录列表（12 字节条目）、歌曲列表（8 字节条目）
-- 依赖：`CONFIG_LV_USE_LARGE_COORD=y`（**必须**，见"踩坑记录"第 1 条）
+- 依赖（v8 时代）：`CONFIG_LV_USE_LARGE_COORD=y`（**必须**，见"踩坑记录"第 1 条）；
+  **LVGL 9 起该配置项已不存在，坐标本身就是 int32_t**
 
 ---
 

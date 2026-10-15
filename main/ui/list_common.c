@@ -20,7 +20,7 @@ typedef struct {
 static void title_bar_delete_cb(lv_event_t *e)
 {
     lv_obj_t *bar = lv_event_get_target(e);
-    lv_mem_free(lv_obj_get_user_data(bar));
+    lv_free(lv_obj_get_user_data(bar));
 }
 
 void ui_page_style(lv_obj_t *page)
@@ -49,7 +49,8 @@ lv_obj_t *ui_title_bar_create(lv_obj_t *parent, const char *title,
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
 
-    ui_title_bar_t *t = lv_mem_alloc(sizeof(*t));
+    /* v9：lv_mem_alloc → lv_malloc（见 title_bar_delete_cb 的 lv_free 配对） */
+    ui_title_bar_t *t = lv_malloc(sizeof(*t));
     if (t == NULL) {
         lv_obj_del(bar);
         return NULL;

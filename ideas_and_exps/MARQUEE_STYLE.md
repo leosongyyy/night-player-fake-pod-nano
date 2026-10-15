@@ -1,5 +1,12 @@
 # 全局跑马灯（marquee）统一样式实现记录
 
+> ⚠ **本文的 LVGL 结论是 8.4 时代的（历史记录，保留原样）**。项目已于 2026-10
+> 升级到 **LVGL 9.4**：v9 的 `lv_label` 已**原生支持**动画模板里的 `repeat_cnt`
+> （见 `overview`/`lv_label.c` 的 `overwrite_anim_property()`），因此"就地改
+> repeat_cnt + 200ms 守护定时器 + label 监管表"那一整套已删除，模块大幅简化；
+> 另外 `LV_STYLE_ANIM_SPEED` 在 v9 被删除（只剩 `anim_duration`，单位毫秒）。
+> 迁移细节见 **`LVGL9_MIGRATION.md` §13**，现状以 `core/ui/global_style.h` 的头注释为准。
+>
 > 对应 `FUTURE_PLAN.md` 第 36 点：「试着调整各个跑马灯的动画？（例如只重复三次，
 > 每次之间要有 1 秒停顿）」。
 > 实现日期：2026-09（debug 构建，COM12 实测）。

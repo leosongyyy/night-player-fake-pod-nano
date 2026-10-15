@@ -586,7 +586,9 @@ static void np_scroll_event_cb(lv_event_t *e)
         np_on_scroll_begin();
     } else if (code == LV_EVENT_SCROLL_END) {
         lv_indev_t *indev = lv_indev_get_act();
-        if (indev != NULL && indev->proc.state == LV_INDEV_STATE_PRESSED) {
+        /* v9 的 lv_indev_t 是不透明类型，按下状态要走 lv_indev_get_state()
+           （v8 时代直接读 indev->proc.state） */
+        if (indev != NULL && lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) {
             return;   /* 手指未抬起（新一轮拖拽中旧动画的收尾），忽略 */
         }
         if (lv_event_get_param(e) == NULL) {
@@ -714,8 +716,8 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
     lv_obj_set_style_bg_color(s_slider, lv_color_white(), LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_radius(s_slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
-    /* 滑块：小圆点 */
-    lv_obj_set_style_size(s_slider, 16, LV_PART_KNOB);
+    /* 滑块：小圆点（v9 的 lv_obj_set_style_size 需要宽、高两个参数） */
+    lv_obj_set_style_size(s_slider, 16, 16, LV_PART_KNOB);
     lv_obj_set_style_bg_color(s_slider, lv_color_white(), LV_PART_KNOB);
     lv_slider_set_range(s_slider, 0, 1);
     lv_slider_set_value(s_slider, 0, LV_ANIM_OFF);

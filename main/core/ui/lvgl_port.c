@@ -15,9 +15,13 @@ static const char *TAG = "lvgl_port";
 static SemaphoreHandle_t lvgl_mux = NULL;
 static TaskHandle_t s_lvgl_task = NULL;   /* LVGL 任务句柄（供息屏/深度休眠前挂起） */
 static esp_timer_handle_t s_tick_timer = NULL; /* LVGL tick 定时器（息屏挂起时停止，恢复时重启） */
-static lv_disp_draw_buf_t disp_buf;  // contains internal graphic buffer(s) called draw buffer(s)
-static lv_disp_drv_t disp_drv;       // contains callback functions
-static lv_indev_drv_t indev_drv;     // 触摸输入设备驱动（供 LVGL 控件接收触摸事件）
+/* ---- LVGL 9 对象（v8 的 disp_drv/indev_drv/draw_buf 静态结构体已改为不透明句柄）----
+   v9 的显示/输入设备由 lv_display_create() / lv_indev_create() 动态创建，
+   这里保存句柄；绘制缓冲仍是自管的两块 DMA 内存（见 lvgl_port_init）。 */
+static lv_display_t *s_disp = NULL;   /* LVGL 显示对象（flush/rounder 回调挂在其上） */
+static lv_indev_t *s_indev = NULL;    /* 触摸输入设备对象（供 LVGL 控件接收触摸事件） */
+static uint8_t *s_draw_buf1 = NULL;   /* 绘制缓冲 1（DMA，见 EXAMPLE_LVGL_BUF_HEIGHT） */
+static uint8_t *s_draw_buf2 = NULL;   /* 绘制缓冲 2（DMA，双缓冲） */
 
 /* 触摸句柄（触摸异步初始化，就绪前为 NULL）：由触摸初始化完成回调
    （lvgl_port_set_touch_handle）写入，read_cb 读取；就绪前不给触摸数据 */
@@ -37,52 +41,80 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-/* ⚠ 栈 6KB：LVGL 渲染（lv_timer_handler 内控件回调 + 刷屏 esp_lcd_panel_
-   draw_bitmap QSPI DMA 链）。实测栈高水位峰值约 3.3KB（mem_monitor 每 20s
-   打印的 stk 行），6KB 留约 2.7KB 余量。若后续 UI 复杂度上升（大面积
-   重绘/动画并发）导致余量吃紧，可回调到 8KB。 */
-#define EXAMPLE_LVGL_TASK_STACK_SIZE   (6 * 1024)
+/* ⚠ 栈 12KB（LVGL 9 迁移时由 6KB 上调）：
+   栈里要跑 lv_timer_handler 的整条渲染链（控件事件回调 → 布局/重绘 →
+   各 draw unit → 刷屏 esp_lcd_panel_draw_bitmap 的 QSPI DMA 链）。
+   LVGL 8.4 下实测高水位约 3.3KB，6KB 足够；**LVGL 9 的绘制管线明显更深**
+   （draw task / layer / 混合函数层层下探），6KB 会在"首次渲染设置页"
+   这种重页面时溢出 —— 实测现象：从主界面滑到第 4 页（播放设置）必定
+   `A stack overflow in task LVGL has been detected` 并 panic 重启。
+   改到 12KB 后不再溢出。⚠ 若后续再放宽到十几 KB，注意内部 RAM 余量
+   （内部栈不能走 PSRAM，见 AGENTS.md），并重新看 mem_monitor 的 stk 高水位。 */
+#define EXAMPLE_LVGL_TASK_STACK_SIZE   (12 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
+/* ESP-IDF 面板 IO 的"传输完成"回调（中断上下文）：
+   通知 LVGL 这一块绘制缓冲已经送完，可以复用。
+   v8 时代这里拿的是 lv_disp_drv_t*（disp_drv 是静态对象，display_init 早于
+   lvgl_port_init 也能取地址）；v9 的 lv_display_t 是运行时创建的，因此改为
+   由 display_init 传入 &s_disp（见 lvgl_port_get_flush_ctx 的说明），
+   这样即使回调早于创建触发也能安全判空。 */
 bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-    lv_disp_drv_t *disp_driver = (lv_disp_drv_t *)user_ctx;
-    lv_disp_flush_ready(disp_driver);
+    lv_display_t **disp = (lv_display_t **)user_ctx;
+    if (disp != NULL && *disp != NULL) {
+        lv_display_flush_ready(*disp);
+    }
     return false;
 }
 
-static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+/* v9 的 flush 回调签名：像素数据是 uint8_t*（不再有 lv_color_t*），
+   显示对象由参数传入（v8 时靠 drv->user_data 取面板句柄）。 */
+static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) lv_display_get_user_data(disp);
     const int offsetx1 = area->x1;
     const int offsetx2 = area->x2;
     const int offsety1 = area->y1;
     const int offsety2 = area->y2;
 
-#if LCD_BIT_PER_PIXEL == 24
-    uint8_t *to = (uint8_t *)color_map;
-    uint8_t temp = 0;
-    uint16_t pixel_num = (offsetx2 - offsetx1 + 1) * (offsety2 - offsety1 + 1);
+    /* ⚠ 字节序：v8 靠 LV_COLOR_16_SWAP=y 让整条渲染管线直接产出"高字节在前"的
+       RGB565；v9 移除了该配置项，官方做法是在 flush 回调里把这一块缓冲整体
+       交换一次（见 LVGL 9.4 文档 "Display / Color Format / Swapping Endian-ness"）。
+       代价是每次刷屏多一遍 ~2 字节/像素的遍历（460×46 ≈ 2.1 万像素，远小于
+       33ms 预算），换来渲染格式保持默认的 RGB565（LV_DRAW_SW_SUPPORT_RGB565_SWAPPED
+       在 ESP-IDF 的 Kconfig 里没有开关、恒为 0，无法直接把 RGB565_SWAPPED 当
+       目标格式用）。 */
+#if LCD_BIT_PER_PIXEL == 16
+    lv_draw_sw_rgb565_swap(px_map, (uint32_t)lv_area_get_size(area));
+#endif
 
-    // Special dealing for first pixel
-    temp = color_map[0].ch.blue;
-    *to++ = color_map[0].ch.red;
-    *to++ = color_map[0].ch.green;
-    *to++ = temp;
-    // Normal dealing for other pixels
-    for (int i = 1; i < pixel_num; i++) {
-        *to++ = color_map[i].ch.red;
-        *to++ = color_map[i].ch.green;
-        *to++ = color_map[i].ch.blue;
+#if LCD_BIT_PER_PIXEL == 24
+    /* RGB888：面板期望 R,G,B 顺序，而 LVGL 的 RGB888 缓冲按 B,G,R 存放，
+       这里就地交换每像素的首尾字节（从后往前写，避免覆盖还没读的像素）。
+       ⚠ 本项目实际固定 16bpp（见 display.h 的 LCD_BIT_PER_PIXEL），此分支
+       仅为保留 24bpp 屏幕配置的可能，未经实测。 */
+    uint16_t pixel_num = (offsetx2 - offsetx1 + 1) * (offsety2 - offsety1 + 1);
+    for (int i = pixel_num - 1; i >= 0; i--) {
+        uint8_t temp = px_map[i * 3 + 0];
+        px_map[i * 3 + 0] = px_map[i * 3 + 2];
+        px_map[i * 3 + 2] = temp;
     }
 #endif
 
     // copy a buffer's content to a specific area of the display
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
+    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
 }
 
-static void lvgl_rounder_cb(struct _lv_disp_drv_t *disp_driver, lv_area_t *area)
+/* 重绘区域对齐回调：v9 不再有 disp_drv.rounder_cb，改为给显示对象挂
+   LV_EVENT_INVALIDATE_AREA 事件（参数即待重绘区域 lv_area_t*）。 */
+static void lvgl_rounder_cb(lv_event_t *e)
 {
+    lv_area_t *area = (lv_area_t *)lv_event_get_param(e);
+    if (area == NULL) {
+        return;
+    }
+
     uint16_t x1 = area->x1;
     uint16_t x2 = area->x2;
 
@@ -137,9 +169,13 @@ static void lvgl_port_task(void *arg)
     }
 }
 
-lv_disp_drv_t *lvgl_port_get_disp_drv(void)
+/* 供 LCD 面板 IO 作为回调上下文使用的稳定地址：回调触发时解引用即得到当前
+   显示对象。v9 的 lv_display_t 要等 lvgl_port_init 才创建，而 display_init
+   （早于它）就要把上下文交给 esp_lcd，因此这里交出的是"保存显示对象指针的
+   变量地址"，而不是显示对象本身。 */
+void *lvgl_port_get_flush_ctx(void)
 {
-    return &disp_drv;
+    return (void *)&s_disp;
 }
 
 /* 触摸事件订阅（多订阅者）：由 indev 触摸轮询统一驱动，避免各功能重复轮询。
@@ -157,9 +193,9 @@ static uint8_t s_touch_cb_count = 0;
 /* 触摸输入设备读取回调：把 esp_lcd_touch 的坐标/按下状态交给 LVGL，
    并转发给所有注册的触摸事件订阅者（如触摸测试、息屏活动检测）。
    Y 坐标按比例修正：先乘以 23 再除以 24（触摸面板与屏幕的纵向比例校准）。 */
-static void lvgl_touchpad_read_cb(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
+static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    (void)indev_driver;
+    (void)indev;
 
     /* 触摸控制器异步初始化中（句柄未就绪）：不给数据，保持未按下，
        避免操作无效指针；就绪后（lvgl_port_set_touch_handle）自动恢复 */
@@ -244,26 +280,34 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
        460×46×2B ≈ 41KB/块，双缓冲共约 83KB）；该值直接决定留给 SD 卡读操作的
        DMA 余量（sdmmc_cmd: allocate_dma_buf: not enough mem 曾导致"切歌随机
        报坏曲"）；调这个值必须同时看帧率与 heap_caps_get_free_size(MALLOC_CAP_DMA)。 */
-    lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
-    assert(buf1);
-    lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
-    assert(buf2);
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT);
+    /* v9 的绘制缓冲是裸内存块（uint8_t*），大小按字节传给 lv_display_set_buffers；
+       LVGL 内部会就地包装成 lv_draw_buf_t（partial 模式下高度 = 缓冲字节数 / 行字节数）。
+       ⚠ 必须满足 lv_draw_buf_align 的对齐要求（LV_DRAW_BUF_ALIGN，ESP-IDF 下为 4），
+       否则 lv_display_set_buffers 里的断言会直接挂掉——用 heap_caps_aligned_alloc。
+       ⚠⚠ 每像素字节数**必须显式取 RGB565 = 2**，不能再用 v8 的
+       `sizeof(lv_color_t)`：v9 的 lv_color_t 恒为 RGB888（3 字节，与
+       LV_COLOR_DEPTH 无关），照抄会多要 50% 的 DMA —— 实测直接导致第二块
+       缓冲分配失败（assert s_draw_buf2 挂在启动阶段）。 */
+    const size_t draw_buf_bytes = (size_t)EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT
+                                  * LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565);
+    s_draw_buf1 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, draw_buf_bytes, MALLOC_CAP_DMA);
+    assert(s_draw_buf1);
+    s_draw_buf2 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, draw_buf_bytes, MALLOC_CAP_DMA);
+    assert(s_draw_buf2);
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
-    disp_drv.flush_cb = lvgl_flush_cb;
-    disp_drv.rounder_cb = lvgl_rounder_cb;
-    disp_drv.draw_buf = &disp_buf;
-    disp_drv.user_data = panel_handle;
+    /* v9：显示对象在 lv_init 之后动态创建，回调与缓冲都挂到该对象上 */
+    s_disp = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    assert(s_disp);
+    lv_display_set_flush_cb(s_disp, lvgl_flush_cb);
+    lv_display_set_buffers(s_disp, s_draw_buf1, s_draw_buf2, draw_buf_bytes,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_user_data(s_disp, panel_handle);
+    /* 重绘区域对齐：v8 的 disp_drv.rounder_cb 在 v9 里改为显示事件 */
+    lv_display_add_event_cb(s_disp, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
     // 设置旋转角度
-    // disp_drv.rotated = LV_DISP_ROT_90; // 旋转90度
-
-    lv_disp_drv_register(&disp_drv);
+    // lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90); // 旋转90度
 
     ESP_LOGI(TAG, "Install LVGL tick timer");
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
@@ -280,11 +324,13 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     // 注册触摸输入设备：无条件注册（触摸可能异步初始化，传入句柄为 NULL），
     // read_cb 内部判空，句柄就绪前不给数据；就绪后经 lvgl_port_set_touch_handle 生效
     ESP_LOGI(TAG, "Register touch input device to LVGL");
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = lvgl_touchpad_read_cb;
-    indev_drv.user_data = touch_handle;
-    lv_indev_drv_register(&indev_drv);
+    /* v9：输入设备同样改为动态创建 + setter；轮询周期取 LV_DEF_REFR_PERIOD
+       （v8 时代由 LV_INDEV_DEF_READ_PERIOD 单独控制，v9 已合并，见 sdkconfig.defaults） */
+    s_indev = lv_indev_create();
+    assert(s_indev);
+    lv_indev_set_type(s_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(s_indev, lvgl_touchpad_read_cb);
+    lv_indev_set_user_data(s_indev, touch_handle);
 
     // 将 LVGL 任务固定到核心 0，避免在多核调度下与其它任务竞争导致 UI 抖动
     xTaskCreatePinnedToCore(lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE,

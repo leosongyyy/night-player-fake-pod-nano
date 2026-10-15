@@ -135,7 +135,7 @@ esp_lcd_panel_handle_t display_init(void)
     // flush 完成回调与 LVGL 显示驱动相关，由 LVGL 移植层提供
     esp_lcd_panel_io_spi_config_t io_config = QSPI_AMOLED_PANEL_IO_QSPI_CONFIG(EXAMPLE_PIN_NUM_LCD_CS,
                                                                                 lvgl_port_notify_flush_ready,
-                                                                                lvgl_port_get_disp_drv());
+                                                                                lvgl_port_get_flush_ctx());
 
     io_config.pclk_hz = (unsigned int)AMOLED_QSPI_MAX_PCLK;
     qspi_amoled_vendor_config_t vendor_config = {

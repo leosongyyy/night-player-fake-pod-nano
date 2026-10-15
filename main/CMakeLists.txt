@@ -18,6 +18,7 @@ set(MAIN_SRCS
     "core/player/player_controller.c"
     "core/player/shuffle_player.c"
     "core/ui/lvgl_port.c"
+    "core/ui/lvgl_mem.c"
     "core/ui/touch_test.c"
     "core/ui/virtual_list.c"
     "core/ui/click_wheel.c"
@@ -78,6 +79,32 @@ endif()
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "." "core" "ui")
+
+# ============================================================================
+# LVGL 9 自定义分配器（core/ui/lvgl_mem.c）的链接顺序修正
+# ----------------------------------------------------------------------------
+# Kconfig 选中 CONFIG_LV_USE_CUSTOM_MALLOC 后，LVGL 的 src/stdlib/lv_mem.c 会
+# 引用外部符号 lv_malloc_core / lv_free_core / lv_realloc_core / lv_mem_init，
+# 这些由本组件（main）的 core/ui/lvgl_mem.c 提供。
+#
+# 但项目的最终链接顺序是 `liblvgl__lvgl.a → libmain.a → liblvgl__lvgl.a`
+# （IDF 的依赖排序：main 依赖 lvgl，于是把 lvgl 再重复一次）：
+#   · 第一遍扫 liblvgl 时，没有任何"当前未定义"的符号需要它，所以一个 .o
+#     都不会被拉进来；
+#   · 接着扫 libmain.a：此时未定义集合来自 main 自己的目标文件（lv_init 等），
+#     **不含 lv_malloc_core**（main 不直接调它），因此提供这些符号的 lvgl_mem.o
+#     不会被拉进来；
+#   · 第二遍扫 liblvgl 时才拉入 lv_mem.o，它这才产生 lv_malloc_core 等未定义
+#     符号 —— 而 libmain.a 已经扫过，不会再回看，于是报 undefined reference。
+# 实测报错：`undefined reference to 'lv_malloc_core' / 'lv_free_core' /
+# 'lv_realloc_core' / 'lv_mem_init'`。
+#
+# 用 `-u`（--undefined）在链接开始前就把 lv_malloc_core 标为未定义，强制
+# 链接器在扫 libmain.a 时就拉入 lvgl_mem.o（一个 .o 里的其它符号随之全进来）。
+# 该选项在改回 CLIB/BUILTIN 分配器时也无害：那时符号由 lvgl 自己的
+# stdlib/*/lv_mem_core_*.c 提供，同样能正常解析。
+# ============================================================================
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,-u,lv_malloc_core")
 
 set_source_files_properties(
     ${LV_DEMOS_SOURCES}

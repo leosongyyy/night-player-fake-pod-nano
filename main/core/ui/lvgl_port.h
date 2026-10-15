@@ -38,14 +38,21 @@ bool lvgl_port_lock(int timeout_ms);
 void lvgl_port_unlock(void);
 
 /**
- * @brief 供 LCD 面板 IO 使用的 flush 完成回调（内部调用 lv_disp_flush_ready）
+ * @brief 供 LCD 面板 IO 使用的 flush 完成回调（内部调用 lv_display_flush_ready）
  */
 bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx);
 
 /**
- * @brief 获取 LVGL 显示驱动实例指针（供 LCD 面板 IO 作为回调上下文使用）
+ * @brief 获取"保存 LVGL 显示对象指针的变量地址"（供 LCD 面板 IO 作为回调上下文）
+ *
+ * ⚠ LVGL 9 的显示对象要等 lvgl_port_init() 才由 lv_display_create() 创建，
+ * 而 display_init() 早于它、且必须先把回调上下文交给 esp_lcd；因此这里返回的
+ * 是内部 `lv_display_t *` 变量的地址（稳定），flush 完成回调触发时解引用即可
+ * 拿到当时的显示对象（未创建时为 NULL，回调内部判空）。
+ *
+ * @return 指向内部显示对象指针的地址（生命周期为整个进程）
  */
-lv_disp_drv_t *lvgl_port_get_disp_drv(void);
+void *lvgl_port_get_flush_ctx(void);
 
 /**
  * @brief 触摸事件回调类型

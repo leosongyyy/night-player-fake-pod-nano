@@ -493,14 +493,12 @@ static void vol_slide_event_cb(lv_event_t *e)
 /* 控件构建                                                             */
 /* ------------------------------------------------------------------ */
 
-/* 事件穿透：该对象永远不参与命中测试，触摸事件穿透到下层控件 */
-static void pass_through_hit_test_cb(lv_event_t *e)
-{
-    lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
-    if (info != NULL) {
-        info->res = false;
-    }
-}
+/* 事件穿透（v8 → v9 变更）：这些容器/把手只是视觉与布局载体，不参与命中测试。
+   v8 时代是 "clear_flag(CLICKABLE) + LV_EVENT_HIT_TEST 回调把 res 置 false"
+   双保险；LVGL 9 的 `lv_hit_test_info_t` 成了不透明类型（私有头
+   lv_obj_event_private.h），且 lv_obj_hit_test() 在没有 LV_OBJ_FLAG_CLICKABLE
+   时直接返回 false、根本不派发 HIT_TEST 事件（见 lv_obj_pos.c），
+   故回调删除，各对象处的 clear_flag(CLICKABLE) 即为完整实现。 */
 
 /* 创建 iOS 控制中心风格的竖条：深灰圆角容器，内部为浅灰填充条（左/右/底
    三边紧贴容器边，从底部向上生长）与底部彩色图标（叠在填充条上方）。
@@ -598,7 +596,6 @@ static lv_obj_t *content_col_create(lv_obj_t *content)
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_add_event_cb(col, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
     return col;
 }
 
@@ -618,7 +615,6 @@ static void header_create(void)
     lv_obj_set_style_pad_all(header, 0, 0);
     lv_obj_clear_flag(header, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(header, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
 
     /* 左：音量（固定图标 + 档位数字）。下拉后控制中心专用大字号（28px），
        顶边距 23px、左边缘边距 46px（左右边距保持原值；
@@ -654,7 +650,6 @@ static void content_create(void)
     lv_obj_set_style_pad_all(content, CONTENT_PAD, 0);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(content, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -739,7 +734,6 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_set_style_border_width(grab_bar, 0, 0);   /* 无边框（曾有一条蓝色顶边线，已移除） */
     lv_obj_set_style_radius(grab_bar, 0, 0);
     lv_obj_clear_flag(grab_bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(grab_bar, pass_through_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
 
     lv_obj_t *grab_label = lv_label_create(grab_bar);
     lv_label_set_text(grab_label, LV_SYMBOL_UP " 向上滑动关闭");

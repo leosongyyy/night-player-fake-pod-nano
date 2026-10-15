@@ -149,9 +149,6 @@ static bool      s_dots_visible = false;
 /* 工具函数                                                            */
 /* ------------------------------------------------------------------ */
 
-/* 前向声明：圆点创建要用到命中穿透回调（定义在后面的事件回调区） */
-static void cw_icon_pass_through_cb(lv_event_t *e);
-
 /* 创建 12 个灰色圆点（以屏幕中心为圆心、CW_RING_RADIUS 为半径均分）。
    只建一次；平时 HIDDEN，画圈时显示。圆点不接收触摸（纯视觉指示）。 */
 static void cw_ring_dots_create(void)
@@ -176,8 +173,7 @@ static void cw_ring_dots_create(void)
         lv_obj_set_style_pad_all(dot, 0, 0);
         lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(dot, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_add_event_cb(dot, cw_icon_pass_through_cb, LV_EVENT_HIT_TEST,
-                            NULL);
+        /* 点击穿透由上面的 clear_flag(CLICKABLE) 保证（见 cw_icon_pass_through_cb 注释） */
         lv_obj_set_pos(dot, cx - CW_RING_DOT_SIZE / 2,
                        cy - CW_RING_DOT_SIZE / 2);
         lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
@@ -434,14 +430,13 @@ static void cw_released_cb(lv_event_t *e)
     }
 }
 
-/* 图标命中穿透：图标只是装饰，点击/拖动都归属按钮本体 */
-static void cw_icon_pass_through_cb(lv_event_t *e)
-{
-    lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
-    if (info != NULL) {
-        info->res = false;
-    }
-}
+/* 图标/指示圆点命中的说明（v8 → v9 变更）：
+   v8 里这些纯装饰对象靠 "clear_flag(CLICKABLE) + LV_EVENT_HIT_TEST 回调
+   把 res 置 false" 双保险实现点击穿透；LVGL 9 的 `lv_hit_test_info_t`
+   变成了不透明类型（定义在私有头 lv_obj_event_private.h），且
+   lv_obj_hit_test() 在没有 LV_OBJ_FLAG_CLICKABLE 时直接返回 false、
+   连 HIT_TEST 事件都不派发（见 lv_obj_pos.c），因此回调整体删除，
+   各处只保留 clear_flag(CLICKABLE) 即可。 */
 
 /* 按下丢失（极端情况：按钮被隐藏/对象被删等）：退出画圈状态，
    避免后续触摸继续按旧角度滚列表 */
@@ -503,7 +498,7 @@ lv_obj_t *click_wheel_create(void)
     lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
     lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
-    lv_obj_add_event_cb(icon, cw_icon_pass_through_cb, LV_EVENT_HIT_TEST, NULL);
+    /* 点击穿透由上面的 clear_flag(CLICKABLE) 保证（见 cw_icon_pass_through_cb 注释） */
 
     /* 事件：按下开始画圈 / 松开判断点击 / 按下丢失兜底 */
     lv_obj_add_event_cb(s_btn, cw_pressed_cb, LV_EVENT_PRESSED, NULL);
