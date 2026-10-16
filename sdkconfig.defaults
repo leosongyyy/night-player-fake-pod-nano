@@ -130,15 +130,15 @@ CONFIG_LV_FONT_FMT_TXT_LARGE=y
 CONFIG_LV_USE_FREETYPE=y
 CONFIG_LV_FREETYPE_USE_LVGL_PORT=y
 CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024
-# font 分区里烧的字体**写死**为 spiffs/system.ttf（见 main/CMakeLists.txt 的 font-flash
-# 目标与 main/Kconfig.projbuild 的说明）：当前内容是 **Droid Sans Fallback**（3.55MiB /
-# 50951 字形 / 24px 行高 31、20px 行高 26，AOSP Apache-2.0，许可文本入库在
+# font 分区里烧的字体**写死**为 spiffs/system.ttf（见 main/Kconfig.projbuild 的说明与
+# 2026-10-25 起的刷入文档 ideas_and_exps/FONT_FLASH.md）：当前内容是 **Droid Sans Fallback**
+# （3.55MiB / 50951 字形 / 24px 行高 31、20px 行高 26，AOSP Apache-2.0，许可文本入库在
 # spiffs/DroidSansFallback-LICENSE.txt）。2026-10 实测它同一手势下滚动帧率明显高于此前的
 # MiSans：单字形轮廓数据只有 MiSans 的约 1/4（光栅化更便宜 + flash 局部性更好），故弃用
 # MiSans、固定使用 Droid。
-# ⚠ 换字体：用新字体文件**改名覆盖** spiffs/system.ttf，然后 `idfc build` +
-#   **`idfc idfpy font-flash`**（换的是分区内容，普通 flash 不会更新字体）；
-#   启动日志的 "N 张表，M 个字形" 可用于确认生效的是哪份。
+# ⚠ 换字体：用新字体文件**改名覆盖** spiffs/system.ttf，然后 `idfc build` + **手动刷字体分区**
+#   （`esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf`；字体不在
+#   固件里，普通 `idfc flash` 不会更新它）；启动日志的 "N 张表，M 个字形" 可确认生效的是哪份。
 
 # 完整固件启动耗时较大，跳过校验来提高启动速度
 CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y

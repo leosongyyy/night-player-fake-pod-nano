@@ -1,0 +1,37 @@
+# ============================================================================
+# font 维度 = binfont（idfc 配置矩阵 overlay 配置）
+# ----------------------------------------------------------------------------
+# 用途：界面字体走**内嵌位图字库**（编译进固件 .rodata 的点阵字体），
+#       不用 FreeType、不用 font 分区、不做任何运行时字形分配：
+#         · 正文 24px：CONFIG_UI_SYSTEM_FONT_FULL=y → system_global_font（完整版）
+#         · 小字 20px：system_smaller_font（无论哪个维度都始终编译）
+#       字形清单的统计方式与生成命令见 ideas_and_exps/FontSymbols.md。
+#
+# 适用场景：
+#   · 验证"没有 TTF/FreeType 也能正常显示"这条回退路径；
+#   · 不想维护 font 分区、也不想每次换字体都手动刷一遍字体分区（见 FONT_FLASH.md）；
+#   · 需要一组完全不含 FreeType、无运行时字形分配的最简构建（排障对照用）。
+#
+# 代价（务必知情）：
+#   · **app 体积大幅增加**：整份完整版位图字库进固件，实测体积见 BUILD_CONFIG.md；
+#   · 用户数据（歌曲名/目录名/日文/生僻字）**会缺字变方框**——位图字库只含生成时
+#     列出的字符（UI 文案 + ASCII + 少量常用字），动态字符串覆盖不了；
+#   · 没有"按需光栅化"，换字库必须重新生成 .c 并重新编译烧录。
+#
+# ⚠ 本文件显式关掉 TTF 与整个 FreeType 引擎，二者是**成对**的：
+#   · CONFIG_UI_FONT_TTF=n      → core/fonts/font_ttf.c 退化为"永远返回位图字体"
+#                                 （编译期 stub，不引用任何 FreeType 符号）
+#   · CONFIG_LV_USE_FREETYPE=n  → LVGL 不编译 src/libs/freetype/*，也不链接
+#                                 espressif/freetype 组件（省下这一整块 flash）
+#   · 两项都关后，main/CMakeLists.txt 里 if(CONFIG_LV_USE_FREETYPE) 包着的整段
+#     FreeType 接线（FT2_BUILD_LIBRARY / FT_CONFIG_OPTIONS_H 渲染池压缩 /
+#     -Wl,-u,FT_New_Memory 等三个符号）自动跳过；本维度也**不用 font 分区**
+#     （只有 ttffont 需要手动刷字体，见 FONT_FLASH.md）。
+# ⚠ CONFIG_UI_SYSTEM_FONT_FULL 在 Kconfig 里带 `depends on !UI_FONT_TTF`，
+#   所以关掉 TTF 之后它才可见——本文件的书写顺序就体现了这个依赖。
+# ============================================================================
+
+# CONFIG_UI_FONT_TTF is not set
+# CONFIG_LV_USE_FREETYPE is not set
+
+CONFIG_UI_SYSTEM_FONT_FULL=y

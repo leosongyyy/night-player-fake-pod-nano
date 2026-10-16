@@ -162,25 +162,35 @@ idfc monitor --grep "MEM:"                # 只显示匹配行
 
 > 📄 **矩阵的定义、`idfc_buildconfig.json` 的完整格式规范、给 idfc 仓库的逐文件修改说明，以及新版 idfc 的验收记录，见 `ideas_and_exps/BUILD_MATRIX.md`。** 本节只讲**本项目固件侧**的约定与用法。
 
-除三套构建类型外，项目还准备了 **DAC 芯片维度**，与构建类型组合成配置矩阵，由根目录的 `idfc_buildconfig.json` 描述。
+除三套构建类型外，项目还准备了两组 **overlay 维度**（`dac_chip` 与 `font`），与构建类型组合成配置矩阵，由根目录的 `idfc_buildconfig.json` 描述。
 
 > ✅ **该功能已于 2026-10-02 在新版 `idfc.exe` 中实现并验收通过**（实测记录见 `BUILD_MATRIX.md` §7）。因此：
-> - **构建目录不再是一维的 `build/<variant>`**，而是 `build/<dac_chip>.<variant>`（例：`idfc build` 实际构建 `build/cs43131.debug`，首次切换会从零全量构建）；
-> - 可用 `-o dac_chip=pcm5102` 临时指定维度、`idfc set-overlay dac_chip pcm5102` 永久保存选择、`idfc matrix` 查看全部 6 个单元格与当前选择；
-> - 旧的 `build/debug`、`build/releasecandidate`、`build/release` 目录**不再被复用**（`build` 会打印提示），可手工删除。
+> - **构建目录不再是一维的 `build/<variant>`**，而是 `build/<dac_chip>.<font>.<variant>`（例：`idfc build` 实际构建 `build/cs43131.ttffont.debug`，首次切换会从零全量构建）；
+> - 可用 `-o dac_chip=pcm5102` / `-o font=binfont` 临时指定维度、`idfc set-overlay <维度> <类型>` 永久保存选择、`idfc matrix` 查看全部 **12 个单元格**与当前选择；
+> - 旧的 `build/debug`、`build/cs43131.debug` 等目录**不再被复用**（`build` 会打印提示），可手工删除。
 
 ```
-OutputDir        build/{dac_chip}.{variant}      → build/cs43131.debug、build/pcm5102.release …
+OutputDir        build/{dac_chip}.{font}.{variant}   → build/cs43131.ttffont.debug、build/pcm5102.binfont.release …
 BaseConfig       sdkconfig.defaults
 BuildVariants    debug / releasecandidate / release   （ConfigFile: sdkconfig.defaults.<variant>）
 Overlays         dac_chip: cs43131 / pcm5102          （ConfigFile: sdkconfig.dac_chip.<类型>）
+                 font    : ttffont / binfont          （ConfigFile: sdkconfig.font.<类型>）
 ```
 
-合并顺序（**后加载的覆盖先加载的**，与现有 defaults 链一致）：
+合并顺序（**后加载的覆盖先加载的**，与现有 defaults 链一致；两个 overlay 之间按 `Overlays[]` 的声明顺序）：
 
 ```
-sdkconfig.defaults  →  sdkconfig.defaults.<variant>  →  sdkconfig.dac_chip.<类型>
+sdkconfig.defaults → sdkconfig.defaults.<variant> → sdkconfig.dac_chip.<类型> → sdkconfig.font.<类型>
 ```
+
+**`font` 维度（2026-10-25 新增，真切换）**：`ttffont`（默认）走 font 分区里的 TTF + FreeType；
+`binfont` 把完整版内嵌位图字库整份编进固件，关掉 `CONFIG_UI_FONT_TTF` 与整个 `CONFIG_LV_USE_FREETYPE`
+（`main/CMakeLists.txt` 里那段 FreeType 接线也随之跳过，连 `ttffont` 才需要的"手动刷字体"
+这一步也不需要）。实测 debug：
+**ttffont 1.85 MiB / binfont 3.84 MiB**；⚠ binfont 的字库 `.rodata` 会被 XIP 拷进 PSRAM，可用 PSRAM 由 6.40MB 降到 4.35MB——这是内嵌
+字库方案的**固有特性**（TTF 迁移前的老方案亦然，属已知行为），不是新增问题；另外首次构建要额外
+编译那份 16MB 的字库源文件（实测 167 秒）。切换：`idfc build -o font=binfont`、
+`idfc set-overlay font binfont`。详见 `BUILD_MATRIX.md` §1.8 与 `FontSystem.md`。
 
 ### 8.1 DAC 芯片选择（当前只打印日志）
 

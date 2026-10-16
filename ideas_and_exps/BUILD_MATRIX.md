@@ -108,21 +108,48 @@ sdkconfig.dac_chip.<类型>                ← overlay 维度（多个维度时�
 `idfc_buildconfig.json`（本仓库根目录）当前定义：
 
 - variant 维度：`debug` / `releasecandidate` / `release`
-- overlay 维度：`dac_chip`，类型 `cs43131`（默认）/ `pcm5102`
-- `OutputDir`：`build/{dac_chip}.{variant}`
+- overlay 维度 1：`dac_chip`，类型 `cs43131`（默认）/ `pcm5102`
+- overlay 维度 2：`font`，类型 `ttffont`（默认）/ `binfont`（2026-10-25 新增）
+- `OutputDir`：`build/{dac_chip}.{font}.{variant}`
 
-6 个单元格及其配置链：
+共 **12 个单元格**。为节省篇幅，下面按"配置链 = 公共前缀 + 两个 overlay + variant"归纳（后缀顺序固定为
+`dac_chip` → `font` → `variant`，与矩阵里 `Overlays[]` 的声明顺序一致）：
 
-| cell 目录 | sdkconfig 链 |
+| cell 目录 | 配置链（`-D SDKCONFIG_DEFAULTS=` 的分号列表） |
 |---|---|
-| `build/cs43131.debug` | `sdkconfig.defaults;sdkconfig.defaults.debug;sdkconfig.dac_chip.cs43131` |
-| `build/cs43131.releasecandidate` | `sdkconfig.defaults;sdkconfig.defaults.releasecandidate;sdkconfig.dac_chip.cs43131` |
-| `build/cs43131.release` | `sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.dac_chip.cs43131` |
-| `build/pcm5102.debug` | `sdkconfig.defaults;sdkconfig.defaults.debug;sdkconfig.dac_chip.pcm5102` |
-| `build/pcm5102.releasecandidate` | `sdkconfig.defaults;sdkconfig.defaults.releasecandidate;sdkconfig.dac_chip.pcm5102` |
-| `build/pcm5102.release` | `sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.dac_chip.pcm5102` |
+| `build/cs43131.ttffont.debug` | `sdkconfig.defaults;sdkconfig.defaults.debug;sdkconfig.dac_chip.cs43131;sdkconfig.font.ttffont` |
+| `build/cs43131.ttffont.releasecandidate` | `sdkconfig.defaults;sdkconfig.defaults.releasecandidate;sdkconfig.dac_chip.cs43131;sdkconfig.font.ttffont` |
+| `build/cs43131.ttffont.release` | `sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.dac_chip.cs43131;sdkconfig.font.ttffont` |
+| `build/cs43131.binfont.debug` | `sdkconfig.defaults;sdkconfig.defaults.debug;sdkconfig.dac_chip.cs43131;sdkconfig.font.binfont` |
+| `build/cs43131.binfont.releasecandidate` | `sdkconfig.defaults;sdkconfig.defaults.releasecandidate;sdkconfig.dac_chip.cs43131;sdkconfig.font.binfont` |
+| `build/cs43131.binfont.release` | `sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.dac_chip.cs43131;sdkconfig.font.binfont` |
+| `build/pcm5102.ttffont.debug` | `sdkconfig.defaults;sdkconfig.defaults.debug;sdkconfig.dac_chip.pcm5102;sdkconfig.font.ttffont` |
+| `build/pcm5102.ttffont.releasecandidate` | `sdkconfig.defaults;sdkconfig.defaults.releasecandidate;sdkconfig.dac_chip.pcm5102;sdkconfig.font.ttffont` |
+| `build/pcm5102.ttffont.release` | `sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.dac_chip.pcm5102;sdkconfig.font.ttffont` |
+| `build/pcm5102.binfont.debug` | `sdkconfig.defaults;sdkconfig.defaults.debug;sdkconfig.dac_chip.pcm5102;sdkconfig.font.binfont` |
+| `build/pcm5102.binfont.releasecandidate` | `sdkconfig.defaults;sdkconfig.defaults.releasecandidate;sdkconfig.dac_chip.pcm5102;sdkconfig.font.binfont` |
+| `build/pcm5102.binfont.release` | `sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.dac_chip.pcm5102;sdkconfig.font.binfont` |
 
-> 约定（**idfc 不强制**，但本项目遵守）：overlay 配置文件命名 `sdkconfig.<维度名>.<类型名>`，见 `sdkconfig.dac_chip.cs43131` / `sdkconfig.dac_chip.pcm5102`。
+### 1.8 `font` 维度：binfont / ttffont
+
+| 类型 | 含义 | 关键开关（`sdkconfig.font.*`） | 实测 app 体积（debug） |
+|---|---|---|---|
+| `ttffont`（默认） | TTF + FreeType，字体在 flash 的 `font` 分区 | `UI_FONT_TTF=y`、`LV_USE_FREETYPE=y`、`UI_SYSTEM_FONT_FULL` 关 | **1.85 MiB**（余 77%） |
+| `binfont` | 内嵌位图字库（完整版）编进固件，完全不用 FreeType | `UI_FONT_TTF` 关、`LV_USE_FREETYPE` 关、`UI_SYSTEM_FONT_FULL=y` | **3.84 MiB**（余 52%） |
+
+- **切换**：`idfc build -o font=binfont`（临时）/ `idfc set-overlay font binfont`（永久）；
+  清除回默认 `idfc set-overlay font --default`。查看 `idfc matrix` / `idfc status`。
+- ⚠ 加了维度后 **`OutputDir` 必须包含全部维度占位符**（§2.5 的硬规则），所以旧的
+  `build/cs43131.debug`、`build/pcm5102.release` 等目录**不再被使用**，各 cell 会重新全量构建一次
+  （binfont 首次约 167 秒，其余约 75 秒）。旧目录可手工删除。
+- ⚠ binfont 下 `font` 分区是**闲置**的（分区表共享、不随维度变化）。如果以后想让两个维度用不同
+  分区表，可以在 overlay 里覆盖 `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`（当前没做）。
+- ⚠ binfont 的字库 `.rodata` 会被 XIP 拷进 PSRAM，**可用 PSRAM 由 6.40MB 降到 4.35MB**——
+  这是**内嵌字库方案的固有特性**（TTF 迁移前的老方案同样如此，属已知行为），不是引入本维度才有的问题。
+- 详细说明见 `FontSystem.md` 与 `BUILD_CONFIG.md`。
+
+> 约定（**idfc 不强制**，但本项目遵守）：overlay 配置文件命名 `sdkconfig.<维度名>.<类型名>`，
+> 见 `sdkconfig.dac_chip.cs43131` / `sdkconfig.dac_chip.pcm5102` / `sdkconfig.font.ttffont` / `sdkconfig.font.binfont`。
 
 ---
 

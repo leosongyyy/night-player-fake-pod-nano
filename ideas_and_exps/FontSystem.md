@@ -18,10 +18,11 @@
 | 引擎 | FreeType 2.14.3（`espressif/freetype` 组件，IDF 组件管理器拉取） |
 | 读取方式 | `esp_partition_mmap` 整个分区 + 自写 lv_fs 驱动按偏移 `memcpy` |
 | 字号 | 复用同一份 TTF：24px（正文/列表/标题）、20px（状态栏/时长/两行文字图标） |
-| 回退 | TTF 不可用 → 自动用内嵌位图字体（`system_global_font_lite` 24px / `system_smaller_font` 20px），界面不会没字 |
-| 固件体积 | debug **1.78 MiB**、release **2.19 MiB**；内嵌完整字库（2.4MB）已不再参与构建，release 由约 4.1MB 降到 2.19MB。⚠ 占用百分比随 `factory` 大小而变：2026-10-25 把 factory 由 3.9375MiB 扩到 **7.9375MiB** 后，debug 仅占 22%、release 占 28%（§2） |
-| 开机耗时 | 字体探测 + mmap + 建两个字号 ≈ **53ms**（693ms→746ms，不影响"进主界面"时刻） |
-| 烧录 | `idfc flash` **只烧 bootloader + 分区表 + app（约 19 秒）**；换字体才跑 `idfc idfpy font-flash`（约 33 秒，MiSans 时代需 75 秒） |
+| 回退 | TTF 不可用（font 分区空/损坏、或 `font` 维度选了 `binfont`）→ 自动用**内嵌位图字体**：`CONFIG_UI_SYSTEM_FONT_FULL=y` 时是完整版 `system_global_font`（24px，含 CJK 全集）+ `system_smaller_font`（20px），否则是精简版 `system_global_font_lite`。界面不会没字 |
+| 构建维度 | **`font`**（`ttffont` 默认 / `binfont`，2026-10-25 加入配置矩阵）：`ttffont` = 本文档这一套（font 分区 + FreeType）；`binfont` = 完整版位图字库整份编进固件、关掉 TTF 与整个 FreeType。见 `BUILD_MATRIX.md` §1.8 |
+| 固件体积 | debug：**ttffont 1.85 MiB**（`0x1d9060`，factory 余 77%）/ **binfont 3.84 MiB**（`0x3d8040`，余 52%）。⚠ binfont 的字库 `.rodata` 会被 XIP 拷进 PSRAM，可用 PSRAM 由 6.40MB 降到 4.35MB——这是**内嵌字库方案的固有特性**（TTF 迁移前的老方案亦然，属已知行为）。⚠ 百分比随 `factory` 大小而变：2026-10-25 把 factory 由 3.9375MiB 扩到 **7.9375MiB** 后才有这个余量（§2） |
+| 开机耗时 | 字体探测 + mmap + 建两个字号 ≈ **53ms**，但**延迟到"进常规界面"时才发生**（2026-10-25 起，见 §9 第 8 条）：`font_ttf_init()` 在 `boot_enter_normal()` 里调用，boot 早期不再加载 |
+| 烧录 | `idfc flash` **只烧 bootloader + 分区表 + app（约 19 秒）**，**有意不含字体**；字体要单独用手边的 esptool 手动刷进 `font` 分区（约 30~40 秒 / 3.55MiB）—— 命令、校验与换字体流程见 **`FONT_FLASH.md`** |
 
 ---
 
@@ -281,88 +282,47 @@ Backtrace: gray_set_cell → gray_render_line → gray_line_to → FT_Outline_De
 
 ---
 
-## 六、烧录与更新流程
+## 六、刷入与更新流程
+
+> ⚠ **2026-10-25 改版**：字体不再由构建系统烧录。原来那条 `font-flash` ninja 目标
+> （`idfc idfpy font-flash`）已从 `main/CMakeLists.txt` **整段移除**，改为"分区表只保留位置 +
+> 用 esptool 手动刷一遍"。**完整刷入文档（何时必须刷、怎么校验、出错表现、换字体流程、
+> 历史坑）见 [`FONT_FLASH.md`](FONT_FLASH.md)**；本节只留开发视角的要点。
 
 ```powershell
 idfc build                       # 增量构建
-idfc flash                       # 只烧 bootloader + 分区表 + app（约 19 秒，**不含字体**）
-idfc idfpy font-flash            # 只烧 font 分区（约 75 秒 MiSans / 33 秒 Droid）—— 换字体时才需要
+idfc flash                       # 烧 bootloader + 分区表 + app（约 20 秒，**不含字体**）
+esptool.exe --chip esp32s3 --port COM12 write_flash 0x800000 spiffs/system.ttf   # 字体（约 30~40 秒；首次装机、换字体、font 偏移变了才需要）
 ```
 
-⚠ `idfc flash` 不含字体；换字体用 `font-flash`。两处的**串口处理不一样**，见 §6.1。
-
-- 字体由 `main/CMakeLists.txt` 的 `esptool_py_flash_target(font-flash ...)` +
-  `esptool_py_flash_to_partition(font-flash "font" spiffs/system.ttf)` 挂成**独立目标**，
-  **故意不挂到 `flash`**：否则每轮烧录都要多花 75 秒。
-  （`idf.py` 本身允许把任意 CMake 目标当子命令用 —— 报错信息是
-  `command "xxx" is not known to idf.py and is not a Ninja target`，`font-flash` 是真实目标所以可用。）
+- `idfc flash` **故意不含字体**（3.55MiB，每轮多烧 30~40 秒不值）。字体在**固件之外**，
+  用装机时手边本来就会有的 **esptool** 直接写 `font` 分区（偏移见 `partitions.csv`）——
+  构建系统里因此不再需要任何自定义目标，也顺带回避了 `idf.py <自定义目标>` 的端口问题。
 - ⚠ 换**分区表**后要确认 `font` 分区的**起始偏移**变没变：
-  - 偏移变了（例如从无到有）→ 必须跑一次 `idfc idfpy font-flash`，否则 font 分区是空的：
+  - 偏移变了（例如从无到有）→ 必须重刷一次字体，否则 font 分区是空的：
     固件仍能启动，但会打印 `font 分区里不是 TTF/OTF（头 4 字节 = 0xFFFFFFFF）` 并回退内嵌位图字体；
   - 偏移没变、只是分区变小了（2026-10-25 这次 8MiB→4MiB，起点仍 0x800000）→ 字体数据原样保留，
     **不需要重烧**，4MiB 仍装得下 3.55MiB 的字体。
-- 换字体：**改名覆盖 `spiffs/system.ttf`**（见 §6.2），然后 `idfc build` + `idfc idfpy font-flash`。
+- 换字体：**改名覆盖 `spiffs/system.ttf`**（见 §6.1），然后 `idfc build` +
+  `esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf`。
   启动日志里的"N 张表，M 个字形"就是当前生效字体的指纹。
+- **2026-10-25 实测**（esptool 4.12 + USB-Serial/JTAG）：手动刷 3.55MiB 用时 **33.4 秒**
+  （893 kbit/s），结尾 `Hash of data verified.`；读回 3.55MiB 校验 MD5 与源文件**完全一致**
+  （读取很慢，324 秒 / 92 kbit/s，且首次读还偶发过一次 `Corrupt data`，重试即通过）。
+  删除 `font-flash` 目标后 `idfc build` 一切正常，只是多打一行提示
+  （`-- 提示：font 分区（0x800000）的内容需手动刷入 …`）。
 
-### 6.1 ⚠ 端口：为什么 `-p` 对 `font-flash` 无效（2026-10 实测）
+### 6.1 单一字体文件约定（换字体 = 改名覆盖）
 
-`idfc flash` / `idfc monitor` 认串口（idfc 会自己带上 `-p COMxx`），但 **`font-flash` 不行**，
-日志里会看到它逐个串口试：
-
-```
-(could not open port 'COM7': OSError(22, '信号灯超时时间已到'))
-(could not open port 'COM3': ...)
-Flash will be erased from 0x00800000 ...
-```
-
-原因在 IDF 侧（`components/esptool_py/get_port_args.cmake`）：
-
-```cmake
-# Note: we can't expand these environment variables in the main IDF CMake build,
-# because we want to expand them at flashing time not at CMake runtime
-set(ESPPORT $ENV{ESPPORT})
-if(NOT ESPPORT)
-    message("Note: ... will search for a serial port. To specify a port, set the ESPPORT environment variable.")
-...
-```
-
-- `font-flash` 是 **CMake 生成的自定义目标**，`idf.py <自定义目标>` 只是把它当 **ninja 目标**跑；
-- 该目标里 esptool 的端口是**烧录那一刻读环境变量 `ESPPORT`**（故意不在 CMake 配置期展开，
-  这样不重配也能改端口）；
-- 所以 `idf.py -p COMxx`（idf.py 自己 `flash`/`monitor` 动作的参数）**到不了这里**。
-
-实测（三种做法都试过）：
-
-| 做法 | 结果 |
-| --- | --- |
-| `idfc idfpy -p COM12 font-flash` | ✗ 仍逐个试端口 |
-| 客户端 `$env:ESPPORT="COM12"` 后 `idfc idfpy font-flash` | ✗ 仍逐个试端口——**ninja 是 idfc 服务器拉起的**，客户端环境变量传不过去 |
-| **服务器进程**带 `ESPPORT`（见下） | ✓ 直接指定端口 |
-
-**可用做法**：让**拉起 ninja 的那个进程**（idfc 服务器）带上 `ESPPORT` 再重启服务器：
-
-```powershell
-idfc stop-server
-$env:ESPPORT = "COM12"
-idfc start-server
-idfc idfpy font-flash        # 不再逐端口探测
-```
-
-**建议给 idfc 仓库的小改进**（本机源码 `C:\Users\ZYFDroid\source\repos\IDFClientCLI`）：
-`IDFClientCLI\Server\ServerChildMain.cs` 的 `HandleExecRequest` 已经取到 `cwd`（L209），在 L245
-那个"把服务器环境复制给 idf.py 子进程"的循环之后加几行：读 `<cwd>\.idfc\idfc_config.json` 的
-`LastComPort`，非空就 `psi.EnvironmentVariables["ESPPORT"] = port;`。这样 `idfc idfpy <任何自定义
-flash 目标>` 都会自动用保存的串口，与 `idfc flash` 行为一致（读不到就保持现状：让 esptool 自己找）。
-
-### 6.2 单一字体文件约定（换字体 = 改名覆盖）
-
-**`spiffs/system.ttf` 是唯一字体文件，路径写死在 `main/CMakeLists.txt`**（`font-flash` 目标），
-运行期固件也永远按 `F:/system.ttf` 打开（font 分区是裸二进制、只放一个文件）。
+**`spiffs/system.ttf` 是唯一字体文件，运行期固定按 `F:/system.ttf` 打开**（`core/fonts/font_ttf.c`
+的 lv_fs 驱动；font 分区是裸二进制、只放一个文件），所以在仓库里它的**名字与路径也是写死的**
+（刷进分区的内容就是这个文件本身）。
 所以**换字体不需要改任何代码/Kconfig**，三步：
 
 1. 把新字体文件**改名成 `system.ttf` 覆盖** `spiffs/system.ttf`（想留旧的就自己先备份到别处）；
 2. `idfc build`（一般不用重编，只是确认配置没过期）；
-3. **`idfc idfpy font-flash`** 重烧字体分区（约 33 秒/3.55MiB）。
+3. **手动重刷字体分区**：`esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf`
+   （约 30~40 秒 / 3.55MiB；命令细节与校验见 `FONT_FLASH.md`）。
 
 启动日志的 "N 张表，M 个字形" 就是校验指纹，用于确认生效的是哪份。
 
@@ -371,7 +331,7 @@ flash 目标>` 都会自动用保存的串口，与 `idfc flash` 行为一致（
 | 项 | 值 |
 | --- | --- |
 | 名称/来源 | Droid Sans Fallback（Android 时代 CJK 回退字体，AOSP，2011） |
-| 许可 | Apache-2.0，`Copyright (C) 2012 The Android Open Source Project`；文本入库在 `spiffs/DroidSansFallback-LICENSE.txt`（⚠ 只是仓库文件，**不打进固件**，不参与 `font-flash`、不占分区） |
+| 许可 | Apache-2.0，`Copyright (C) 2012 The Android Open Source Project`；文本入库在 `spiffs/DroidSansFallback-LICENSE.txt`（⚠ 只是仓库文件，**不打进固件**、不占分区，刷入设备时也不需要它） |
 | 体积 / 字形数 | 3,725,920 B（3.55 MiB）/ 50951 |
 | upem | 256 |
 | 行高 | 24px → **31**，20px → **26**（基准线 7 / 6） |
@@ -446,7 +406,8 @@ I (22609) MEM: stk: deep_worker=11504 ... LVGL=15660 sleep_timer=3420 ...
 
 ### 8.2 缓存与其它可调项（按性价比排序）
 
-0. **换字体文件**（见 §8.1）：改名覆盖 `spiffs/system.ttf` 再 `idfc idfpy font-flash`，
+0. **换字体文件**（见 §8.1）：改名覆盖 `spiffs/system.ttf` 再手动重刷字体分区
+   （`esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf`），
    零代码改动、收益最大。
 1. **`CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT`**（当前 **1024**；它同时管两个 LRU：度量缓存 = 本值×2、
    **位图缓存 = 本值**）：**只吃 PSRAM**，实测填满约 0.61MB，之后完全稳定（无泄漏）。
@@ -478,3 +439,55 @@ I (22609) MEM: stk: deep_worker=11504 ... LVGL=15660 sleep_timer=3420 ...
 6. 应用侧**不要**调 `lv_freetype_init()`：LVGL 9.4 的 `lv_init()` 已经初始化过（`lv_init.c` 里带
    `LV_FREETYPE_CACHE_FT_GLYPH_CNT`），重复调用会 `freetype already initialized` 并返回
    `LV_RESULT_INVALID`（引擎其实是好的）——参考项目踩过这个坑。
+7. **扫描的"写入阶段"会让 LVGL 停摆、文字变方框 → 已修复**（2026-10-25 发现并解决）：
+   写 pldata 走 `esp_partition_erase/write` 会**关闭外部内存缓存**，此时 PSRAM 不可访问，而
+   LVGL 对象堆（`core/ui/lvgl_mem.c`）与 FreeType 的字形位图缓存都在 PSRAM → 若那一刻 LVGL
+   正在渲染，这一帧就停摆、新字形取不到（屏幕出现方框、进度界面冻住）。属"关缓存陷阱"又一例。
+   **修法**（`ui/boot_flow.c`）：扫描进度回调在 `PLAYLIST_BUILD_PHASE_WRITE` 阶段
+   `lvgl_port_lock(-1)` 把 LVGL 锁抢过来 → 主动把文案改成"正在写入扫描数据..."并
+   `lv_refr_now()` 提交最后一帧 → 整个写入期间 LVGL 冻结不渲染 → `boot_scan_task` 在写完
+   flash（含无音乐时的 `playlist_store_invalidate`）后 `lvgl_port_unlock()`；随后进度定时器
+   才拿得到锁、切到主界面/无音乐页。也就是"宁可界面定格，也不要跑到不可恢复的状态"。
+   ⚠ 两条硬前提：① 扫描任务栈必须在**内部 RAM**（关缓存期间 PSRAM 栈不可访问，见
+   `BOOT_SCAN_STACK_BYTES` 注释）；② **解锁必须早于置 `s_scan_done`**（定时器要靠这把锁
+   才能跑起来）。⚠ 写入期间若触发息屏/深链，会等这把锁直到 deep_worker 的 5s 超时
+   （只打告警、不影响正确性；扫描时本也不该息屏）。
+   ⚠ 内嵌回退位图字库不受此问题影响（在 `.rodata`、渲染不需要运行时分配）——顺带发现并
+   补齐了回退字库的字形覆盖，见 `FontSymbols.md`。
+8. **TTF 改为延迟加载**（2026-10-25，用户要求"只有正常启动流程才加载"）：
+   `font_ttf_init()` 不再由 `main.c` 在开机早期调用，而是**只在 `boot_enter_normal()`**
+   （确实要进常规界面时）调用一次；低电 / 无卡 / 待扫描这几个非正常启动分支全程使用
+   内嵌位图字体。代价：进常规界面时多花约 53ms（字体加载从"开机封面背后并行"变成
+   "锁内串行"）——用户明确表示此时开机速度不再是约束。收益：boot 阶段完全不加载 TTF，
+   不占 PSRAM 字形缓存、不依赖 FreeType，扫描写 flash（关外部内存缓存）期间又少一处
+   "字形取不到 → 方框"的风险。
+   ⚠ 由此 `font_ttf_init()` 的契约也变了：**要求调用方已持 LVGL 锁**（原先内部自己
+   加锁）。因为 `boot_enter_normal()` 运行在 `boot_flow_run()` 的锁内，而 `lvgl_port_lock`
+   用的是**普通 mutex、不可重入**，内部再加锁会直接死锁。
+9. **第 7、8 两条机制的完整闭环实测**（2026-10-25，debug/cs43131，用户手动操作 + 串口日志）：
+   路径 = 设置菜单「重新扫描」→ 失效分区并 `esp_restart` → 停在"需要扫描音乐" → 点「开始扫描」
+   → 扫描 172 个目录 / 8603 首 → 写入分区 → 进播放界面。关键证据：
+
+   ```
+   I (1131) app_main: Run boot flow
+   W (1135) boot_flow: playlist data invalid, prompt to scan   ← 之后**没有任何 font_ttf 日志**
+                                                                 （= 内嵌位图字体，延迟加载生效）
+   I (1627) boot_flow: scan task begin
+   I (3733) playlist_builder: scan done: dirs=172 songs=8603 str_len=336661 total=598805
+   I (3746) boot_flow: write phase: LVGL locked, UI frozen until write finishes   ← 抢锁冻结
+   I (3749) playlist_builder: saving playlist to partition (len=598805) ...
+   I (9288) playlist_store: playlist saved: len=598805 crc=0xae87dbd2
+   I (9290) boot_flow: write phase: LVGL unlocked, UI resumes                     ← 释放
+   I (9590) font_ttf: 字体信息：TrueType(glyf)，18 张表，50951 个字形              ← 写完才加载 TTF
+   I (9626) font_ttf: 系统字体已切换到 TTF（FreeType，字形按需从 font 分区读取）
+   I (10205) boot_flow: enter normal UI
+   ```
+
+   - 写入耗时 **5.5 秒**（3746→9290），界面全程定格在"正在写入扫描数据..."（用户确认），
+     **没有再出现方框**——正是设计意图：宁可定格，也不在 PSRAM 不可访问的窗口里渲染；
+   - PSRAM 由写入期的 3.33MB 恢复到解锁后的 5.67MB（`heap=3333711` → `5732095`），无泄漏；
+   - `MEM: stk: … LVGL=10852 …`：20KB 的 LVGL 任务栈在渲染完主界面后仍余 10.8KB，健康。
+   ⚠ **顺带复现了一次老问题**：扫描早期出现 `E sdmmc_cmd: allocate_dma_buf: not enough mem`
+   + `diskio_sdmmc: sdmmc_read_blocks failed (0x101)`（仅 1 次，重试后成功，最终 8603 首与
+   写入前一致）。这是内部 RAM/DMA 余量偏低导致的瞬时失败（见 AGENTS.md 与
+   `IRAM_DMA_AUDIT.md`），与本次字体改动无关，但说明余量仍然紧张。

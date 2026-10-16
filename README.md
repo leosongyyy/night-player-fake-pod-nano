@@ -187,6 +187,26 @@ idfc run -t release --monitor-wait-for "App started"   # 构建+体积+烧录+�
 idfc help --all                  # 全部命令与参数
 ```
 
+### 🔤 刷字体（第一次安装 / 换字体时必做）
+
+系统字体（Droid Sans Fallback，3.55 MiB，含 5 万+ 汉字）**不在固件里**，而是单独放在 flash 的
+`font` 分区（`partitions.csv`：偏移 `0x800000`，4 MiB）。所以刷完固件之后，**还要用手边的
+esptool 单独刷一次字体**：
+
+```powershell
+esptool.exe --chip esp32s3 --port COMx write_flash 0x800000 spiffs/system.ttf
+```
+
+- 约 30~40 秒（实测 33.4 秒）；结束时出现 `Hash of data verified.` 就说明写入无误
+  （有些版本还会多打一行 `doesn't look like an image file` 的警告，同样是正常的）。
+- **不刷也能开机**：界面会自动回退到编译进固件的位图字体，但生僻字、日文、韩文等会显示成方框。
+- **换字体**：把新字体改名成 `system.ttf` 覆盖 `spiffs/system.ttf` 再刷一遍即可（文件要 ≤ 4 MiB）。
+- 完整的刷入说明（校验方法、出错表现、分区上限、历史坑）见
+  [ideas_and_exps/FONT_FLASH.md](ideas_and_exps/FONT_FLASH.md)。
+
+> 为什么字体要单独刷？它 3.55 MiB，如果跟着每次 `idfc flash` 一起烧，每轮更新固件都要多花半分钟，
+> 而字体几乎从不变化。因此分区表只**保留它的位置**，内容由 esptool 一条命令写入。
+
 ## 📱 兼容设备
 
 本固件面向开源项目 **FakePodNano** 的成品播放器：ESP32-S3、460×460 圆角 AMOLED 触摸屏、A/B 双键、TF 卡。不同批次硬件可能存在差异，刷机前请先核对设备参数。

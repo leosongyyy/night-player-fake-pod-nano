@@ -4,7 +4,7 @@
 
 > 📥 **下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**。下载后把 `idfc.exe` 放到 **PATH 中的某个目录**（例如 `C:\Users\<你>\ProgramFiles\bin\`），然后在**项目目录**里直接用 `idfc <子命令>` 调用即可（见 §3）。
 
-> 🆕 **2026-10-02 起：本项目启用了「配置矩阵」**（`idfc_buildconfig.json`，维度 = `variant` × `dac_chip`）。**构建目录从 `build/<variant>` 变成 `build/<cell>`（如 `build/cs43131.debug`）**，并新增 `-o <维度>=<类型>` 参数与 `matrix` / `set-overlay` 命令。**本文档中凡出现 `-B build/<variant>`、`build/<cfg>` 的示例都属于矩阵之前的行为**（没有 `idfc_buildconfig.json` 的项目仍然如此，因此这些说明并未失效，只是不再是本项目的路径）。矩阵的定义、格式与实测记录见 `BUILD_MATRIX.md`；新版 `idfc help --all` 与 idfc 仓库 README 是权威说明。
+> 🆕 **2026-10-02 起：本项目启用了「配置矩阵」**（`idfc_buildconfig.json`，维度 = `variant` × `dac_chip` × `font`）。**构建目录从 `build/<variant>` 变成 `build/<cell>`（如 `build/cs43131.ttffont.debug`）**，并新增 `-o <维度>=<类型>` 参数与 `matrix` / `set-overlay` 命令。**本文档中凡出现 `-B build/<variant>`、`build/<cfg>` 的示例都属于矩阵之前的行为**（没有 `idfc_buildconfig.json` 的项目仍然如此，因此这些说明并未失效，只是不再是本项目的路径）。矩阵的定义、格式与实测记录见 `BUILD_MATRIX.md`；新版 `idfc help --all` 与 idfc 仓库 README 是权威说明。
 
 > ⚠ **本文档对应当前的「子命令版」idfc。**
 > 旧版语法（`--server` / `-B build/<cfg> build` / `-B ... reconfigure` / `raw-idf`）**已全部失效**，现在一律报 `没有这样的命令`（退出码 1）。历史对话、旧文档、旧笔记里的 idfc 命令**不要照抄**——先看 §1 的迁移对照。

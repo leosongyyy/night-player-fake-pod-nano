@@ -24,8 +24,14 @@
 #   · 裸分区按文件大小对齐即可，且不必每轮构建生成大镜像、没有挂载扫描时间、没有常驻开销。
 # 该结论与字体选型无关：现在字体只有 3.55MiB，裸分区依然是最省最简单的一档。
 # 代价：分区里放不了第二个文件，读写要靠自己的 lv_fs 驱动（见 main/core/fonts/font_ttf.c）。
-# 刷新字体 = `idfc idfpy font-flash`（CMake 里用 esptool_py_flash_to_partition(flash "font" …)
-# 把 spiffs/system.ttf 挂到 flash 目标上）；普通 `idfc flash` 不更新字体。
+#
+# ---------- 字体怎么刷进来（2026-10-25 起改为**手动**） ----------
+# 分区表只**保留位置**，构建系统不参与字体烧录（此前由 main/CMakeLists.txt 的
+# font-flash 目标代劳，该目标已移除）。刷字体就用**装固件时手边的 esptool**，一条命令：
+#   esptool.exe --chip esp32s3 --port COMx write_flash 0x800000 spiffs/system.ttf
+# 完整刷入文档（何时必须刷、怎么校验、出错表现、换字体流程）：ideas_and_exps/FONT_FLASH.md
+# ⚠ 普通 `idfc flash` **不含字体**（有意为之：字体 3.55MiB，每轮多烧 30~40 秒不值）。
+#
 # 当前字体：Droid Sans Fallback（AOSP，Apache-2.0），3,725,920 B = 3.554MiB
 #          → 4MiB 分区余 468,384 B（约 457KB，12.5%）。
 # ⚠ 换字体前先确认文件仍在 4MiB 以内；超了就调大 font 并等量缩小 factory（**不必动 pldata**）。

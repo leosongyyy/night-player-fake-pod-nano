@@ -1,7 +1,7 @@
 {
 	"ProjectName":"FakePodNanoNightPlayer",
 	"BaseConfig":"sdkconfig.defaults",
-	"OutputDir":"build/{dac_chip}.{variant}",
+	"OutputDir":"build/{dac_chip}.{font}.{variant}",
 	"BuildVariants":[
 		{
 			"Name":"debug",
@@ -34,6 +34,22 @@
 					"Name":"pcm5102",
 					"ConfigFile":"sdkconfig.dac_chip.pcm5102",
 					"Description":"为 PCM5102 版本芯片构建的固件变种（无 I2C 控制端口，音量只能靠 I2S 数据侧处理）。配置项为 main/Kconfig.projbuild 的 AUDIO_DAC_PCM5102，并显式关闭 AUDIO_DAC_CS43131（两项同时开或同时关都会编译报错）。⚠ 目前并未实现真正的 DAC 切换：本配置不改变任何驱动行为，只让 app_main 结尾打印 \"DAC chip: PCM5102\"。由于作者目前没有 PCM5102 版本的设备，无法进行实机测试。"
+				}
+			]
+		},
+		{
+			"OverlayName":"font",
+			"DefaultType":"ttffont",
+			"OverlayTypes":[
+				{
+					"Name":"ttffont",
+					"ConfigFile":"sdkconfig.font.ttffont",
+					"Description":"界面字体走 TTF 矢量字体：font 分区（partitions.csv，裸二进制 4MiB）里的 spiffs/system.ttf + FreeType 按需光栅化，字体延迟到进入常规界面时才加载。字体不占 app 分区，能显示任意汉字/日文/生僻字。⚠ 字体**不在固件里**：刷完固件要用 esptool 手动刷一遍字体分区（esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf，见 ideas_and_exps/FONT_FLASH.md），换字体同样要重刷；不刷则静默回退内嵌位图字体。2026-10 起的默认类型。"
+				},
+				{
+					"Name":"binfont",
+					"ConfigFile":"sdkconfig.font.binfont",
+					"Description":"界面字体走内嵌位图字库：整份 system_global_font（完整版，含 CJK 全集 + 假名 + 谚文 + 常用符号）编译进固件 .rodata，不用 FreeType、不用 font 分区、无运行时字形分配。用于验证无 TTF 的回退路径，或需要一组完全不含 FreeType 的最简构建。⚠ 代价：app 体积显著增大（实测 debug 3.84MB vs ttffont 1.85MB），首次构建要额外编译那份 16MB 的字库源文件（全量约 167 秒）；且字体内容固定，emoji 等字库未收录的字符仍会变方框。"
 				}
 			]
 		}

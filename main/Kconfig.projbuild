@@ -29,9 +29,9 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ release 构建关闭（正式版不需要这些诊断日志）。
             关闭时所有调用点编译为空语句，不产生任何代码与日志。
 
-    # ⚠ 字体文件**写死**为 ../spiffs/system.ttf（见 main/CMakeLists.txt 的 font-flash 目标）：
-    #   换字体 = 用新字体文件**改名覆盖** spiffs/system.ttf，然后 idfc build +
-    #   idfc idfpy font-flash（见 ideas_and_exps/FontSystem.md §6）。
+    # ⚠ 字体文件**写死**为 ../spiffs/system.ttf，而且**不在固件里**：刷完固件还要用 esptool
+    #   手动把它刷进 font 分区（见 ideas_and_exps/FONT_FLASH.md）。换字体 = 用新字体文件
+    #   **改名覆盖** spiffs/system.ttf，然后 idfc build + 重刷字体分区（§6.2）。
     #   当前内容是 Droid Sans Fallback（AOSP/Apache-2.0，50951 字形，3.55MiB，
     #   24px 行高 31 / 20px 行高 26）；许可文本入库在 spiffs/DroidSansFallback-LICENSE.txt。
     #   2026-10 实测它同一手势下滚动帧率明显高于此前的 MiSans（单字形轮廓数据只有
@@ -41,12 +41,15 @@ menu "FakePodNanoNightPlayer 应用配置"
         bool "系统字体改用 TTF（FreeType，字体在 font 分区）"
         default y
         help
-            开启（推荐，2026-10 起默认）：界面字体由 font 分区里的 MiSans TTF
-                  经 FreeType 按需光栅化（见 core/fonts/font_ttf.c 与
+            开启（推荐，2026-10 起默认）：界面字体由 font 分区里的 Droid Sans
+                  Fallback TTF 经 FreeType 按需光栅化（见 core/fonts/font_ttf.c 与
                   ideas_and_exps/FontSystem.md）。字形按需读取、任意字号复用同一
-                  文件、汉字覆盖全（29758 字形），固件里不再需要内嵌大字库。
+                  文件、汉字覆盖全（50951 字形），固件里不再需要内嵌大字库。
                   用 CONFIG_LV_USE_FREETYPE 编译引擎，字体文件由 partitions.csv 的
-                  font 分区承载（裸二进制，8MiB，见该文件注释）。
+                  font 分区承载（裸二进制，4MiB，见该文件注释）。
+                  ⚠ **字体不在固件里**：刷完固件要用 esptool 手动刷一遍字体分区，
+                    否则界面静默回退内嵌位图字体（能开机，但生僻字/日文缺字变方框）
+                    —— 命令与校验方法见 ideas_and_exps/FONT_FLASH.md。
             关闭：回到内嵌位图字体（由下面的 UI_SYSTEM_FONT_FULL 决定用完整版
                   还是精简版），此时 font 分区与 FreeType 都不参与，界面与
                   迁移前完全一致——留作字体文件损坏时的对照/兜底方案。

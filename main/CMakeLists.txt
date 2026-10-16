@@ -190,40 +190,32 @@ if(CONFIG_LV_USE_FREETYPE)
 endif()
 
 # ============================================================================
-# font 分区：把系统字体烧到分区偏移处（裸二进制，无文件系统）
+# font 分区（partitions.csv 的 font @ 0x800000，4MiB）：字体**不由构建系统烧录**
 # ----------------------------------------------------------------------------
-# 分区定义见根目录 partitions.csv（font @ 0x800000，4MiB，subtype 0x41；
-# 2026-10-25 由 8MiB 缩小 —— 换用 3.55MiB 的 Droid 后 4MiB 足够，省下的 4MiB 给 factory）。
-# ⚠ **故意不挂到 `flash` 目标上**：字体 3,725,920 B，每轮 `idfc flash` 都重烧一遍
-#    要多花 33 秒（实测；MiSans 时代是 75 秒），而字体文件几乎从不变。所以单独建一个
-#    `font-flash` 目标：
-#      · 平时：idfc flash          → 只烧 bootloader + 分区表 + app（约 20 秒）
-#      · 换字体：idfc idfpy font-flash   → 只烧 font 分区
-#    （`font-flash` 由 esptool_py_flash_target 注册成 CMake 目标，idf.py 直接透传。）
-# ⚠ 换分区表后先看 font 分区的**起始偏移**变没变：
-#    变了（例如从无到有）→ 必须至少跑一次 font-flash，否则分区是空的：界面仍能启动，
-#      但会打印 "font 分区里不是 TTF/OTF（头 4 字节 = 0xFFFFFFFF）" 并回退内嵌位图字体；
-#    没变、只是变小了（8MiB→4MiB，起点都是 0x800000）→ 字体数据原样有效，**不用重烧**。
-# ⚠ 分区里没有文件系统，运行期由 core/fonts/font_ttf.c 的 lv_fs 驱动按绝对偏移读。
-# ⚠ **端口坑**：`font-flash` 是 CMake 生成的自定义目标，`idf.py` 只是把它当 ninja
-#    目标跑；而 IDF 的 components/esptool_py/get_port_args.cmake **在"烧录那一刻"
-#    才读环境变量 `ESPPORT`**（刻意不在配置期展开，好让端口不用重配就能改）。
-#    所以 `idfc idfpy -p COM12 font-flash` 里的 -p **传不进来**，esptool 会逐个
-#    串口试（最终能烧成功，只是慢几秒、日志里多几条 could not open port）。
-#    要明确端口：让**拉起 ninja 的那个进程**（= idfc 服务器，它会把自身环境整套
-#    复制给 idf.py 子进程）带上 ESPPORT —— 先 `$env:ESPPORT="COM12"` 再
-#    `idfc start-server`。完整实测与 idfc 侧的建议改法见 FontSystem.md §6。
+# 2026-10-25 改版：这里原本用
+#     esptool_py_flash_target(font-flash ...) + esptool_py_flash_to_partition(...)
+# 注册一条 `idfc idfpy font-flash` 目标（"平时 idfc flash / 换字体才 font-flash"），
+# 现已**整段移除**。原因两条：
+#   · 字体是"装一次就不动"的数据，为它单独维护一条 ninja 目标太重；
+#   · 那条目标还自带一串坑：`-p COMx` 传不进去 —— esptool 的端口是**烧录那一刻**
+#     才读环境变量 `ESPPORT`（components/esptool_py/get_port_args.cmake 刻意不在配置期
+#     展开），而 ninja 是 idfc 服务器拉起的，客户端设的 ESPPORT 同样传不过去，于是
+#     esptool 只能逐个串口试（实测记录见 FONT_FLASH.md §7）。
+# 现在：**分区表只保留位置**，字体由装机/换字体的人用手边的 esptool 手动刷一条命令
+# （装固件的人本来就有 esptool，构建系统这边不再需要任何自定义目标）：
+#     esptool.exe --chip esp32s3 --port COMx write_flash 0x800000 spiffs/system.ttf
+# 完整说明（何时必须刷、怎么校验刷成功、分区 4MiB 上限、IDF 环境下的等价命令、
+# 历史坑）见 **ideas_and_exps/FONT_FLASH.md**。
+# 运行期不受影响：font 分区仍是裸二进制、无文件系统，由 core/fonts/font_ttf.c 的
+# lv_fs 驱动按绝对偏移读 `F:/system.ttf`（字体文件的路径与名字都没变）。
+# ⚠ 换分区表后若 font 分区的**起始偏移**变了，必须重刷一次字体；只是变小则不用
+#    （数据仍按原偏移读得到，见 FONT_FLASH.md §3）。
+# ⚠ binfont 维度下 font 分区闲置，本段不产生任何构建动作（只剩下面那行提示）。
 # ============================================================================
 if(CONFIG_UI_FONT_TTF)
-    idf_component_get_property(_esptool_main_args esptool_py FLASH_ARGS)
-    idf_component_get_property(_esptool_sub_args esptool_py FLASH_SUB_ARGS)
-    esptool_py_flash_target(font-flash "${_esptool_main_args}" "${_esptool_sub_args}")
-    # 字体文件**写死**为 spiffs/system.ttf —— 换字体 = 用新字体文件**改名覆盖**它，
-    # 然后 idfc build + idfc idfpy font-flash（固件代码与运行期路径都不用动：font 分区
-    # 是裸二进制、只放一个文件，固件永远按 F:/system.ttf 打开）。
-    # 当前内容：Droid Sans Fallback（3.55MiB，50951 字形；许可见 spiffs/ 里那份 txt）。
-    esptool_py_flash_to_partition(font-flash "font"
-                                  "${CMAKE_CURRENT_SOURCE_DIR}/../spiffs/system.ttf")
+    # 只提示一次：字体不在固件里，"重刷分区表 / 换新机器 / 换字体"都要手动刷字体分区，
+    # 否则界面会静默回退内嵌位图字体（能开机，但生僻字、日文会缺字变方框）。
+    message(STATUS "提示：font 分区（0x800000）的内容需手动刷入 —— esptool write_flash 0x800000 spiffs/system.ttf（见 ideas_and_exps/FONT_FLASH.md）")
 endif()
 
 set_source_files_properties(
