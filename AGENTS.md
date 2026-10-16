@@ -20,11 +20,6 @@
 - 系统字体 = **font 分区里的 `spiffs/system.ttf`（当前内容 Droid Sans Fallback，AOSP Apache-2.0，50951 字形，3.55MiB）+ FreeType 2.14.3**（`espressif/freetype`；2026-10 由内嵌位图字库迁移，全过程/四个接线坑/栈预算/烧录流程/换字体约定见 **`ideas_and_exps/FontSystem.md`**。⚠ 字体文件**写死**为 `spiffs/system.ttf`，而且**不在固件里**：刷完固件要用 esptool **手动刷一遍字体分区**（一条命令，刷入/校验/换字体流程见 **`ideas_and_exps/FONT_FLASH.md`**），换字体 = 改名覆盖它 + 重刷，不改代码/Kconfig）
 - 构建/烧录通过 **`idfc.exe`**（客户端-服务器架构）完成，详见下方"idfc 使用说明"。**下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，把它放到 PATH 中的某个目录（本机为 `C:\Users\ZYFDroid\ProgramFiles\bin\idfc.exe`），随后**在项目目录里直接用 `idfc <子命令>` 调用**（不需要写 `.\idfc.exe`，项目里也不再自带这个 exe）。
 - ⚠ **千万不要把 `idfc.exe` 放在本项目工作区内**：DeepSeek Harness v0.1.7-rc.1 起会给工作区打可继承的 **Low 完整性标签**，工作区内的 exe 只能以 Low 启动，服务器的权限自检（写 `%LOCALAPPDATA%\IdfClientCLI`）会失败并拒绝启动，且 **`danger-full-access` 也无法挽救**（它只解除 DSH 沙箱，不解除完整性标签）。放在 PATH 目录里就没有这个问题。
-- ⚠ **同一个完整性标签的另一面：用户从资源管理器放进工作区的文件，DSH 在受限模式下删不掉、也换不掉**（2026-10-25 合并分支时实测踩到）：工作区带可继承的 **Low 完整性标签**，DSH 的受限进程也以 Low 运行，而资源管理器（普通权限）放进来的文件是 **Medium 完整性** —— Windows 不允许低完整性进程删除/替换普通完整性的对象。**这不是文件权限/ACL 问题**：诊断脚本判定 `NOT_THIS_CLASS`（当前用户对这些文件有完全控制、所有者正常、没有异常权限项），修 ACL 无用。
-  - 表现：`git checkout` / `git merge` 报 `error: unable to unlink old 'main/core/fonts/system_global_font.c': Invalid argument`，然后以"local changes would be overwritten"拒绝合并；单独 `Remove-Item` 则报 `Access to the path ... is denied`。
-  - **DSH 自己写过（edit/write）的文件不受影响**（它们带 Low 标签，能正常删改）：这次只有用户用 lv_font_conv 生成后**直接放进工作区**的 `system_global_font.c` / `system_smaller_font.c` 中招，被 DSH 改写过变量名的 `system_global_font_lite.c` 与其它文件都没问题。
-  - 处置：**给一次完全权限**执行那条要替换这些文件的 git / pwsh 命令即可（已实测：`git checkout -f HEAD` + `git merge --ff-only ttf_font` 在完全权限下一次成功，内容零丢失）；也可以让用户在资源管理器里先删掉它们。**不需要（也无法）修 ACL**。
-  - 预防：换字库这类"外部生成的大文件"，优先让 DSH 生成到工作区外再由 DSH 写进工作区（或直接由 DSH 生成），别留下 Medium 完整性的对象。
 
 **3. 参考资料**
 
