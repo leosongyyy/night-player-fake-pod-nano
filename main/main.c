@@ -94,15 +94,18 @@ void app_main(void)
     lvgl_port_init(panel_handle, NULL);
     mem_trace_log("04-lvgl_port");
 
-    /* 系统字体（TTF / FreeType）：在 LVGL 起来之后、画第一帧之前初始化。
-       它做的事：校验 font 分区（裸二进制 system.ttf）→ 注册 lv_fs 驱动 'F'
-       → 预创建 24px/20px 两个字号（字体对象在 PSRAM）。
-       ⚠ 必须晚于 lvgl_port_init：lv_init() 会自己初始化 FreeType 引擎，
-         应用侧只调 lv_freetype_font_create()，不要再调 lv_freetype_init()。
-       ⚠ 字体不可用时本函数只报错并返回错误码，界面会自动回退内嵌位图字体，
-         不阻塞开机（字体不是"没它就开不了机"的硬件）。 */
-    ESP_LOGI(TAG, "Initialize system font (TTF from font partition)");
-    font_ttf_init();
+    /* 系统字体（TTF / FreeType）**故意不在这里加载**：改成**延迟加载**，
+    由 boot_flow 在"确实要进常规界面"时才调 font_ttf_init()（见 ui/boot_flow.c
+    的 boot_enter_normal）。好处：
+      · 低电 / 无卡 / 待扫描这些非正常启动分支全程用内嵌位图字体，boot 阶段
+        完全不碰 FreeType、不占 PSRAM 字形缓存；
+      · "待扫描"分支紧接着要扫描 SD 卡并整体重写 pldata（约占 2.8MB PSRAM，
+        写 flash 时还会关外部内存缓存、PSRAM 不可访问），少一层 TTF 依赖就少
+        一处会踩"关缓存陷阱"的地方；
+      · 内嵌位图字库已覆盖全部 UI 文案（见 ideas_and_exps/FontSymbols.md），
+        这些只有固定文案的界面不会缺字。
+    ⚠ 应用侧只调 lv_freetype_font_create()，不要再调 lv_freetype_init()
+      （lv_init() 已经初始化过 FreeType 引擎）。 */
 
     /* 开机封面（默认封面）：此时面板亮度仍为 0，先把整屏写满再点亮——与原
        来"全黑启动防白屏"的顺序完全一致。

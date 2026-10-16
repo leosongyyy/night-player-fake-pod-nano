@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "core/fonts/font_ttf.h"   /* font_ttf_release/reload：非正常启动分支切换字体 */
 #include "core/fonts/system_font.h"
 #include "core/hardware/battery.h"
 #include "core/image/default_cover.h"
@@ -13,6 +14,7 @@
 #include "core/storage/config_store.h"
 #include "core/storage/playlist_builder.h"
 #include "core/storage/playlist_store.h"
+#include "core/ui/lvgl_port.h"   /* lvgl_port_lock/unlock：写入分区时冻结 LVGL */
 #include "core/utils/mem_trace.h"
 #include "core/utils/sleep_timer.h"
 #include "esp_log.h"
@@ -80,7 +82,9 @@ static boot_state_t s_state = BOOT_ST_NONE;
 static volatile uint32_t s_scan_song_count = 0;
 static volatile bool     s_scan_done       = false;
 static volatile bool     s_scan_ok         = false;
-static volatile bool     s_scan_writing    = false;  /* 是否进入"写入分区"阶段 */
+/* 写入分区阶段是否已由扫描任务持住 LVGL 锁（见 boot_scan_progress_cb）：
+   持锁期间 LVGL 完全冻结，写完 flash 后由 boot_scan_task 负责归还。 */
+static volatile bool     s_scan_lvgl_locked = false;
 
 /* LVGL 对象句柄 */
 static lv_obj_t   *s_root           = NULL;   /* 开机 UI 根容器（全屏黑底） */
@@ -267,14 +271,15 @@ static void boot_show_prompt_scan(void)
     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 130);
 }
 
-/* 4. 扫描进行中：每 300ms 更新已扫描音乐数量；写入阶段提示"正在写入扫描数据" */
+/* 4. 扫描进行中：每 300ms 更新已扫描音乐数量；进入写入阶段时由扫描任务
+      抢住 LVGL 锁并提示"正在写入扫描数据"（见 boot_scan_progress_cb） */
 static void boot_show_scanning(void)
 {
     s_state = BOOT_ST_SCANNING;
     s_scan_song_count = 0;
     s_scan_done = false;
     s_scan_ok = false;
-    s_scan_writing = false;
+    s_scan_lvgl_locked = false;
 
     lv_obj_t *root = boot_root_create();
 
@@ -287,7 +292,8 @@ static void boot_show_scanning(void)
     lv_obj_t *unit = boot_make_hint(root, "首");
     lv_obj_align(unit, LV_ALIGN_CENTER, 0, 60);
 
-    /* 底部状态文字：扫描期间为"正在扫描..."，进入写入阶段后切换为"正在写入扫描数据..." */
+    /* 底部状态文字：扫描期间为"正在扫描..."；进入写入阶段后由扫描任务在持有
+       LVGL 锁的情况下改写为"正在写入扫描数据..."并立刻提交该帧（此后界面冻结） */
     s_status_label = boot_make_hint(root, "正在扫描...");
     lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, 130);
 
@@ -325,6 +331,19 @@ static void boot_show_no_music(void)
 static void boot_enter_normal(void)
 {
     s_state = BOOT_ST_NORMAL;
+
+    /* 加载 TTF 系统字体（延迟加载点）：只有走到"常规界面"才需要它——boot 的
+       低电/无卡/待扫描分支全程用内嵌位图字体。幂等；失败就继续用内嵌位图字体，
+       界面不会没字。⚠ 必须在 app_ui_create() 之前，UI 创建时就要按 TTF 的行高
+       算列表行高。⚠ 本函数在 boot_flow_run 内被调用，已持 LVGL 锁（init 要求）。 */
+    esp_err_t ferr = font_ttf_init();
+    /* ESP_ERR_NOT_SUPPORTED = 这套构建根本没开 TTF（font 维度 = binfont），不是
+       错误、无需告警：UI_SYSTEM_FONT 本来就取内嵌位图字体。 */
+    if (ferr != ESP_OK && ferr != ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "TTF init failed (%s), UI keeps built-in bitmap font",
+                 esp_err_to_name(ferr));
+    }
+
     if (s_root != NULL) {
         lv_obj_del(s_root);
         s_root = NULL;
@@ -365,15 +384,42 @@ static void boot_enter_normal(void)
 /* 扫描后台任务与进度回调                                               */
 /* ------------------------------------------------------------------ */
 
-/* 扫描进度回调（扫描任务上下文执行，只更新共享变量，不碰 LVGL） */
+/* 扫描进度回调（扫描任务上下文；**写入阶段会短暂操作 LVGL**，见下） */
 static void boot_scan_progress_cb(playlist_build_phase_t phase, uint32_t song_count,
                                   void *ctx)
 {
     (void)ctx;
-    if (phase == PLAYLIST_BUILD_PHASE_WRITE) {
-        s_scan_writing = true;
-    }
     s_scan_song_count = song_count;
+
+    if (phase != PLAYLIST_BUILD_PHASE_WRITE) {
+        return;
+    }
+
+    /* ⚠ 写入阶段（playlist_store_save_playlist → 擦写 pldata 分区）会**关闭外部
+       内存缓存**，期间 PSRAM 完全不可访问；而 LVGL 的对象堆（core/ui/lvgl_mem.c）
+       与 FreeType 的字形位图缓存都在 PSRAM。若此时 LVGL 任务正在渲染，轻则那一帧
+       停摆、新字形取不到（界面出现方框、进度界面冻住），重则绘制状态错乱。
+       所以这里**先把 LVGL 锁拿过来**让渲染停下来，顺便主动提交"正在写入…"这一帧
+       （进度定时器已被挡在锁外，等不到它来更新文案），锁则交给 boot_scan_task
+       在写完 flash 之后归还。
+       ⚠ 本回调跑在扫描任务上下文（Core1，栈在内部 RAM——关缓存期间栈必须可访问）。
+       ⚠ 持锁期间本任务只做 flash 擦写，不再碰 PSRAM/LVGL。 */
+    if (lvgl_port_lock(-1)) {
+        s_scan_lvgl_locked = true;
+
+        if (s_count_label != NULL) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%u", (unsigned)s_scan_song_count);
+            lv_label_set_text(s_count_label, buf);
+        }
+        if (s_status_label != NULL) {
+            lv_label_set_text(s_status_label, "正在写入扫描数据...");
+        }
+        lv_refr_now(NULL);   /* 冻结前把最后一帧真正画出去 */
+        ESP_LOGI(TAG, "write phase: LVGL locked, UI frozen until write finishes");
+    } else {
+        ESP_LOGW(TAG, "write phase: LVGL lock failed, UI may glitch during write");
+    }
 }
 
 /* 扫描后台任务：调用构建器扫描并保存，结束后置完成标志 */
@@ -390,9 +436,18 @@ static void boot_scan_task(void *arg)
              esp_err_to_name(ret));
 
     /* 若扫描成功但没有任何音乐：清除分区有效性，避免下次重启误判为"有数据"而
-       直接进入常规界面（无音乐仍应重新提示扫描） */
+       直接进入常规界面（无音乐仍应重新提示扫描）。
+       ⚠ 这里同样是擦 flash（关缓存），必须在**归还 LVGL 锁之前**做完。 */
     if (ret == ESP_OK && stats.song_count == 0) {
         playlist_store_invalidate();
+    }
+
+    /* 写入阶段结束：归还 LVGL 锁，界面恢复渲染（进度定时器随即切到主界面/无音乐页）。
+       顺序很关键：必须在置 s_scan_done 之前解锁——定时器要靠这把锁才能跑起来。 */
+    if (s_scan_lvgl_locked) {
+        s_scan_lvgl_locked = false;
+        lvgl_port_unlock();
+        ESP_LOGI(TAG, "write phase: LVGL unlocked, UI resumes");
     }
 
     s_scan_ok = (ret == ESP_OK);
@@ -414,11 +469,8 @@ static void boot_progress_timer_cb(lv_timer_t *timer)
         lv_label_set_text(s_count_label, buf);
     }
 
-    /* 写入阶段提示（写入时数量不再变化，切到状态提示） */
-    if (s_scan_writing && s_status_label != NULL) {
-        lv_label_set_text(s_status_label, "正在写入扫描数据...");
-        s_scan_writing = false;   /* 只更新一次即可 */
-    }
+    /* 注：进入写入阶段后不再由这里更新"正在写入…"文案——那一刻扫描任务已经
+       抢走 LVGL 锁并自己把这一帧画完了（见 boot_scan_progress_cb）。 */
 
     if (!s_scan_done) {
         return;   /* 扫描尚未结束 */
@@ -496,6 +548,15 @@ static void reset_position_btn_cb(lv_event_t *e)
 /* 开机流程入口                                                        */
 /* ------------------------------------------------------------------ */
 
+/* ⚠ 字体是**延迟加载**的：低电 / 无卡 / 数据无效这三个非正常启动分支全程使用
+   内嵌位图字体，只有走到"常规界面"（下面第 4 步，或扫描成功后）才由
+   boot_enter_normal() 调 font_ttf_init() 加载 TTF。原因：
+   · 这三个界面上的文字都是固定文案，内嵌位图字库完全覆盖（UI 用字已补齐，见
+     ideas_and_exps/FontSymbols.md）；
+   · "数据无效"这一支紧接着要扫描 SD 卡并整体重写 pldata 分区——扫描期一次吃掉
+     约 2.8MB PSRAM，写 flash 时还会关外部内存缓存、PSRAM 不可访问。此时若已经
+     加载了 TTF，FreeType 的字形位图缓存既白占 PSRAM，又会在关缓存期间让渲染
+     取不到字形（文字变方框、进度界面冻住）。干脆一开始就不加载。 */
 void boot_flow_run(void)
 {
     /* 1. 电池电压检查：低于阈值拒绝启动 */

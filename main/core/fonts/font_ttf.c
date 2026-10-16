@@ -154,7 +154,8 @@ static uint32_t probe_font_file(void)
     uint32_t magic = rd_u32(hdr);
     if (magic != SFNT_TRUETYPE && magic != SFNT_TRUE && magic != SFNT_OTTO && magic != SFNT_TTCF) {
         ESP_LOGE(TAG, "font 分区里不是 TTF/OTF（头 4 字节 = 0x%08x）；"
-                      "0xFFFFFFFF 表示分区是空的 —— 用 `idfc flash` 把 spiffs/system.ttf 烧进去",
+                      "0xFFFFFFFF 表示分区是空的 —— 刷完固件后还要用 esptool 把 "
+                      "spiffs/system.ttf 烧到 0x800000（见 ideas_and_exps/FONT_FLASH.md）",
                  (unsigned)magic);
         return 0;
     }
@@ -344,6 +345,36 @@ static void register_fs_driver(void)
 
 /* ---------------- 对外接口 ---------------- */
 
+/* 创建各预置字号的字体对象（⚠ 前提：调用方已持 LVGL 锁；成功时置 s_ready）。
+   字体延迟加载，目前只有 font_ttf_init 会走到这里。 */
+static bool create_slots_locked(void)
+{
+    bool any_ok = false;
+
+    for (size_t i = 0; i < sizeof(s_preload_px) / sizeof(s_preload_px[0]) && i < FONT_SLOT_MAX; i++) {
+        uint16_t px = s_preload_px[i];
+        lv_font_t *font = lv_freetype_font_create(FONT_PATH,
+                                                  LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
+                                                  px,
+                                                  LV_FREETYPE_FONT_STYLE_NORMAL);
+        s_slots[i].px   = px;
+        s_slots[i].font = font;
+
+        if (font) {
+            any_ok = true;
+            ESP_LOGI(TAG, "TTF 字体就绪：%s %upx（行高 %d，基准线 %d）",
+                     FONT_PATH, (unsigned)px,
+                     (int)lv_font_get_line_height(font), (int)font->base_line);
+        } else {
+            ESP_LOGE(TAG, "TTF 字体创建失败（%upx）：文件损坏或不是 TTF/OTF；该字号回退内嵌位图字体",
+                     (unsigned)px);
+        }
+    }
+
+    s_ready = any_ok;
+    return any_ok;
+}
+
 esp_err_t font_ttf_init(void)
 {
     if (s_ready) return ESP_OK;
@@ -360,7 +391,8 @@ esp_err_t font_ttf_init(void)
     /* 2) 校验并算出字体文件真实长度 */
     s_file_size = probe_font_file();
     if (s_file_size == 0) {
-        ESP_LOGE(TAG, "font 分区校验失败，回退内嵌位图字体（重新 `idfc flash` 可修复）");
+        ESP_LOGE(TAG, "font 分区校验失败，回退内嵌位图字体（重刷字体分区可修复："
+                      "esptool write_flash 0x800000 spiffs/system.ttf，见 FONT_FLASH.md）");
         s_part = NULL;                 /* 让 ready_cb 返回 false */
         s_file_size = 0;
         return ESP_ERR_INVALID_RESPONSE;
@@ -396,43 +428,14 @@ esp_err_t font_ttf_init(void)
     /* 3) 注册 lv_fs 驱动（此后 "F:/system.ttf" 可被打开） */
     register_fs_driver();
 
-    /* 4) 预创建各字号字体。⚠ 此时 LVGL 任务已在跑，必须持锁再动 LVGL 全局状态；
+    /* 4) 预创建各字号字体。⚠ **调用方必须已持 LVGL 锁**——字体是**延迟加载**的，
+          唯一调用点是 boot_enter_normal()（它在 boot_flow_run 的 LVGL 锁内执行）。
           创建字体只是登记"用哪个文件、多大字号"，不会立刻光栅化字形。 */
-    size_t slot = 0;
-    bool   any_ok = false;
-
-    if (lvgl_port_lock(-1)) {
-        for (size_t i = 0; i < sizeof(s_preload_px) / sizeof(s_preload_px[0]) && slot < FONT_SLOT_MAX; i++) {
-            uint16_t px = s_preload_px[i];
-            lv_font_t *font = lv_freetype_font_create(FONT_PATH,
-                                                      LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
-                                                      px,
-                                                      LV_FREETYPE_FONT_STYLE_NORMAL);
-            s_slots[slot].px   = px;
-            s_slots[slot].font = font;
-            slot++;
-
-            if (font) {
-                any_ok = true;
-                ESP_LOGI(TAG, "TTF 字体就绪：%s %upx（行高 %d，基准线 %d）",
-                         FONT_PATH, (unsigned)px,
-                         (int)lv_font_get_line_height(font), (int)font->base_line);
-            } else {
-                ESP_LOGE(TAG, "TTF 字体创建失败（%upx）：文件损坏或不是 TTF/OTF；该字号回退内嵌位图字体", (unsigned)px);
-            }
-        }
-        lvgl_port_unlock();
-    } else {
-        ESP_LOGE(TAG, "取 LVGL 锁失败，字体未创建，回退内嵌位图字体");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    if (!any_ok) {
+    if (!create_slots_locked()) {
         ESP_LOGE(TAG, "所有字号创建失败，界面回退内嵌位图字体");
         return ESP_FAIL;
     }
 
-    s_ready = true;
     ESP_LOGI(TAG, "系统字体已切换到 TTF（FreeType，字形按需从 font 分区读取）");
     return ESP_OK;
 }
