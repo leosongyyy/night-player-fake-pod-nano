@@ -1,10 +1,12 @@
 #include "core/hardware/audio/cs43131.h"
 
 #include "driver/gpio.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include "core/hardware/touch.h"   /* touch_get_i2c_bus()：与触摸共用 I2C_NUM_0 */
 
 static const char *TAG = "cs43131";
 
@@ -12,8 +14,15 @@ static const char *TAG = "cs43131";
 /* 引脚与 I2C 配置                                                      */
 /* ------------------------------------------------------------------ */
 
-#define CS43131_I2C_PORT   I2C_NUM_0      /* 与触摸共用总线（touch_init 已安装） */
+/* ⚠ IDF 6.1 新 I2C 驱动（driver/i2c_master.h）：不再按“端口号 + 现填地址”访问，
+   而是由 touch_init() 建好总线（I2C_NUM_0）后，本驱动用
+   i2c_master_bus_add_device() 把自己的设备句柄挂到那条总线上；
+   此后所有传输都带 s_i2c_dev（地址已绑定在其中）。
+   设备句柄在探测过程中按候选地址逐个建立/拆除（见 cs43131_probe_addr）。 */
 #define CS43131_RST_PIN    GPIO_NUM_41    /* RESET#，低有效，经 3.3→1.8V 转换 */
+
+/* 单次 I2C 传输超时（旧驱动用 i2c_set_timeout 配硬件超时，新驱动按传输传参） */
+#define CS43131_I2C_TIMEOUT_MS  200
 
 /* ------------------------------------------------------------------ */
 /* 寄存器地址（数据手册 DS1155，寄存器为 24 位地址）                      */
@@ -54,7 +63,8 @@ static const char *TAG = "cs43131";
 #define ASP_RATE_48000      0x02
 
 /* 内部状态 */
-static uint8_t  s_i2c_addr      = 0x30;  /* 探测后锁定的设备地址 */
+static uint8_t  s_i2c_addr      = 0x30;  /* 探测后锁定的设备地址（仅作日志/展示） */
+static i2c_master_dev_handle_t s_i2c_dev = NULL; /* 挂在触摸总线上的本设备句柄 */
 static bool     s_ready         = false; /* 设备是否可用 */
 static uint32_t s_cur_rate      = 48000; /* 当前采样率 */
 
@@ -66,6 +76,27 @@ static uint32_t s_cur_rate      = 48000; /* 当前采样率 */
    单字节访问无需自动递增，故控制字节 = 0x00（INCR=0, SIZE=00=8bit）。 */
 #define CS43131_CTRL_BYTE  0x00
 
+/* 把本设备挂到触摸已建好的总线上（幂等：已在总线上则直接返回）。
+   ⚠ 总线必须已由 touch_init() 建立——app_main 的顺序正是 touch_init() 在前、
+   audio_init() 在后（见 main/main.c）。 */
+static esp_err_t cs43131_bus_attach(uint8_t addr)
+{
+    if (s_i2c_dev != NULL) {
+        return ESP_OK;
+    }
+    i2c_master_bus_handle_t bus = touch_get_i2c_bus();
+    if (bus == NULL) {
+        ESP_LOGE(TAG, "I2C bus not ready (touch_init() must run first)");
+        return ESP_ERR_INVALID_STATE;
+    }
+    const i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = addr,
+        .scl_speed_hz    = 200 * 1000,   /* 与触摸总线同速（TXS0102 上 400kHz 不可靠） */
+    };
+    return i2c_master_bus_add_device(bus, &dev_cfg, &s_i2c_dev);
+}
+
 static esp_err_t cs43131_write_reg(uint32_t addr, uint8_t dat)
 {
     uint8_t buf[5];
@@ -75,8 +106,11 @@ static esp_err_t cs43131_write_reg(uint32_t addr, uint8_t dat)
     buf[3] = CS43131_CTRL_BYTE;
     buf[4] = dat;
 
-    esp_err_t ret = i2c_master_write_to_device(CS43131_I2C_PORT, s_i2c_addr,
-                                               buf, sizeof(buf), pdMS_TO_TICKS(200));
+    if (s_i2c_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t ret = i2c_master_transmit(s_i2c_dev, buf, sizeof(buf),
+                                        CS43131_I2C_TIMEOUT_MS);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "write 0x%06lx = 0x%02x failed: %s",
                  (unsigned long)addr, dat, esp_err_to_name(ret));
@@ -92,9 +126,11 @@ static esp_err_t cs43131_read_reg(uint32_t addr, uint8_t *dst)
     wbuf[2] = (uint8_t)(addr & 0xff);
     wbuf[3] = CS43131_CTRL_BYTE;
 
-    return i2c_master_write_read_device(CS43131_I2C_PORT, s_i2c_addr,
-                                        wbuf, sizeof(wbuf), dst, 1,
-                                        pdMS_TO_TICKS(200));
+    if (s_i2c_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2c_master_transmit_receive(s_i2c_dev, wbuf, sizeof(wbuf), dst, 1,
+                                       CS43131_I2C_TIMEOUT_MS);
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,22 +154,31 @@ static esp_err_t cs43131_power_up_domain(uint8_t pdn_bits)
 
 static bool cs43131_probe_addr(uint8_t addr, uint8_t *id_ab, uint8_t *id_cd, uint8_t *id_e)
 {
-    /* 只发设备地址 + STOP，验证 ACK */
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (uint8_t)((addr << 1) | I2C_MASTER_WRITE), true);
-    i2c_master_stop(cmd);
-    esp_err_t ret = i2c_master_cmd_begin(CS43131_I2C_PORT, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-    if (ret != ESP_OK) {
+    i2c_master_bus_handle_t bus = touch_get_i2c_bus();
+    if (bus == NULL) {
         return false;
     }
 
+    /* 只发设备地址 + STOP，验证 ACK。
+       旧驱动是手搓 i2c_cmd_link(start/write_byte/stop) + i2c_master_cmd_begin；
+       新驱动直接用 i2c_master_probe(bus, addr, timeout)，语义相同。 */
+    if (i2c_master_probe(bus, addr, CS43131_I2C_TIMEOUT_MS) != ESP_OK) {
+        return false;
+    }
+
+    /* 读设备 ID 需要设备句柄：把本次候选地址挂上总线再读三个 ID 寄存器，
+       读不通过就立刻摘掉（避免把错误地址留在总线上）。 */
+    if (cs43131_bus_attach(addr) != ESP_OK) {
+        return false;
+    }
     s_i2c_addr = addr;
+
     uint8_t a = 0, b = 0, c = 0;
     if (cs43131_read_reg(REG_DEVID_AB, &a) != ESP_OK ||
         cs43131_read_reg(REG_DEVID_CD, &b) != ESP_OK ||
         cs43131_read_reg(REG_DEVID_E, &c) != ESP_OK) {
+        i2c_master_bus_rm_device(s_i2c_dev);
+        s_i2c_dev = NULL;
         return false;
     }
 
@@ -143,6 +188,10 @@ static bool cs43131_probe_addr(uint8_t addr, uint8_t *id_ab, uint8_t *id_cd, uin
         *id_e = c;
         return true;
     }
+
+    /* 地址应答了但不是 CS43131：摘掉句柄，继续试下一个候选 */
+    i2c_master_bus_rm_device(s_i2c_dev);
+    s_i2c_dev = NULL;
     return false;
 }
 
@@ -388,4 +437,16 @@ esp_err_t cs43131_reset_for_sleep(void)
     vTaskDelay(pdMS_TO_TICKS(12));   /* 等待复位稳定（手册 tPUD 1.5ms 以上） */
     ESP_LOGI(TAG, "CS43131 hardware reset for deep sleep (all power domains off)");
     return ESP_OK;
+}
+
+void cs43131_bus_detach(void)
+{
+    /* 把设备句柄从总线上摘掉：必须在 touch_power_off()（i2c_del_master_bus，
+       会销毁整条总线）之前调用，否则 s_i2c_dev 变成悬垂句柄，唤醒重启后
+       cs43131_bus_attach() 会误判“已挂载”而直接复用失效句柄。 */
+    if (s_i2c_dev != NULL) {
+        i2c_master_bus_rm_device(s_i2c_dev);
+        s_i2c_dev = NULL;
+        s_ready = false;
+    }
 }

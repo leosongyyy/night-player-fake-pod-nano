@@ -247,7 +247,11 @@ static void fake_shutdown_common(bool show_hint, bool keep_display)
         display_power_off();
     }
 
-    /* 6. 关闭触摸控制器并释放 I2C 总线驱动 */
+    /* 6. 关闭触摸控制器并释放 I2C 总线（i2c_del_master_bus 会销毁整条总线）。
+          ⚠ IDF 6.1 新 I2C 驱动下顺序有讲究：必须先让 CS43131 把自己的设备
+          句柄从总线摘掉，再删总线 —— 否则该句柄变成悬垂句柄，唤醒重启后
+          cs43131_init() 会误判"已挂载"而复用失效句柄。 */
+    cs43131_bus_detach();
     touch_power_off();
 
     /* 7. 卸载 SD 卡并释放 SDMMC 主机 */

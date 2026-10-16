@@ -85,6 +85,117 @@ idf_component_register(
     INCLUDE_DIRS "." "core" "ui")
 
 # ============================================================================
+# 构建期补丁：回写 patches/ 下针对**托管组件**的修改
+# ----------------------------------------------------------------------------
+# ⚠ 为什么需要"构建期"应用：托管组件位于 managed_components/，由
+#   idf-component-manager 拉取；本机 3.1.2 **不支持**原生的 patches/ 机制
+#   （已实测搜索，包内无任何 patch 相关代码），直接改那里的源文件会在下次
+#   组件管理器更新时被覆盖。
+#   做法：把**改好的整份文件**放在 patches/<补丁集>/ 下，目录结构与组件内
+#   一致；每次 CMake 配置阶段逐文件比对内容，**不一致才回写**（幂等，不会
+#   造成无谓重编）。日后上游合入了对应修复，比对结果相同 → 自动变成空操作，
+#   届时可把对应条目删掉。
+# ============================================================================
+
+# ---- 补丁集 1：LVGL 的 IRAM_ATTR 段号冲突（IDF 6.1 + GCC 15） --------------
+# 现象（2026-11 迁移到 IDF 6.1 时的第一个构建失败点）：
+#   lvgl/src/misc/lv_color.c:317:1: error: ignoring attribute 'section (".iram1.4")'
+#   because it conflicts with previous 'section (".iram1.1")' [-Werror=attributes]
+#   （lv_color_op.c / lv_math.c 同样报，均为 "头文件里声明 + .c 里定义"）
+#
+# 根因（两处变更叠加，都不是 LVGL 的设计问题，而是**漏改**）：
+#   · IDF 6.1 把 IRAM_ATTR 改成带 __COUNTER__ 的唯一子段
+#     （esp_common/include/esp_attr.h）：
+#         #define IRAM_ATTR _SECTION_ATTR_IMPL(".iram1", __COUNTER__)
+#     于是同一个函数在**声明**处展开成 .iram1.1、在**定义**处展开成 .iram1.4，
+#     两处段名不同。
+#   · IDF 6.1 起 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS 默认 n，GCC 15 的
+#     -Wattributes 从警告升级为错误。
+#
+# 上游修法（本补丁就是它）：lvgl/lvgl PR #10737
+#   "fix(attributes): remove LV_ATTRIBUTE_FAST_MEM from declarations"
+#   —— 按 lvgl#4391 早已定下的约定（属性只留在**定义**和头文件里的
+#   static inline 定义上，**不留在声明上**），把 3 处声明上的属性注释掉。
+#   ⚠ 关键：**不动任何定义**，所以函数照样被放进 IRAM（实测 map/objdump：
+#     lv_color_16_16_mix 落在 .iram1.1 → 最终 .iram0.text，地址 0x403793e4，
+#     与补丁前逐字节一致），**零性能损失**，比"关掉 FAST_MEM"或"降级警告"干净。
+#   证据：同一文件里 lv_math.h:53 的 lv_trigo_sin 本来就是注释形式
+#     （int32_t /* LV_ATTRIBUTE_FAST_MEM */ lv_trigo_sin(...)），只有
+#     lv_trigo_cos 漏了——印证这是漏改而非设计。
+#   ⚠ 上游 9.6 仍未合入该 PR（2026-11 查证），故暂时无法靠升级解决。
+
+# ---- 补丁集 2：esp_lcd_touch 的组件依赖 ------------------------------------
+# IDF 6.0 起旧 `driver` 组件不再**公共依赖** esp_driver_gpio 等 18 个子组件，
+# 而 esp_lcd_touch 一边 include "driver/gpio.h"（连公开头文件里都用 gpio_num_t）、
+# 一边大量调用 gpio_install_isr_service / gpio_intr_enable / gpio_isr_handler_add /
+# gpio_isr_handler_remove / gpio_intr_disable，CMakeLists 里却只写
+# `REQUIRES "driver" "esp_lcd"`。当前能编过纯粹是 esp_lcd 转发依赖的结果，
+# 上游 esp_lcd 一旦收窄依赖即编译失败。补成显式 PRIV_REQUIRES esp_driver_gpio。
+# （本项目本地那 3 个触摸驱动 + esp_lcd_qspi_amoled 有同样的隐患，已经直接改在
+#   仓库内它们的 CMakeLists 上——那些组件本身就在版本控制里，无需补丁。）
+
+# ⚠ 内层文件清单用**逗号**分隔，不能用分号：CMake 的 list 语义里分号就是分隔符，
+#   无论怎么转义，外层 foreach 展开时都会被拆开（这里踩过一次：文件清单被拆成
+#   独立元素，list(GET ... 2) 取不到东西）。故此处用 "|" 分层、"," 分文件。
+set(_patch_sets
+    "lvgl_fast_mem_decl|managed_components/lvgl__lvgl|src/misc/lv_color.h,src/misc/lv_color_op.h,src/misc/lv_math.h"
+    "esp_lcd_touch_deps|managed_components/espressif__esp_lcd_touch|CMakeLists.txt")
+
+foreach(_set ${_patch_sets})
+    string(REPLACE "|" ";" _set_parts "${_set}")
+    list(GET _set_parts 0 _set_name)
+    list(GET _set_parts 1 _set_component)
+    list(GET _set_parts 2 _set_files)
+    string(REPLACE "," ";" _set_files "${_set_files}")
+    set(_root "${CMAKE_CURRENT_SOURCE_DIR}/../patches/${_set_name}")
+    set(_patched 0)
+    foreach(_rel ${_set_files})
+        set(_src "${_root}/${_rel}")
+        set(_dst "${CMAKE_CURRENT_SOURCE_DIR}/../${_set_component}/${_rel}")
+        if(NOT EXISTS "${_src}")
+            message(WARNING "补丁源文件缺失，跳过：${_src}")
+        elseif(NOT EXISTS "${_dst}")
+            message(WARNING "补丁目标不存在，跳过（组件版本可能已变）：${_dst}")
+        else()
+            # ⚠ 换行符归一化后再比较：本仓库 core.autocrlf=true，patches/ 下的
+            #   补丁源（受 git 管理）与 managed_components/ 下的目标（gitignore、
+            #   由组件管理器按 LF 解包）**换行符可能不一致**。CMake 的 file(READ)
+            #   当前会归一化换行，所以裸比较也不会误判；但那样就依赖了未文档化的
+            #   行为与各人的 git 配置——一旦某台机器上不归一化，就会**每次配置都
+            #   回写**（表现为 lvgl 每次全量重编）。故显式去掉 \r 再比、也写归一化
+            #   内容，让"是否相同"只取决于代码本身。
+            file(READ "${_src}" _src_content)
+            file(READ "${_dst}" _dst_content)
+            string(REPLACE "\r" "" _src_norm "${_src_content}")
+            string(REPLACE "\r" "" _dst_norm "${_dst_content}")
+            if(NOT _src_norm STREQUAL _dst_norm)
+                file(WRITE "${_dst}" "${_src_norm}")
+                math(EXPR _patched "${_patched} + 1")
+            endif()
+        endif()
+    endforeach()
+    if(_patched GREATER 0)
+        message(STATUS "构建期补丁：已回写 ${_patched} 个文件（${_set_name}）")
+    else()
+        message(STATUS "构建期补丁：已是最新，无需回写（${_set_name}）")
+    endif()
+endforeach()
+unset(_patch_sets)
+unset(_set_parts)
+unset(_set_name)
+unset(_set_component)
+unset(_set_files)
+unset(_root)
+unset(_src)
+unset(_dst)
+unset(_src_content)
+unset(_dst_content)
+unset(_src_norm)
+unset(_dst_norm)
+unset(_patched)
+unset(_rel)
+
+# ============================================================================
 # LVGL 9 自定义分配器（core/ui/lvgl_mem.c）的链接顺序修正
 # ----------------------------------------------------------------------------
 # Kconfig 选中 CONFIG_LV_USE_CUSTOM_MALLOC 后，LVGL 的 src/stdlib/lv_mem.c 会

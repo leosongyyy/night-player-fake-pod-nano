@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
@@ -49,14 +49,20 @@ static void on_touch_ready(esp_lcd_touch_handle_t tp, void *ctx)
 
 void app_main(void)
 {
-    // 检查唤醒原因（deep sleep 调试：确认是否为按键唤醒，排查误唤醒）
-    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
-    if (wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    /* 检查唤醒原因（deep sleep 调试：确认是否为按键唤醒，排查误唤醒）
+       ⚠ IDF 6.0 起 esp_sleep_get_wakeup_cause() 已弃用（多唤醒源同时命中时它只
+       返回其中一个），改用 esp_sleep_get_wakeup_causes() —— 返回 bitmap，每一位
+       对应 esp_sleep_wakeup_cause_t 的一个取值，用 BIT(原因) 按位与判断。
+       本工程伪关机只注册了 EXT1（B 键，见 core/utils/fake_shutdown.c），
+       语义与旧写法完全等价。 */
+    uint32_t wakeup_causes = esp_sleep_get_wakeup_causes();
+    if (wakeup_causes == 0) {
         ESP_LOGI(TAG, "boot: cold start (not from deep sleep)");
-    } else if (wakeup_cause == ESP_SLEEP_WAKEUP_EXT1) {
+    } else if (wakeup_causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
         ESP_LOGI(TAG, "boot: woken by EXT1 (B key press)");
     } else {
-        ESP_LOGW(TAG, "boot: woken by unexpected source %d", (int)wakeup_cause);
+        ESP_LOGW(TAG, "boot: woken by unexpected source (causes=0x%08lx)",
+                 (unsigned long)wakeup_causes);
     }
 
     // 用户配置存储（NVS）：尽早初始化，开机恢复音量/亮度/循环模式等

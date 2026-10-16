@@ -59,7 +59,7 @@ static const char *TAG = "power_service";
 #endif
 
 /* 低电压持续超时自动伪关机（秒）：运行中电池电压持续低于
-   BATTERY_CRITICAL_LOW_MV（3.2V，与开机拒启同一阈值）超过该时长自动伪关机，
+   BATTERY_CRITICAL_LOW_MV（3.45V，与开机拒启同一阈值）超过该时长自动伪关机，
    防过放。经 Kconfig CONFIG_LOW_BATTERY_SHUTDOWN_SEC 配置（默认 60 秒，0=关闭）。
    时间窗口兼作滤波：滤除播放瞬时大电流压降与 ADC 单次抖动。 */
 #ifdef CONFIG_LOW_BATTERY_SHUTDOWN_SEC

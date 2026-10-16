@@ -84,6 +84,19 @@ uint32_t cs43131_get_sample_rate(void);
  */
 esp_err_t cs43131_reset_for_sleep(void);
 
+/**
+ * @brief 把本设备句柄从 I2C 总线上摘除（供 deepsleep 前释放总线用）
+ *
+ * IDF 6.1 的新 I2C 驱动是「总线句柄 + 每设备句柄」模型：CS43131 的设备句柄由
+ * cs43131_init() 挂到触摸建立的总线上（touch_get_i2c_bus()）。既然触摸的
+ * touch_power_off() 会调用 i2c_del_master_bus() 销毁整条总线，本函数就必须
+ * **在它之前**调用，否则设备句柄悬垂，唤醒重启后的 cs43131_init() 会误判
+ * “已挂载”而复用失效句柄。
+ *
+ * 幂等：未挂载时为空操作。
+ */
+void cs43131_bus_detach(void);
+
 #ifdef __cplusplus
 }
 #endif

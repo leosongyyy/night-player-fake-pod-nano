@@ -16,7 +16,13 @@ CONFIG_UI_COVER_FLASH=y
 #    （真正的 DAC 切换尚未实现）。
 CONFIG_AUDIO_DAC_CS43131=y
 # CONFIG_AUDIO_DAC_PCM5102 is not set
-CONFIG_COMPILER_ORPHAN_SECTIONS_PLACE=y
+# 孤立段（orphan sections）处理：IDF 6.0 起默认值从"容忍"收紧为 **ERROR**
+# （CONFIG_COMPILER_ORPHAN_SECTIONS_ERROR，见 IDF 根 Kconfig 的 choice）。
+# 本工程历史上一直用 PLACE（静默放置），迁移到 6.1 时改为 **WARNING**：
+# 行为与 PLACE 相同（仍然放置，不会链接失败），但会打印是哪些段，
+# 便于发现"内存映射配置有问题"（这正是 IDF 文档不推荐 PLACE 的原因）。
+# 若日后又想静默，把本行换回 CONFIG_COMPILER_ORPHAN_SECTIONS_PLACE=y。
+CONFIG_COMPILER_ORPHAN_SECTIONS_WARNING=y
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=512
 CONFIG_ESP_BROWNOUT_DET_LVL_SEL_5=y
@@ -31,7 +37,11 @@ CONFIG_SPIRAM_MEMTEST=n
 # 允许任务栈分配在 PSRAM：内部 RAM 开机末期接近耗尽（实测空闲仅 4~5KB），
 # 非实时后台任务（性能监视/电池日志/扫描/封面解码）改用 PSRAM 栈
 # （见 core/utils/task_psram.h），内部 RAM 留给 LVGL 堆/驱动 DMA/关键任务
-CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+# ⚠ IDF 6.1 改名：CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY →
+#   CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM（见 v6.1
+#   components/freertos/sdkconfig.rename）。旧名在 6.1 会被当成已废弃项自动
+#   映射，但生成 sdkconfig 时会打警告，这里直接改用新名。
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 # 主任务栈 16KB（原 8KB）：2026-10 TTF 迁移实测，app_main 里"持锁渲染首帧"

@@ -112,12 +112,12 @@ menu "FakePodNanoNightPlayer 应用配置"
         range 0 600
         help
             运行中（无论屏幕亮暗、是否播放）电池电压**持续**低于临界值
-            3.2V（BATTERY_CRITICAL_LOW_MV，与开机拒启同一阈值，见
+            3.45V（BATTERY_CRITICAL_LOW_MV，与开机拒启同一阈值，见
             core/hardware/battery.h）超过该时长，自动伪关机防过放
             （deepsleep，B 键唤醒重启）。时间窗口兼作滤波，滤除播放瞬时
             大电流压降与 ADC 抖动；期间任一采样恢复即清零重计。
             0 = 关闭该功能。⚠ 本固件暂无充电检测：充电器接入时电压被抬高
-            （高于 3.2V）不会触发；若后续接入充电状态检测，应排除充电态。
+            （高于 3.45V）不会触发；若后续接入充电状态检测，应排除充电态。
 
     menu "音频 DAC 芯片选择（构建期二选一）"
 

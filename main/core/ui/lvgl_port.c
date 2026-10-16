@@ -229,7 +229,18 @@ static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     uint8_t touchpad_cnt = 0;
 
     esp_lcd_touch_read_data(tp);
-    bool touched = esp_lcd_touch_get_coordinates(tp, &touchpad_x, &touchpad_y, NULL, &touchpad_cnt, 1) && (touchpad_cnt > 0);
+    /* ⚠ esp_lcd_touch_get_coordinates() 已被 esp_lcd_touch 标记弃用（2.0.0 移除），
+       改用新的 esp_lcd_touch_get_data()：错误码用 esp_err_t 返回，坐标放在
+       esp_lcd_touch_point_data_t 数组里。本板是单点触摸，取 coords[0] 即可。 */
+    esp_lcd_touch_point_data_t tp_data[CONFIG_ESP_LCD_TOUCH_MAX_POINTS];
+    bool touched = false;
+    if (esp_lcd_touch_get_data(tp, tp_data, &touchpad_cnt,
+                               CONFIG_ESP_LCD_TOUCH_MAX_POINTS) == ESP_OK &&
+        touchpad_cnt > 0) {
+        touchpad_x = tp_data[0].x;
+        touchpad_y = tp_data[0].y;
+        touched = true;
+    }
 
     /* 以下坐标校准，LVGL 与触摸测试回调共用此值。
        经过调整和优化后点击位置最符合直觉。 */

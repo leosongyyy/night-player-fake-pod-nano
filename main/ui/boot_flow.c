@@ -38,7 +38,7 @@ static void clear_scan_data_btn_cb(lv_event_t *e);
 static void reset_position_btn_cb(lv_event_t *e);
 
 /* 开机最低电池电压门槛：直接引用 battery.h 的公共临界低电压常量
-   （BATTERY_CRITICAL_LOW_MV，3.2V）——与运行中低电自动伪关机（power_service）
+   （BATTERY_CRITICAL_LOW_MV，3.45V）——与运行中低电自动伪关机（power_service）
    共用同一阈值，改动只在 battery.h 一处。 */
 
 /* 扫描进度界面刷新周期（ms） */

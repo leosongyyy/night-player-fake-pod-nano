@@ -41,6 +41,11 @@ managed_components/
 # If ESP-IDF tools are installed/referenced locally to the project
 .espressif/
 
+# idfc 构建客户端（idf-client-cli）的项目级状态：激活脚本路径、默认串口、
+# 当前构建类型/overlay 选择（.idfc/idfc_config.json），以及本地备份目录。
+# 这些都是"每台机器/每次本地操作"的状态，不入库（其余配置事实源见 AGENTS.md 第 6 节）。
+.idfc/
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/

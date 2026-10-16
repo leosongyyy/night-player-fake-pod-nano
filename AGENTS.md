@@ -15,7 +15,12 @@
 
 **2. 开发环境**
 
-- ESP-IDF **5.5.X**（安装于 `C:\esp\v5.5.X\esp-idf`，本机已验证 5.5.4 与 5.5.5），激活脚本 `C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1`。不同的开发电脑上可能是5.5.4也可能是5.5.5。这里统一使用idfc进行调用。
+- ESP-IDF **6.1**（安装于 `C:\esp\v6.1\esp-idf`，GCC 15.2.0），激活脚本 `C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1`。**2026-11 已从 5.5.5 迁移到 6.1，并已在真机逐项验证通过**（播放/音量/伪关机/唤醒/睡眠/息屏/CPU 频率/SD 扫描/无卡/低电压拒启全正常；迁移全过程、两次真机崩溃的根因见 **`ideas_and_exps/IDF6_MIGRATION.md`**，§9.1 是回归清单与"怎么测低电拒启"）；本机同时保留 `C:\esp\v5.5.5\esp-idf` 与对应激活脚本以备回退。这里统一使用idfc进行调用。
+  - ⚠ **有一处必要的改动不在本仓库里**：项目支持 exFAT 格式 SD 卡，需 IDF 本体的 FatFs 打开 exFAT —— `C:\esp\v6.1\esp-idf\components\fatfs\src\ffconf.h` 里 `FF_FS_EXFAT` 改为 `1`。**换电脑/重装 IDF 必须重打**，否则 SD 卡挂载失败（`failed to mount card (13)`）并进"无卡"界面（详见 IDF6_MIGRATION.md §6.7）。
+  - ⚠ **托管组件有构建期补丁**（`patches/`，由 `main/CMakeLists.txt` 在配置阶段幂等回写；托管组件会被组件管理器覆盖，**必须**这样改）：
+    1. `patches/lvgl_fast_mem_decl/` —— 修复 LVGL 把 `LV_ATTRIBUTE_FAST_MEM` 同时放在声明与定义上、与 IDF 6.1 的 `IRAM_ATTR`（带 `__COUNTER__` 的唯一子段）冲突导致的 `-Werror=attributes`（上游 lvgl PR #10737，9.6 仍未合入），补丁只去掉**声明**上的属性、不动定义，故函数仍进 IRAM、零性能损失；
+    2. `patches/esp_lcd_touch_deps/` —— 给托管组件 `espressif/esp_lcd_touch` 补显式 `PRIV_REQUIRES esp_driver_gpio`（它调一堆 `gpio_*` 却只写 `REQUIRES "driver" "esp_lcd"`，靠 `esp_lcd` 转发才编过）。
+    **属自定义写法，勿当无用代码清理**（详见 IDF6_MIGRATION.md §4.1 与 §9.2）。仓库内 `components/` 下的本地组件**直接改各自的 CMakeLists.txt**，不走补丁。
 - LVGL **9.4.0**（managed component，`lvgl/lvgl`；2026-10 由 8.4.0 升级，迁移全过程与踩坑见 `ideas_and_exps/LVGL9_MIGRATION.md`）
 - 系统字体 = **font 分区里的 `spiffs/system.ttf`（当前内容 Droid Sans Fallback，AOSP Apache-2.0，50951 字形，3.55MiB）+ FreeType 2.14.3**（`espressif/freetype`；2026-10 由内嵌位图字库迁移，全过程/四个接线坑/栈预算/烧录流程/换字体约定见 **`ideas_and_exps/FontSystem.md`**。⚠ 字体文件**写死**为 `spiffs/system.ttf`，而且**不在固件里**：刷完固件要用 esptool **手动刷一遍字体分区**（一条命令，刷入/校验/换字体流程见 **`ideas_and_exps/FONT_FLASH.md`**），换字体 = 改名覆盖它 + 重刷，不改代码/Kconfig）
 - 构建/烧录通过 **`idfc.exe`**（客户端-服务器架构）完成，详见下方"idfc 使用说明"。**下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，把它放到 PATH 中的某个目录（本机为 `C:\Users\ZYFDroid\ProgramFiles\bin\idfc.exe`），随后**在项目目录里直接用 `idfc <子命令>` 调用**（不需要写 `.\idfc.exe`，项目里也不再自带这个 exe）。
@@ -23,7 +28,8 @@
 
 **3. 参考资料**
 
-- `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动、i2c_bsp）
+- `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动）。~~i2c_bsp~~ 已于 2026-11 迁移 IDF 6.1 时删除（全工程零引用的死代码）
+- `patches/`：**构建期补丁文件**（托管组件用，当前两组：`lvgl_fast_mem_decl/`、`esp_lcd_touch_deps/`，见上方 IDF 6.1 条目）
 - `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_sh8601、esp_lcd_touch、cmake_utilities、chmorgan__esp-libhelix-mp3）
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：三套构建配置（debug/releasecandidate/release）的完整说明
@@ -39,7 +45,7 @@
 - 🚨 **若 PATH 里找不到 `idfc.exe`（报 `无法将“idfc.exe”项识别为 cmdlet…` / `CommandNotFoundException`，或 `Get-Command idfc.exe` 无结果）**：**不要自己去找、不要拿别处的旧版顶替、也不要改用 `.\idfc.exe`**（工作区里已经没有这个文件了）。此时应**提醒用户下载**，并给出地址 **<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，请用户把它放到 PATH 中的目录（工作区外），然后重试。
 - **首次配置项目**（每个项目目录做一次，写入 `.idfc/idfc_config.json`）：
   ```powershell
-  idfc set-idfenv "C:\Espressif\tools\Microsoft.v5.5.X.PowerShell_profile.ps1"   # 版本号按本机安装（5.5.4 或 5.5.5）
+  idfc set-idfenv "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"   # 版本号按本机安装
   idfc set-variant debug
   idfc ports          # 列出串口（需服务器已启动）
   idfc set-port COMn
@@ -148,7 +154,7 @@ idfc help --all            # 全部命令与参数
 
 **当前实现状态：**
 - 播放核心：本地 MP3 播放（Helix 解码，实测 5000+ 首大曲库），按**文件夹**组织、支持 **`.pl` 文本歌单**；**循环模式**（全部/列表/单曲）+ **顺序/随机**；**无限确定性随机播放**（分块 + 确定性洗牌，断点续播）；回放增益；**EQ 均衡器**（10 段浮点 PeakEQ + 预增益，NightPlayer 兼容 `.eq` 文件）；**封面/歌曲信息**（`.npd` 元数据 + JPEG 封面解码）
-- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT，挂载 `/sdcard`）
+- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
 - LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
 - 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 低电拒启（<3.45V 停充电警告屏）→ 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）
@@ -168,7 +174,7 @@ main/
       touch.h/.c            # 触摸控制器（I2C + CST816/820/CHSC6417 按需选择，异步初始化）
       battery.h/.c          # 电池电压 ADC（分压换算 + 校准；BATTERY_CRITICAL_LOW_MV=3450）
       button_service.h/.c   # A/B 双键服务（GPIO48/GPIO0，去抖 + 单击/双按/长按事件）
-      sd_card.h/.c          # SD 卡驱动（SDMMC 4-bit + FAT 挂载 /sdcard）
+      sd_card.h/.c          # SD 卡驱动（SDMMC 4-bit + FAT/exFAT 挂载 /sdcard）
       pldata.h/.c           # 播放列表数据结构分区（4MB）驱动：esp_partition_mmap 内存映射只读
       audio/
         audio.h/.c          # 音频播放 API（I2S 主机 + CS43131 DAC + PCM 流写 + 回放增益 + 统一浮点路径）
@@ -230,7 +236,9 @@ components/
   esp_lcd_touch_cst816/     # CST816 触摸
   esp_lcd_touch_cst820/     # CST820 触摸
   esp_lcd_touch_chsc6417/   # CHSC6417 触摸
-  i2c_bsp/                  # I2C 总线 BSP
+patches/
+  lvgl_fast_mem_decl/       # LVGL 构建期补丁（上游 PR #10737），由 main/CMakeLists.txt 回写
+  esp_lcd_touch_deps/       # 托管组件 esp_lcd_touch 的依赖补丁（补 esp_driver_gpio）
 ```
 
 ### GPIO 分配（随项目进度持续发掘）
