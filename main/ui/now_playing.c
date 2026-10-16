@@ -1,6 +1,7 @@
 #include "ui/now_playing.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "core/fonts/system_font.h"
@@ -406,7 +407,75 @@ static void next_btn_cb(lv_event_t *e)
     sleep_timer_note_activity();   /* 切歌属于"用户动作"：清醒感知加时 */
 }
 
-/* 进度条：按下标记拖动中（暂停自动跟随），松手时 seek 到拖动位置 */
+/* 进度条：按下标记拖动中（暂停自动跟随），松手时 seek 到目标位置。
+
+   ⚠ LVGL 9 行为变更（8.4 → 9.4 升级后本页 seek 失效的根因）：
+   9.x 的 lv_slider_event 只在 LV_EVENT_PRESSING 里调 update_knob_pos()，
+   且该函数开头有 `if(LV_ABS(ofs) < indev->scroll_limit) return;`
+   ——**手指没移动超过 scroll_limit（LVGL 默认 10px）时根本不算"拖动"**，
+   滑块值不会被重算，仍是 player_ticker 刷进去的当前播放位置。
+   （8.4 的实现在 PRESSED 分支里就把拖动/取值状态建好，行为不同。）
+   再加上 RELEASED / PRESS_LOST 分支新增的 `update_knob_pos(obj, false)`
+   会读 lv_indev_get_point()：若触摸端口在抬手帧上报 (0,0)（历史行为），
+   值还会被重算成 min（0）并 clamp 到最左。
+   两者叠加的结果就是——拖动松手 seek 到 0，点击轨道 seek 到"当前播放位置"
+   （即日志里 now_playing: seek to XX s 的 XX 恰好是正在播放的秒数）。
+
+   修复分两层：
+   - 【根因层】core/ui/lvgl_port.c 的 lvgl_touchpad_read_cb 抬手帧改为上报
+     "最后一次按下的坐标"（真实触摸控制器本来就是这种语义），
+     LVGL 内部在松手帧的重算因此拿到正确位置；
+   - 【取值层】seek 目标不再依赖控件内部状态：按下时按"按下点 → 时间"的线性
+     映射（公式与 LVGL 滑块一致）算出目标；只有手指真的移出拖动阈值（此时
+     控件值才被 LVGL 真正重算过）才改用控件值。**关键是 PRESSING 对"点击"
+     也会触发且值仍是播放位置，无条件取控件值会把点击目标覆盖掉**（实测：
+     按下算出 target=103，紧接着 PRESSING 把缓存改回 8 → seek 到 8）。 */
+static int32_t s_slider_drag_value = 0;   /* 交互过程中最后一次算出的目标位置（秒） */
+static bool    s_slider_moved = false;    /* 本次交互手指是否已移出拖动判定阈值 */
+static lv_point_t s_slider_press_point = { 0, 0 };  /* 本次交互的按下点（屏幕坐标） */
+
+/* "算不算拖动"的位移阈值（px）：与 LVGL 默认 scroll_limit 一致。
+   小于它时 lv_slider 内部不会重算控件值（见函数头注释），
+   因此我们也必须按"点击"处理（用按下点算目标），否则点击会被 PRESSING
+   里的播放位置覆盖掉。 */
+#define NP_SLIDER_DRAG_PX  10
+
+/* 取按下点对应的时间（秒）：与 LVGL 滑块内部同一套线性映射。
+   坐标取控件绝对 coords + LV_PART_MAIN 的左右 padding（本页 padding 为 0，
+   但按公式取用可保证换样式后依然对齐）；结果按歌曲总时长钳制，兜底
+   "控件范围还没被 player_ticker 刷成 0..总时长"的极早期交互。 */
+static int32_t slider_time_from_point(lv_obj_t *slider, int32_t px)
+{
+    player_controller_status_t st;
+    player_controller_get_status(&st);
+
+    lv_area_t coords;
+    lv_obj_get_coords(slider, &coords);
+
+    const int32_t bg_left = lv_obj_get_style_pad_left(slider, LV_PART_MAIN);
+    const int32_t bg_right = lv_obj_get_style_pad_right(slider, LV_PART_MAIN);
+    const int32_t indic_w = lv_obj_get_width(slider) - bg_left - bg_right;
+    const int32_t range = lv_slider_get_max_value(slider) - lv_slider_get_min_value(slider);
+
+    int32_t v;
+    if (indic_w <= 0 || range <= 0) {
+        v = 0;
+    } else {
+        /* 与 lv_slider.c 的 update_knob_pos() 完全一致：
+           new = (p.x - (x1 + pad_left)) * range / indic_w + min（四舍五入） */
+        v = (px - (coords.x1 + bg_left));
+        v = (v * range + indic_w / 2) / indic_w + lv_slider_get_min_value(slider);
+    }
+
+    if (v < 0) {
+        v = 0;
+    }
+    if (st.duration_s > 0 && v > (int32_t)st.duration_s) {
+        v = (int32_t)st.duration_s;
+    }
+    return v;
+}
+
 static void slider_event_cb(lv_event_t *e)
 {
     lv_obj_t *slider = lv_event_get_target(e);
@@ -414,10 +483,43 @@ static void slider_event_cb(lv_event_t *e)
 
     if (code == LV_EVENT_PRESSED) {
         s_slider_dragging = true;
+        s_slider_moved = false;
+        /* 点击轨道（手指几乎不动）时 LVGL 不会重算控件值，这里直接用
+           按下点算出目标位置——这是"点击定位"能生效的关键。
+           ⚠ 用绝对屏幕坐标（lv_indev_get_point 的原值），不要在控件上做
+           transform：本函数按"控件绝对 coords + padding"换算，两者必须同一坐标系 */
+        lv_indev_t *indev = lv_indev_get_act();
+        if (indev != NULL) {
+            lv_indev_get_point(indev, &s_slider_press_point);
+        } else {
+            s_slider_press_point.x = 0;
+            s_slider_press_point.y = 0;
+        }
+        s_slider_drag_value = slider_time_from_point(slider, s_slider_press_point.x);
+    } else if (code == LV_EVENT_PRESSING) {
+        /* ⚠ PRESSING 对"点击"也会触发（LVGL 每帧都发，值仍是播放位置），
+           不能无条件覆盖按下点算出的目标值——否则点击又会 seek 回原处。
+           只有手指真的移出了 LVGL 的 scroll_limit（此时滑块值才被真正重算）
+           才改用控件值；判定阈值与 LVGL 默认 scroll_limit 一致（10px），
+           大一点没关系：tap 的实际位移通常只有 1~3px。 */
+        lv_indev_t *indev = lv_indev_get_act();
+        lv_point_t p = { 0, 0 };
+        if (indev != NULL) {
+            lv_indev_get_point(indev, &p);
+        }
+        if (abs(p.x - s_slider_press_point.x) > NP_SLIDER_DRAG_PX ||
+            abs(p.y - s_slider_press_point.y) > NP_SLIDER_DRAG_PX) {
+            s_slider_moved = true;
+        }
+        if (s_slider_moved) {
+            s_slider_drag_value = lv_slider_get_value(slider);
+        }
     } else if (code == LV_EVENT_RELEASED) {
         s_slider_dragging = false;
-        player_controller_seek((uint32_t)lv_slider_get_value(slider));
-        ESP_LOGI(TAG, "seek to %u s", (unsigned)lv_slider_get_value(slider));
+        /* ⚠ 不在这里读 lv_slider_get_value()：见函数头注释，松手帧可能被
+           LVGL 用异常坐标重算过；统一用交互过程中算好的目标值 */
+        player_controller_seek((uint32_t)s_slider_drag_value);
+        ESP_LOGI(TAG, "seek to %d s", (int)s_slider_drag_value);
         sleep_timer_note_activity();   /* seek 属于"用户动作"：清醒感知加时 */
     }
 }
@@ -740,6 +842,7 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
     lv_slider_set_range(s_slider, 0, 1);
     lv_slider_set_value(s_slider, 0, LV_ANIM_OFF);
     lv_obj_add_event_cb(s_slider, slider_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_slider, slider_event_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(s_slider, slider_event_cb, LV_EVENT_RELEASED, NULL);
 
     /* 立即填充一次 + 周期刷新（复用共享 player_ticker，不再自建 timer） */

@@ -196,8 +196,21 @@ static touch_cb_entry_t s_touch_cbs[TOUCH_CB_MAX];
 static uint8_t s_touch_cb_count = 0;
 
 /* 触摸输入设备读取回调：把 esp_lcd_touch 的坐标/按下状态交给 LVGL，
-   并转发给所有注册的触摸事件订阅者（如触摸测试、息屏活动检测）。
-   Y 坐标按比例修正：先乘以 23 再除以 24（触摸面板与屏幕的纵向比例校准）。 */
+   并转发给所有注册的触摸事件订阅者（如触摸测试、息屏活动检测）。 */
+
+/* 最后一次"有效按下"的坐标。
+   ⚠ 抬手那一帧必须继续上报这个坐标，不能报 (0,0)——历史 bug（LVGL 9 迁移后
+   进度条 seek 恒为 0）：LVGL 的 lv_slider_event 在处理 LV_EVENT_RELEASED /
+   LV_EVENT_PRESS_LOST 时会调 update_knob_pos()，用 lv_indev_get_point() 把滑块
+   值按"当前触摸点"重算一遍。若驱动在抬手帧上报 (0,0)，滑块值就会被重算成
+   min（0）并 clamp 到最左，等我们注册的 RELEASED 回调执行时
+   lv_slider_get_value() 早已变成 0 → 点击轨道/拖动松手都 seek 到 0 秒。
+   （LVGL 8.4 的 RELEASED 分支不重算值，所以升级前没暴露这个问题。）
+   真实触摸控制器在抬手时本来就保留最后坐标，这里按同样语义上报即可：
+   任何"在 RELEASED 里读坐标/读控件值"的控件都会因此恢复正常。 */
+static uint16_t s_last_touch_x = 0;
+static uint16_t s_last_touch_y = 0;
+
 static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
@@ -205,8 +218,8 @@ static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     /* 触摸控制器异步初始化中（句柄未就绪）：不给数据，保持未按下，
        避免操作无效指针；就绪后（lvgl_port_set_touch_handle）自动恢复 */
     data->state = LV_INDEV_STATE_RELEASED;
-    data->point.x = 0;
-    data->point.y = 0;
+    data->point.x = s_last_touch_x;
+    data->point.y = s_last_touch_y;
     if (s_touch_handle == NULL) {
         return;
     }
@@ -222,6 +235,17 @@ static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
        经过调整和优化后点击位置最符合直觉。 */
     touchpad_y = (uint16_t)((uint32_t)touchpad_y * 29 / 30);
     touchpad_x = (uint16_t)((uint32_t)touchpad_x * 29 / 30);
+
+    if (touched) {
+        /* 只有真正按下（读到有效坐标）时才更新"最后坐标"基准。
+           抬手帧不覆盖，抬手时沿用上一次按下的坐标（见上方注释）。 */
+        s_last_touch_x = touchpad_x;
+        s_last_touch_y = touchpad_y;
+    } else {
+        touchpad_x = s_last_touch_x;
+        touchpad_y = s_last_touch_y;
+    }
+
     data->state = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     data->point.x = touchpad_x;
     data->point.y = touchpad_y;

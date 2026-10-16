@@ -463,3 +463,78 @@ v8 时代这个模块存在的唯一理由是 **8.4 的 `lv_label` 不认动画�
    `W (303) i2c: This driver is an old driver, please migrate your application code to adapt driver/i2c_master.h`
    —— 来自 `components/i2c_bsp` 用的旧版 `driver/i2c.h`（触摸 I²C 总线）。功能无影响；
    想消掉需要把 i2c_bsp 迁到 `driver/i2c_master.h`（独立任务，不在本次迁移范围内）。
+
+---
+
+## 16. 迁移后新发现：`lv_slider` 的按下/拖动语义变了（进度条 seek 失效）
+
+> 2026-10-16 发现并修复。现象：升级后播放页进度条**拖动松手 / 点击轨道都会 seek 到错位置**
+> （最初表现为恒 seek 到 0，日志 `mp3_player: seek to 0 s`；后续定位到点击时
+> `now_playing: seek to XX s` 的 XX 恰好等于**当前播放秒数**）。
+> 相关文件：`main/ui/now_playing.c`（取值逻辑）、`main/core/ui/lvgl_port.c`（输入层抬手坐标）。
+
+### 16.1 两处 v9 行为差异（都在 `src/widgets/slider/lv_slider.c`）
+
+1. **纯点击不重算控件值**。v9 只在 `LV_EVENT_PRESSING` 里调 `update_knob_pos()`，
+   而该函数开头是
+   `if(check_drag && !slider->dragging) { if(LV_ABS(ofs) < indev->scroll_limit) return; }`
+   —— 手指位移小于 `scroll_limit`（默认 10px）时直接返回，**滑块值保持
+   `player_ticker` 刷进去的"当前播放位置"**。所以点击轨道后
+   `lv_slider_get_value()` 读到的是播放位置，不是点击位置 → seek 到原地。
+   （v8.4 在 `LV_EVENT_PRESSED` 分支里就把 `dragging`/`value_to_set` 建好，
+   PRESSING 分支无条件按触摸点算值，因此"点击定位"在 v8 下是可用的。）
+2. **松手帧会用"当前触摸点"重算一次**。v9 新增
+   `LV_EVENT_RELEASED / LV_EVENT_PRESS_LOST → update_knob_pos(obj, false)`，
+   它读 `lv_indev_get_point()`。本项目的 `lvgl_touchpad_read_cb` 原本在抬手帧上报
+   `(0,0)`，于是值被重算成 `min(0)` 并 clamp 到最左——**松手回调里读控件值永远是 0**。
+   实测顺序：`PRESSING(val=65, p=(359,423))` → `PRESSING(val=0, p=(0,0))` → `RELEASED(val=0)`。
+
+### 16.2 修复（两层，缺一不可）
+
+| 层 | 文件 | 改动 |
+|---|---|---|
+| 输入层（根因） | `main/core/ui/lvgl_port.c` | 抬手帧改为上报**最后一次按下的坐标**（新增 `s_last_touch_x/y`，只在 `touched` 时更新）。真实触摸控制器本来就是这个语义，`lv_slider` 内部重算因此拿到正确位置 |
+| 取值层 | `main/ui/now_playing.c` | seek 目标不再依赖控件内部状态：`PRESSED` 时用**按下点坐标**按 LVGL 同一套线性映射（`(p.x-(x1+pad_l))*range/indic_w+min`，取 `LV_PART_MAIN` 的 padding）算出目标秒数；`RELEASED` 时用这个交互过程中算好的值 |
+
+**⚠ 第三个坑（只做上面两层还不够，实测踩到）**：`LV_EVENT_PRESSING` 对"点击"也会触发，
+而且此时滑块值**仍是 `player_ticker` 刷进去的播放位置**（因为位移没超过 scroll_limit，
+LVGL 没重算）。第一版实现里 PRESSING 无条件 `s_slider_drag_value = lv_slider_get_value()`，
+结果按下时算出的正确目标立刻被覆盖：
+
+```
+I now_playing: TAP p=(349,434) ... range=0..131 val=8 -> target=103   ← 按下点算对了
+I now_playing: REL target=8                                            ← 被 PRESSING 覆盖
+I now_playing: seek to 8 s (byte 1328100)                              ← 又 seek 回播放位置
+```
+
+所以必须**自己判断"算不算拖动"**：记录按下点，只有位移超过 `NP_SLIDER_DRAG_PX`
+（= LVGL 默认 `scroll_limit` 10px，实测 tap 位移仅 1~3px）才改用控件值，
+否则一直用按下点算出的目标。
+
+⚠ 另外：`slider_time_from_point()` 用的是**绝对屏幕坐标**（`lv_indev_get_point` 原值），
+不要再对控件做 `lv_obj_transform_point`——两者必须同一坐标系，否则会算出负数被钳到 0。
+
+### 16.3 实测验收（串口日志，2026-10-16）
+
+`now_playing: seek to N s` 与 `mp3_player: seek to N s (byte B)` 成对出现，N 随点击/拖动位置变化：
+
+| 阶段 | 日志 |
+|---|---|
+| 修复前（恒 0） | `now_playing: seek to 0 s` + `mp3_player: seek to 0 s (byte 89124)` |
+| 输入层修复后（点击仍无效） | `TAP ... val=9 -> target=120` / `REL target=9` / `seek to 9 s` |
+| 最终版（点击生效） | 点击：`seek to 64 s (byte 2650533)`、`seek to 85 s (byte 4046870)`、`seek to 86 s`；拖动：`seek to 40 s (byte 2242742)`、`seek to 61 s`；回归连测：`seek to 75/13/56/81/15 s` 各不相同且与操作位置一致 |
+
+用户实机确认：**点击可跳转、拖动可跳转**；滑动翻页 / 列表滚动 / 下拉控制中心 /
+音量亮度竖条 / ClickWheel / 设置菜单回归全部正常。
+
+### 16.4 通用教训
+
+1. **凡是"在 `LV_EVENT_RELEASED` 里读 `lv_indev_get_point()` 或读控件值"的控件/回调，
+   都要在 v9 下重新验证**：松手帧的触摸点语义（抬手上报什么坐标）由驱动决定，
+   而 v9 比 v8 更依赖这个点在松手帧仍然有效。
+2. **"控件值"在 v9 里不再等价于"用户意图值"**：`lv_slider` 只在位移超过
+   `scroll_limit` 时才把触摸位置写进控件值，其它时刻控件值就是外部（ticker/observer）
+   刷进去的。要与用户意图对齐，就自己按坐标算，别读控件值。
+3. 本项目其它读点位的地方（`notification_panel.c` 的竖条拖动、`click_wheel.c`、
+   `settings_menu.c`）都只在 `PRESSED/PRESSING` 里取值，不受影响，已回归验证。
+
