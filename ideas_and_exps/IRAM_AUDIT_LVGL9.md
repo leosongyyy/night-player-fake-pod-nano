@@ -532,10 +532,13 @@ map（对比 `baseline = FAST_MEM=y + 全格式`）：
 
 | 方案 | IRAM 代码 | 内部 RAM 稳态 | 开机后最大连续块 | DMA（开机完成） | blend 执行位置 | 帧率 |
 |---|---|---|---|---|---|---|
-| ① **baseline**：FAST_MEM=y + 全格式 | 166.4 KB | 23.5 KB | 3.5 KB | 2.7 KB | IRAM | 基准 |
-| ② FAST_MEM=y + 裁格式 | 108.9 KB | **82.3 KB** | 31.7 KB | 58.8 KB | **IRAM** | ≈基准 |
-| ③ FAST_MEM=n + 全格式 | 83.6 KB | 106.7 KB | 31.7 KB | 83.4 KB | PSRAM | −1 帧 |
-| ④ FAST_MEM=n + 裁格式 | 83.6 KB | **106.3 KB** | 31.7 KB | 83.4 KB | PSRAM | −1 帧 |
+| ① **baseline**：FAST_MEM=y + 全格式 | 166.4 KB | 23.5 KB | 3.5 KB | 2.7 KB | IRAM | 11 fps |
+| ② FAST_MEM=y + 裁格式（**已采用**） | 108.9 KB | **82.3 KB** | 31.7 KB | 58.8 KB | **IRAM** | **11 fps** |
+| ③ FAST_MEM=n + 全格式 | 83.6 KB | 106.7 KB | 31.7 KB | 83.4 KB | PSRAM | 9 fps |
+| ④ FAST_MEM=n + 裁格式 | 83.6 KB | **106.3 KB** | 31.7 KB | 83.4 KB | PSRAM | 9 fps |
+
+（帧率来自 §12 的用户实测，均为列表快速滚动；①② 的对象都走 CUSTOM malloc 在 PSRAM，
+③④ 也是——两者的差异只在 blend 的执行位置。）
 
 读法：
 
@@ -549,10 +552,104 @@ map（对比 `baseline = FAST_MEM=y + 全格式`）：
 > ⚠ 别被"裁格式在路线 n 上不省 IRAM"误导：那是因为 blend 已经不在 IRAM 了。
 > 只要把 FAST_MEM 打开，同一批裁剪立刻变成 57.5 KB 的 IRAM 收益。
 
-### 10.4 当前状态
+### 10.4 定稿
 
-`sdkconfig.defaults` 与设备 COM12 上跑的都是 **方案 ②**（FAST_MEM=y + 裁格式），
-用于对比实测；最终保留哪个方案待定。
+方案 ②（FAST_MEM=y + 裁格式）最终采用，已随本报告一起提交（`b043234`）：
+`sdkconfig.defaults` 与设备 COM12 上跑的都是方案 ②。
+
+---
+
+## 11. 失败实验：把 LVGL 对象搬回内部 RAM（2026-10-16，两次都失败）
+
+**结论先行：这条路不可行，`CONFIG_LV_USE_CUSTOM_MALLOC=y`（对象进 PSRAM）必须永久保留。**
+两次实验都跑出了明确证据，不要再重试。
+
+### 11.1 复测-1：方案②（blend 留 IRAM，内部 RAM 82.3 KB）
+
+把 `LV_USE_CUSTOM_MALLOC` 换成 `LV_USE_CLIB_MALLOC`（LVGL 对象走标准 `malloc()` → 内部 RAM）：
+
+```
+ui:before app_ui_create  int  86,527 / 31,744 (338)
+cover:req                int      23 /      0 (1677)   ← 内部 RAM 见底
+abort() was called ... newlib/src/abort.c:38            ← 建锁失败 → 重启循环
+```
+
+### 11.2 复测-2：方案④（关 FAST_MEM，内部 RAM 106.3 KB —— 本项目最宽裕的配置）
+
+| 阶段 | CUSTOM（方案④） | CLIB（复测-2） | 差 |
+|---|---|---|---|
+| `04-lvgl_port` | 161 643 / 86 016 | 152 691 / 77 824 | −8 952 |
+| `ui:before app_ui_create` | 136 267 / 63 488 | 112 383 / 38 912 | **−23 884** |
+| `cover:req` | 135 395 / 63 488 | 26 155 / 15 360 | −109 240 |
+| `ui:after app_ui_create` | 97 523 / 31 744 | **7 735 / 7 680**，dma **19 / 0** | **−89 788** |
+| `17-perf_monitor` | 91 511 / 31 744 | **715 / 176** | −90 796 |
+
+失败链条（完整复现 `IRAM_DMA_AUDIT.md` §5 的经典故障）：
+
+```
+E sdmmc_cmd: allocate_dma_buf: not enough mem, err=0x101   ← 连 512B 都分配不到
+E diskio_sdmmc: sdmmc_read_blocks failed (0x101)
+W mp3_player: decode never started (...), treat as damaged
+W player_ctrl: bad track (reason=3), auto skip next
+I toast: toast (2000 ms): 歌曲数据损坏
+E MEM: create mem_monitor task failed (internal free=55)
+```
+
+### 11.3 定量结论
+
+- **LVGL 对象堆总量 ≈ 88~90 KB**
+  （推算：CLIB 下 `ui:before → ui:after` 掉 104 648 B，其中 38 744 B 是与 malloc 策略无关的
+  非对象开销——封面链路等，CUSTOM 下同样存在——故对象净增 ≈ 65.9 KB；再加上
+  `lv_init` + 开机封面 + 列表页阶段就先吃掉的 23 884 B，合计 ≈ 89.8 KB。
+  这与复测-1 里"86 527 B 可用仍然撞到 23 B"完全吻合。）
+- **即使关掉 `FAST_MEM_USE_IRAM` 多出 83 KB 也不够**：要让 `ui:after app_ui_create` 还留下
+  ~40 KB 安全余量，`04-lvgl_port` 时刻需要约 185 KB 空闲；而方案④ 那一刻只有 152.7 KB
+  （84.6 KB 的 LVGL 绘制缓冲已经先拿走了）。
+- **内部 RAM 的账算死了**：总量 ≈ 231 KB（方案④），扣掉静态段 68 KB、LVGL 绘制缓冲 84.6 KB、
+  各任务栈 ≈60 KB 之后，不可能再挤出 90 KB。
+- 副产品：这次失败精确复现了"**内部 RAM 见底 → SD 读 512 B 失败 → 误判坏曲 → 自动跳曲**"
+  这条链，可以直接当作该故障的复现手册（见 `IRAM_DMA_AUDIT.md` §5）。
+
+---
+
+## 12. 帧率实测（用户提供，2026-10-16，均为"列表快速滚动"）
+
+| 配置 | LVGL 对象位置 | 字体 | FAST_MEM_USE_IRAM | 帧率 |
+|---|---|---|---|---|
+| A | **内部 RAM** | TTF | y | **21 fps** |
+| B | PSRAM（= 当前方案②） | TTF | y | **11 fps** |
+| C | PSRAM | **BIN**（内嵌位图字库） | y | **12 fps** |
+| D | PSRAM（= 方案④） | TTF | n | **9 fps** |
+
+### 12.1 三个杠杆的排序（这是本次审计最重要的结论）
+
+| 杠杆 | 效果 | 幅度 |
+|---|---|---|
+| **① LVGL 对象放哪**（内部 RAM vs PSRAM） | 21 → 11 fps | **−48%（接近腰斩）** |
+| ② blend 函数放哪（`FAST_MEM_USE_IRAM`） | 11 → 9 fps | −18% |
+| ③ 字体方案（TTF vs 内嵌位图） | 11 → 12 fps | +9%（BIN 略快） |
+
+**对象位置的影响远大于 blend 位置**，这与"blend 是绘制热点"的直觉相反。合理解释：
+列表滚动的主要开销不是像素混合，而是**对象树的遍历/布局/样式解析**——
+每次滚动要读取大量 `lv_obj_t` 及其样式（本项目对象堆约 88 KB，见 §11.3），
+而 ESP32-S3 只有 32 KB 数据 cache，88 KB 的对象在工作集里来回换入换出，
+cache 命中率极低。相比之下 blend 的函数体是纯代码，16 KB 指令 cache 反而够用。
+
+### 12.2 由此得到的行动含义
+
+- **当前方案②（11 fps）的选择是对的**：它比方案④（9 fps）快 2 fps，
+  而这 2 fps 的代价正是"blend 退到 PSRAM"；
+- **下一个真正值得做的性能优化不是碰 blend，而是想办法让"最热的那部分对象"回到内部 RAM**。
+  §11 已经证明**全部**对象放不进去（需要 ≈90 KB，而全部可用量最多也就 112 KB，
+  还得给 SD/DMA/任务栈留余量）；但**只放最热的一部分**（例如 virtual_list 的行对象，
+  几十个对象、约 10~20 KB）在原理上是可行的，收益可能相当可观。
+  实现路径：在 `core/ui/lvgl_mem.c` 里把"一律优先 PSRAM"改成
+  "**先吃一份内部 RAM 配额、用完再走 PSRAM**"，配额按内部 RAM 实时余量动态上限，
+  避免再出现 §11 的见底事故；
+- 字体维度（TTF 11 vs BIN 12）只差 1 fps，**不值得为性能换字体**，
+  继续按 Flash 体积 / 缺字覆盖来选（当前 TTF 方案优势明显）。
+
+
 
 
 

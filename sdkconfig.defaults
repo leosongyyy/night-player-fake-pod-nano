@@ -70,9 +70,20 @@ CONFIG_ULP_COPROC_ENABLED=y
 # 内存：LVGL 9 支持把对象堆整个换到外部内存——用 CUSTOM 模式，
 # 由 core/ui/lvgl_mem.c 实现 lv_malloc_core/lv_free_core/... 把 LVGL 的
 # 对象/样式/中间绘制层全部放到 8MB PSRAM（内部 RAM 留给 DMA 绘制缓冲与
-# 实时任务栈）。⚠ 不加这一条时实测开机完成内部 RAM 只剩 23 字节、
-# DMA 只剩 19 字节、最大连续块为 0，会引发 SD 读失败与 newlib 建锁 abort。
-# （v8 无此能力，只能用 LV_MEM_CUSTOM 走标准 malloc = 内部 RAM）
+# 实时任务栈）。⚠ 不加这一条（即走 CLIB = 标准 malloc → 内部 RAM）时实测
+# 开机完成内部 RAM 只剩 23 字节、DMA 只剩 19 字节、最大连续块为 0，
+# 会引发 SD 读失败与 newlib 建锁 abort（v8 没有 CUSTOM 能力，只能这样）。
+# 【2026-10-16 两次复测，结论：永久保留 CUSTOM，LVGL 对象必须留在 PSRAM】
+#   复测-1（方案②，blend 留 IRAM，内部 RAM 82.3KB）：ui:before app_ui_create
+#   还有 86,527B 空闲，到 cover:req 掉到 23B / 最大连续块 0 / 分配块 338→1677，
+#   随后 newlib 建锁失败 abort → 重启循环。
+#   复测-2（方案④，关 FAST_MEM，内部 RAM 106.3KB，本项目最宽裕的配置）：
+#   ui:before app_ui_create 有 112,383B，创建完 UI 只剩 7,735B、DMA 仅 19B；
+#   紧接着 sdmmc_cmd: allocate_dma_buf: not enough mem（连 512B 都分配不到）
+#   → 解码器起不来被判定坏曲 → 自动跳曲 + "歌曲数据损坏" toast，
+#   mem_monitor 任务也建不起来（internal free=55）。
+# 即 LVGL 对象堆的峰值需求 ≥105KB（若要留安全余量得 ~150KB），本项目内部 RAM
+# 无论如何都装不下，CUSTOM + PSRAM 是唯一可行方案。
 CONFIG_LV_USE_CUSTOM_MALLOC=y
 # 字符串函数：用标准 C 的 memcpy/memset（对应 v8 的 LV_MEMCPY_MEMSET_STD=y）
 CONFIG_LV_USE_CLIB_STRING=y
@@ -95,7 +106,9 @@ CONFIG_LV_USE_PERF_MONITOR=y
 #     进 .flash.text，再由 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y 启动时拷进 PSRAM
 #     执行（IDF 原文：PSRAM 比 flash 快），所以是"IRAM→PSRAM"而非"→慢速 flash"。
 #   · 开启时若配合下面的颜色格式裁剪，IRAM 开销可从 82.8KB 压到约 44KB。
-# 【对比实验值】临时改回 y，用于测"blend 留在 IRAM + 裁掉多余颜色格式"的组合。
+# 【2026-10-16 定稿】保留 blend 在 IRAM：真机实测关掉它内部 RAM 虽多 83KB，
+# 但 blend 会退到 PSRAM 执行；既然裁格式已把 LVGL 的 IRAM 开销从 82.8KB
+# 压到 25.3KB、内部 RAM 也从 23.5KB 升到 82.3KB，就没必要再牺牲 blend 速度。
 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
 #
 # 颜色格式裁剪：LVGL 9 默认打开全部 10 种格式，每种一份独立混合实现。本机屏幕
