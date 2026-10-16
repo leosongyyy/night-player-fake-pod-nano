@@ -37,8 +37,12 @@
 
 #include <string.h>
 
+#include "core/ui/lvgl_mem.h"
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"   /* esp_ptr_internal()：判断指针是否在内部 RAM */
+#include "esp_timer.h"          /* esp_timer_get_time()：路径B 的日志节流 */
 
 /* ⚠ 整套实现只在 Kconfig 选中 "Implement the functions externally"
    （CONFIG_LV_USE_CUSTOM_MALLOC）时参与编译：若哪天改回 CLIB，LVGL 自带的
@@ -55,10 +59,53 @@ static const char *TAG = "lvgl_mem";
 /* 回退到内部 RAM 只提示一次，避免心跳类小分配把串口刷爆 */
 static bool s_fallback_logged = false;
 
+/* ---------------------------------------------------------------------------
+   【路径B：热点对象优先内部 RAM】
+   实测（列表快速滚动，见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §12）：
+     · LVGL 对象在内部 RAM → 21 fps
+     · LVGL 对象在 PSRAM   → 11 fps
+   对象位置是比"blend 是否进 IRAM"（11 vs 9 fps）大得多的性能杠杆：滚动开销主要
+   在对象树的遍历/布局/样式解析，而对象工作集约 88KB，远超本芯片 32KB 的数据 cache。
+   但全部对象装不进内部 RAM（§11 实测会直接见底崩），所以改用"按创建时机圈定"：
+   只在创建滚动热对象（virtual_list 行槽）的那一小段时间内把分配钉到内部 RAM。
+
+   ⚠ 安全阀：内部 RAM 必须始终给 SD 读(512B)/DMA/内部任务栈留余量，所以窗口内
+     也要求空闲量高于 LVGL_INTERNAL_RESERVE 才敢用内部 RAM，不够就自动回退 PSRAM
+     （功能不受影响，只是那部分对象不享受加速）。
+   --------------------------------------------------------------------------- */
+#define LVGL_INTERNAL_RESERVE   (40 * 1024)   /* 窗口内 malloc 的保留底线（按申请字节算） */
+/* ⚠ 上面这条保留线是按"申请 size 之和"卡的，而每笔分配还有 ~16B 的堆元数据/对齐
+   开销，且 lv_realloc_core 的"继续留在内部 RAM"路径并不受它约束 —— 实测把整个
+   app_ui_create 包进窗口后：逻辑上钉了 87,576B，而内部 RAM 窗口结束时实际只剩
+   16,483B（稳态 36,467B，最大连续块 7,680B）。所以**不要把 40KB 当成真实余量**，
+   真实安全网是下面这条硬底线。 */
+#define LVGL_INTERNAL_HARD_FLOOR (12 * 1024)  /* 硬底线：低于它，realloc 不再强留 */
+
+/* 窗口可嵌套（app_ui_create 会把整段 UI 创建包进来，而 virtual_list_create
+   内部还会再开一次自己的窗口），所以用深度计数而不是布尔量：
+   只有最外层关闭时才复位统计并打印。 */
+static int     s_internal_prefer_depth = 0;      /* 窗口嵌套深度（>0 = 生效中） */
+static size_t  s_internal_prefer_used  = 0;      /* 本窗口已钉到内部 RAM 的字节数 */
+/* ⚠ 初值取负数：保证启动后第一次窗口关闭就能打印统计。若初值为 0，编译进
+   "启动后 2 秒内一律不打印"，而行槽恰好在 ~1.3s 创建，统计会被吞掉（实测踩过）。 */
+static int64_t s_last_pin_log_us       = -2000000;
+
 static void *lvgl_mem_alloc(size_t size)
 {
     if (size == 0) {
         return NULL;
+    }
+
+    /* 【路径B】热点对象窗口内：优先内部 RAM（但留足 LVGL_INTERNAL_RESERVE，
+       不够就往下走 PSRAM，绝不把内部 RAM 吃穿） */
+    if (s_internal_prefer_depth > 0 &&
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >=
+            LVGL_INTERNAL_RESERVE + size) {
+        void *pinned = heap_caps_malloc(size, LVGL_MEM_FALLBACK);
+        if (pinned != NULL) {
+            s_internal_prefer_used += size;
+            return pinned;
+        }
     }
 
     void *p = heap_caps_malloc(size, LVGL_MEM_PREFER);
@@ -124,6 +171,22 @@ void *lv_realloc_core(void *p, size_t new_size)
         return NULL;
     }
 
+    /* 【路径B】原指针若已被钉在内部 RAM（热点窗口内分配的），优先让它继续留在
+       内部 RAM：否则 heap_caps_realloc 会因为 caps 不匹配而 malloc+memcpy+free，
+       把对象"赶"回 PSRAM，钉住就白做了（文本缓冲每次改文本都会走 realloc，
+       这一条是必须的）。
+       ⚠ 窗口关闭后这条路径依然生效（滚动改文本时不能让对象被搬走），所以这里
+       不能拿 LVGL_INTERNAL_RESERVE 去卡 —— 改为只守一条硬底线：把原分配的占用
+       算回来之后，仍需高于 LVGL_INTERNAL_HARD_FLOOR，确保极端情况下吃不穿。 */
+    if (esp_ptr_internal(p) &&
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) +
+            heap_caps_get_allocated_size(p) >= LVGL_INTERNAL_HARD_FLOOR + new_size) {
+        void *np = heap_caps_realloc(p, new_size, LVGL_MEM_FALLBACK);
+        if (np != NULL) {
+            return np;
+        }
+    }
+
     void *np = heap_caps_realloc(p, new_size, LVGL_MEM_PREFER);
     if (np == NULL) {
         np = heap_caps_realloc(p, new_size, LVGL_MEM_FALLBACK);
@@ -168,6 +231,44 @@ lv_result_t lv_mem_test_core(void)
     }
     heap_caps_free(p);
     return LV_RESULT_OK;
+}
+
+/* ---------------------------------------------------------------------------
+   路径B 的窗口开关：进入/离开"热点对象"窗口（说明见文件上方与 lvgl_mem.h）。
+   ⚠ 必须配对调用；窗口内不要跨任务/跨锁。当前唯一调用点是 virtual_list 的行槽创建。
+   --------------------------------------------------------------------------- */
+void lvgl_mem_set_internal_prefer(bool on)
+{
+    if (on) {
+        if (s_internal_prefer_depth++ == 0) {
+            s_internal_prefer_used = 0;   /* 只有最外层进入时才复位统计 */
+        }
+        return;
+    }
+
+    if (s_internal_prefer_depth == 0) {
+        return;   /* 防御：未配对的关闭，直接忽略 */
+    }
+    if (--s_internal_prefer_depth > 0) {
+        return;   /* 还有外层窗口没结束 */
+    }
+
+    /* 最外层窗口结束：打印本次钉住量。
+       绑定窗口在滚动时会高频开关，日志节流到每 2s 一条，避免刷屏。 */
+    int64_t now = esp_timer_get_time();
+    if (s_internal_prefer_used > 0 && (now - s_last_pin_log_us) > 2000000) {
+        s_last_pin_log_us = now;
+        ESP_LOGI(TAG, "hot objects pinned to internal RAM: %u B in this window (int free now %u B)",
+                 (unsigned)s_internal_prefer_used,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+}
+
+#else  /* LV_USE_STDLIB_MALLOC != LV_STDLIB_CUSTOM：LVGL 用自带分配器，本开关无效 */
+
+void lvgl_mem_set_internal_prefer(bool on)
+{
+    LV_UNUSED(on);
 }
 
 #endif /* LV_USE_STDLIB_MALLOC == LV_STDLIB_CUSTOM */

@@ -8,6 +8,7 @@
 #include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
+#include "core/ui/lvgl_mem.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -174,6 +175,16 @@ static lv_obj_t *create_status_bar(void)
 
 void app_ui_create(void)
 {
+    /* 【路径B】把整段 UI 创建都放进"热点对象优先内部 RAM"窗口：
+       main_ui（四页 tab + 两个虚拟列表 + ClickWheel）→ 状态栏 → 通知面板，
+       按**创建顺序**优先占用内部 RAM，直到 core/ui/lvgl_mem.c 里的 40KB 保留线
+       为止，装不下的对象自动落 PSRAM（不会把内部 RAM 吃穿）。
+       依据：对象放内部 RAM 时列表快速滚动 21fps、放 PSRAM 只有 11fps
+       （见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §12），而两个滚动页
+       （目录 / 播放列表）恰好在最前面创建，因此能优先拿到内部 RAM。
+       窗口支持嵌套：virtual_list_create 内部还会再开一次自己的窗口。 */
+    lvgl_mem_set_internal_prefer(true);
+
     ESP_LOGI(TAG, "Create main UI");
     main_ui_create();
 
@@ -182,6 +193,8 @@ void app_ui_create(void)
 
     ESP_LOGI(TAG, "Create notification panel");
     notification_panel_create(status_bar);
+
+    lvgl_mem_set_internal_prefer(false);
 
     /* ⚠ 全屏设置菜单**不在开机时创建**（懒加载，见 ui/settings_menu.h）：
        它常驻实测约 29KB 内部 RAM、构建约 310ms，改为首次点开设置时创建，

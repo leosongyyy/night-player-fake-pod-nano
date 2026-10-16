@@ -4,6 +4,7 @@
 
 #include "core/fonts/system_font.h"
 #include "core/ui/global_style.h"
+#include "core/ui/lvgl_mem.h"
 #include "esp_log.h"
 
 static const char *TAG = "vlist";
@@ -98,7 +99,15 @@ static void vlist_bind_row(virtual_list_state_t *st, vlist_row_t *row,
     const uint8_t *item = (const uint8_t *)st->data +
                           (size_t)index * st->item_size;
     virtual_list_cell_t cell = { .icon = row->icon, .text = row->text };
+
+    /* 【路径B】绑定回调会 lv_label_set_text → 分配/改写该行的文本缓冲，而文本
+       同样是滚动时被反复读取的热数据，故也纳入内部 RAM 窗口。
+       ⚠ 必须配合 lvgl_mem.c 里 lv_realloc_core 的"已在内部 RAM 就留在内部 RAM"
+       规则，否则每改一次文本都会被跨堆搬回 PSRAM，钉住就成了无用功。
+       ⚠ 本窗口在滚动时高频开关，日志已在 lvgl_mem.c 里按 2s 节流。 */
+    lvgl_mem_set_internal_prefer(true);
     st->bind_cb(&cell, index, item, st->user_data);
+    lvgl_mem_set_internal_prefer(false);
 }
 
 /* 视口槽位式重绑（虚拟滚动核心）：
@@ -237,6 +246,15 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
         return NULL;
     }
 
+    /* 【路径B：热点对象优先内部 RAM】本函数创建的这批对象——列表容器、状态
+       结构、透明占位、行槽数组、每个行槽的 root/icon/text——都是滚动时被
+       **反复访问**的工作集。实测对象放内部 RAM 时列表快速滚动 21fps、放 PSRAM
+       只有 11fps（见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §12），是比 blend 位置
+       更大的性能杠杆。窗口只覆盖本函数，之后立刻关闭：设置菜单之类的冷对象不
+       享受这个待遇（全部对象进去会直接见底，见 §11）。窗口内余量不足时
+       lvgl_mem.c 会自动回退 PSRAM，不会把内部 RAM 吃穿。 */
+    lvgl_mem_set_internal_prefer(true);
+
     /* 列表容器：可垂直滚动、原生滚动条、无边框无内边距（透明背景：
        深灰卡片底色由列表页的卡片背景层提供，见 list_common） */
     lv_obj_t *list = lv_obj_create(parent);
@@ -252,6 +270,7 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
     virtual_list_state_t *st = lv_malloc(sizeof(*st));
     if (st == NULL) {
         ESP_LOGE(TAG, "alloc state failed");
+        lvgl_mem_set_internal_prefer(false);   /* 路径B：失败路径也要关窗口 */
         lv_obj_del(list);
         return NULL;
     }
@@ -289,6 +308,7 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
     st->row_indices = lv_malloc(sizeof(uint32_t) * st->row_count);
     if (st->rows == NULL || st->row_indices == NULL) {
         ESP_LOGE(TAG, "alloc rows failed");
+        lvgl_mem_set_internal_prefer(false);   /* 路径B：失败路径也要关窗口 */
         lv_free(st->rows);
         lv_free(st->row_indices);
         lv_free(st);
@@ -359,6 +379,8 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
            覆盖的缓冲行会停在 (0,0)，叠在第一项上 */
         lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
     }
+    /* 路径B：本列表的热对象窗口到此结束（绑定阶段的文本缓冲另开小窗口） */
+    lvgl_mem_set_internal_prefer(false);
 
     /* 事件：滚动重绑 + 点击选中 */
     lv_obj_add_event_cb(list, vlist_scroll_event_cb, LV_EVENT_SCROLL, NULL);
