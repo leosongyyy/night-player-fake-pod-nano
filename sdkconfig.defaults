@@ -83,7 +83,51 @@ CONFIG_LV_DPI_DEF=160
 # LV_USE_PERF_MONITOR 会被 Kconfig 静默丢弃，屏幕角落就没有 FPS 了）
 CONFIG_LV_USE_SYSMON=y
 CONFIG_LV_USE_PERF_MONITOR=y
+# LVGL 混合函数是否进 IRAM（2026-10-16 内存审计，见
+# ideas_and_exps/IRAM_AUDIT_LVGL9.md §5 P0）：LVGL 9 把软件混合按颜色格式拆成
+# 多份并整份打上 LV_ATTRIBUTE_FAST_MEM，开启本项会让约 82.8KB 代码进 IRAM ——
+# 而 ESP32-S3 上 IRAM 与内部 DRAM 是同一块 SRAM 的两个别名（heap/port/esp32s3/
+# memory_layout.c 的 soc_memory_regions 成对给出 0x3FC8xxxx ↔ 0x4037xxxx），
+# 这 82.8KB 会**逐字节**从内部 DRAM 堆里扣掉（map 里的 .dram0.dummy 就是它）。
+# 这就是"LVGL 对象都搬去 PSRAM 了、可用内部 RAM 却不见涨"的原因。
+#   · 关闭后实测（同机同日只改这一行）：内部 RAM 稳态 23.5KB → 106.7KB、
+#     开机完成最大连续块 3.5KB → 31.7KB，真机实测帧率只掉约 1 帧；代价是代码
+#     进 .flash.text，再由 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y 启动时拷进 PSRAM
+#     执行（IDF 原文：PSRAM 比 flash 快），所以是"IRAM→PSRAM"而非"→慢速 flash"。
+#   · 开启时若配合下面的颜色格式裁剪，IRAM 开销可从 82.8KB 压到约 44KB。
+# 【对比实验值】临时改回 y，用于测"blend 留在 IRAM + 裁掉多余颜色格式"的组合。
 CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
+#
+# 颜色格式裁剪：LVGL 9 默认打开全部 10 种格式，每种一份独立混合实现。本机屏幕
+# 是 RGB565，实测真正用到的是：RGB565（屏幕/绘制缓冲/JPEG 封面）、ARGB8888
+# （clip_corner 圆角帽、lv_slider 圆角分支、需要 alpha 的 simple layer）、
+# RGB565A8（对象/图片旋转缩放的唯一依赖）、RGB888（水平/复杂渐变的临时源格式）。
+# 下面 6 种当前 UI 无任何来源：
+#   AL88 / L8 / I1            —— 没有对应格式的图源
+#   ARGB8888_PREMULTIPLIED    —— 无 ThorVG/Lottie 时 SW 核心从不生产，纯死代码
+#   XRGB8888                  —— 仅在 LV_COLOR_DEPTH==32 时才是原生格式
+#   A8                        —— 只管"被旋转缩放的 A8 图源"；正文文字的字形位图
+#                                是当蒙版用的，不走这个开关
+# ⚠ 缺格式的失败方式全是"静默"的：目标格式缺失 = 整块不画且无任何日志；
+# 源格式缺失 = 一条 LV_LOG_WARN 后不画；变换缺失 = 警告 + 拿未初始化缓冲混合
+# （花屏）。排查手段：idfc monitor --grep "not enabled" / --grep "Not supported source"。
+# 必刷验证点：下拉控制中心（clip_corner）+ 拖动竖条、播放页拖进度条、
+# 播放设置页、全屏设置菜单、EQ 弹窗、Toast、息屏→亮屏（全屏重刷）。
+# CONFIG_LV_DRAW_SW_SUPPORT_XRGB8888 is not set
+# CONFIG_LV_DRAW_SW_SUPPORT_ARGB8888_PREMULTIPLIED is not set
+# CONFIG_LV_DRAW_SW_SUPPORT_L8 is not set
+# CONFIG_LV_DRAW_SW_SUPPORT_AL88 is not set
+# CONFIG_LV_DRAW_SW_SUPPORT_A8 is not set
+# CONFIG_LV_DRAW_SW_SUPPORT_I1 is not set
+#
+# 不编译 LVGL 自带的 examples/demos：CONFIG_LV_BUILD_EXAMPLES 默认 y，会让 lvgl
+# 组件递归编译 examples/ 下全部 250 个 .c。实测这纯属浪费——这些函数无人引用，
+# 最终被 --gc-sections 全部丢弃（nm 在 ELF 里找不到任何 lv_example/lv_demo 符号，
+# map 里 0 处出现），既不占 flash 也不占 RAM，只吃全量编译时间。
+# LV_BUILD_DEMOS 本身不编译任何文件（12 个 LV_USE_DEMO_* 全为 n 时 demos/ 下
+# 一个 .c 都不进源列表），一并关掉只为少一堆配置项。
+# CONFIG_LV_BUILD_EXAMPLES is not set
+# CONFIG_LV_BUILD_DEMOS is not set
 # 坐标：v9 的 lv_coord_t 固定为 int32_t，不再需要 LV_USE_LARGE_COORD。
 # 虚拟列表真实内容高度 = 条目数 × 行高，600+ 歌曲即超过 int16 上限
 # （611×56=34216），v9 天然支持（v8 时代曾因误删该配置导致长列表滚不到底部）
