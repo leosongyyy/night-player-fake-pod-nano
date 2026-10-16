@@ -57,6 +57,18 @@ void now_playing_set_marquee(bool enable);
 void now_playing_force_show_ui(void);
 
 /**
+ * @brief 放行首次封面加载（把首次加载推迟到整段开机 UI 创建完成之后）
+ *
+ * now_playing_create() 建好封面任务后会立刻请求加载当前歌曲封面，而这次加载
+ * （song_meta_load + esp_jpeg）会与 app_ui_create 里 LVGL 对象的创建**并行**
+ * 争抢内部 RAM —— 实测导致"热点对象钉内部 RAM"的钉住量每次开机相差约 10KB，
+ * 帧率随之抖动（见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §13.3）。
+ * 由 ui/app.c 在 app_ui_create() 末尾调用本函数放行；此前若有加载请求会先挂起，
+ * 放行时一次性补发。放行之后切歌照常实时加载，不受影响。幂等。
+ */
+void now_playing_enable_cover_load(void);
+
+/**
  * @brief 释放封面加载任务（仅"重新扫描/重启前腾内部 RAM"场景使用）
  *
  * 删除后台封面解码任务并清空句柄，释放约 6KB 内部 RAM 栈；此后不再换

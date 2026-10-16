@@ -97,11 +97,29 @@ static bool         s_cover_owned = false; /* 当前封面是否由本模块分�
 static volatile uint32_t s_pending_global = 0xFFFFFFFFu; /* 待加载封面的歌曲下标 */
 static TaskHandle_t s_cover_task = NULL;   /* 封面加载任务句柄 */
 
+/* 【封面首次加载延迟放行】now_playing_create() 建好任务后会立刻请求加载一次，
+   而那次加载（song_meta_load + esp_jpeg）会与 app_ui_create 里 LVGL 对象的创建
+   并行争抢内部 RAM，使"热点对象钉内部 RAM"的钉住量每次开机相差约 10KB、帧率
+   随之抖动（见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §13.3）。
+   故首次加载先挂起，等 ui/app.c 的 app_ui_create() 跑完再放行
+   （见 now_playing_enable_cover_load）；放行后切歌照常实时加载。 */
+static volatile bool s_cover_load_enabled = false;
+
 /* 请求加载指定歌曲的封面（LVGL 任务上下文调用；仅置标志 + 通知，不阻塞） */
 static void cover_load_request(uint32_t global)
 {
-    s_pending_global = global;
-    if (s_cover_task != NULL) {
+    s_pending_global = global;   /* 始终记录，放行时据此补发 */
+    if (s_cover_task != NULL && s_cover_load_enabled) {
+        xTaskNotifyGive(s_cover_task);
+    }
+}
+
+/* 放行首次封面加载（由 ui/app.c 在 app_ui_create() 末尾调用；幂等） */
+void now_playing_enable_cover_load(void)
+{
+    s_cover_load_enabled = true;
+    /* 补发：创建任务时的首次请求（以及放行前的任何请求）都只记了 pending */
+    if (s_cover_task != NULL && s_pending_global != 0xFFFFFFFFu) {
         xTaskNotifyGive(s_cover_task);
     }
 }

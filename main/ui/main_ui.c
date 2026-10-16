@@ -4,6 +4,7 @@
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 #include "core/ui/click_wheel.h"
+#include "core/ui/lvgl_mem.h"
 #include "ui/app.h"
 #include "ui/dir_list.h"
 #include "ui/list_common.h"
@@ -144,9 +145,19 @@ void main_ui_create(void)
     lv_obj_set_style_border_width(cont, 0, 0);
     lv_obj_set_style_pad_all(cont, 0, 0);
 
-    /* 四个页面 */
+    /* 四个页面。
+       【路径B】只把两个**滚动列表页**（目录 / 播放列表）的对象钉在内部 RAM：
+       它们是唯一在滚动时被反复访问的工作集（对象放内部 RAM 21fps vs PSRAM 11fps，
+       见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §12）。实测把整个 UI 都钉上并不会更快
+       —— 钉住量从 77KB 加到 106KB、帧率毫无变化（§13.3）—— 却要多吃掉约 30KB
+       内部 RAM 余量（DMA 最大连续块掉到 208B），所以窗口就限定在这两页；
+       正在播放页、播放设置页、状态栏与下拉控制中心照旧走 PSRAM。
+       窗口内余量不足时 lvgl_mem.c 会自动回退 PSRAM，不会把内部 RAM 吃穿。 */
+    lvgl_mem_set_internal_prefer(true);
     dir_list_create(tv);
     playlist_page_create(tv);
+    lvgl_mem_set_internal_prefer(false);
+
     now_playing_create(tv);
     settings_page_create(tv);
 
