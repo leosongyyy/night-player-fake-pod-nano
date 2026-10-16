@@ -2,6 +2,7 @@
 #include "core/utils/task_psram.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_private/esp_clk.h"
@@ -29,8 +30,27 @@ static volatile uint32_t s_core1_usage = 0;
    读到 80，用于验证"息屏降频生效"（见 core/utils/power_service）。 */
 static volatile int s_freq_isr_mhz = 0;
 
-/* esp_timer ISR 频率采样回调（中断上下文，只写一个 int，不做重活） */
-static void cpu_freq_isr_cb(void *arg)
+/* esp_timer ISR 频率采样回调（中断上下文，只写一个 int，不做重活）
+ *
+ * ⚠⚠ **必须 IRAM_ATTR（真实崩溃修复，2026-11）**：本定时器用
+ * `.dispatch_method = ESP_TIMER_ISR` 创建，回调是**在 systimer 中断里直接执行**
+ * 的（不是 esp_timer 任务上下文）。而 systimer 中断注册时带
+ * `ESP_INTR_FLAG_IRAM`（IDF `esp_timer_impl_systimer.c`），意味着
+ * `spi_flash_disable_interrupts_caches_and_other_cpu()` 里的
+ * `esp_intr_noniram_disable()`（只屏蔽**非 IRAM** 中断）**屏蔽不掉它**——
+ * 任何 flash 操作（NVS 提交、pldata 擦写…）关外部内存缓存期间它照样能触发。
+ * 此时回调若还在 flash 里（不加 IRAM_ATTR 就是），取指必然失败。
+ *
+ * 实测崩溃现场（配置槽位切换 → NVS 写 flash 期间命中 500ms 采样点）：
+ *   Core 0 panic'ed (Cache error) / Cache disabled but cached memory region accessed
+ *   PC: cpu_freq_isr_cb  ← flash 地址
+ *   栈: lvgl_port_task → ... → config_store_switch_slot → nvs_set_u8
+ *       → esp_flash_write →（关缓存）→ timer_alarm_isr → cpu_freq_isr_cb
+ * ⚠ 触发概率与"NVS 写密度"成正比：写 flash 的窗口约 1~10ms，采样周期 500ms，
+ *   单次写撞上的概率约 0.2%~2%；本回调只读一个寄存器、放 IRAM 零代价。
+ * ⚠ 以后再加 `ESP_TIMER_ISR` 定时器，回调**一律**要 IRAM_ATTR，且只能调用
+ *   IRAM 安全函数（`esp_clk_cpu_freq()` 本身是 IRAM_ATTR，可安全调用）。 */
+static void IRAM_ATTR cpu_freq_isr_cb(void *arg)
 {
     (void)arg;
     s_freq_isr_mhz = esp_clk_cpu_freq() / 1000000;

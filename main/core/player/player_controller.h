@@ -128,7 +128,10 @@ void player_controller_stop(void);
 /**
  * @brief 保存当前播放位置到 NVS（供伪关机/睡眠定时器关机前调用）
  *
- * 记录当前歌曲全局下标 + 当前播放位置（秒），下次开机恢复。
+ * 记录当前歌曲全局下标 + 当前播放位置（秒），下次开机恢复。同时把
+ * "关机前是否在播放"与**整套当前配置**（音量/循环/随机/睡眠时长/EQ/歌曲，
+ * 含所在列表名）存回**当前活跃配置槽位**——这就是"后续关机时会自动保存到
+ * 当前配置"（见 ideas_and_exps/CONFIG_SLOTS.md）。
  * 控制器未就绪时不做任何事。
  */
 void player_controller_save_last_position(void);
@@ -150,6 +153,28 @@ void player_controller_set_shuffle(bool on);
 
 /** @brief 读取当前随机播放开关（与 config_store 持久化值一致） */
 bool player_controller_get_shuffle(void);
+
+/**
+ * @brief 恢复一套配置的播放相关部分（配置槽位切换用）并立即开始播放
+ *
+ * 由 ui/config_slots 在切换配置槽位时调用，**原子**交给控制器任务执行：
+ * 循环模式 / 随机播放开关 / 随机序列位置 / 当前歌曲一起生效后再播放，避免
+ * UI 线程分几次 set 时被其它切歌命令插队（"用旧循环模式播新列表"）。
+ *
+ * 随机播放且 shuffle_valid 时的恢复策略：
+ *   - 随机列表目录重设为**目标歌曲所在目录**，保存的随机位置能映射到该目录内
+ *     的歌曲时精确恢复（回到同一首歌、同一序列）；
+ *   - 位置无法映射（播放列表数据变了）→ "重新随机定位到目标歌曲"。
+ *
+ * @param loop          循环模式（越界钳到列表循环）
+ * @param shuffle       随机播放开关
+ * @param shuffle_valid 随机序列位置是否有效
+ * @param shuffle_pos   随机序列逻辑位置（shuffle_valid 时有效）
+ * @param song          目标歌曲全局下标（越界回退第一首）
+ */
+void player_controller_restore_config(player_loop_mode_t loop, bool shuffle,
+                                      bool shuffle_valid, uint64_t shuffle_pos,
+                                      uint32_t song);
 
 /** @brief 读取播放器状态快照（供前端界面刷新） */
 void player_controller_get_status(player_controller_status_t *out);

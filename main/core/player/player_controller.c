@@ -82,14 +82,27 @@ typedef enum {
     CMD_PLAY_SONG_RANDOM, /* 随机模式按指定随机位置播放（arg64=位置，不重新生成；
                              用于开机恢复随机序列现场） */
     CMD_SET_SHUFFLE,/* 设置随机播放开关（arg=0/1） */
+    CMD_RESTORE_CONFIG, /* 恢复一套配置（配置槽位切换/开机）：循环 + 随机 + 歌曲
+                           原子生效（参数见 player_cmd_msg_t::restore） */
     CMD_FINISHED,   /* 播放结束（自然播完/坏曲/无法播放，arg=mp3_player_stop_reason_t） */
     CMD_STOP,       /* 停止 */
 } player_cmd_t;
+
+/** CMD_RESTORE_CONFIG 的参数（配置槽位：一套配置的播放相关部分） */
+typedef struct {
+    uint8_t  loop;             /* 循环模式（player_loop_mode_t） */
+    bool     shuffle;          /* 随机播放开关 */
+    bool     shuffle_valid;    /* 随机位置是否有效 */
+    bool     reserved;         /* 对齐填充 */
+    uint64_t shuffle_pos;      /* 随机序列逻辑位置（shuffle_valid 时有效） */
+    uint32_t song;             /* 目标歌曲全局下标（0 = 列表第一首） */
+} player_restore_cfg_t;
 
 typedef struct {
     player_cmd_t cmd;
     uint32_t arg;    /* 通用 32 位参数 */
     uint64_t arg64;  /* 64 位参数（随机位置），仅在 CMD_PLAY_SONG_RANDOM 使用 */
+    player_restore_cfg_t restore;  /* 仅在 CMD_RESTORE_CONFIG 使用 */
 } player_cmd_msg_t;
 
 /* ---------- 播放器状态（静态变量，供前端通过 get_status 读取） ---------- */
@@ -236,6 +249,32 @@ static esp_err_t player_shuffle_ensure_dir(uint32_t dir)
                  (unsigned)dir, (unsigned)d->song_count);
     }
     return ESP_OK;
+}
+
+/* 用保存的随机位置"精确恢复"随机序列现场：把该位置映射到它所在目录内的索引。
+   成功时写入 *pos_out 并返回 true；位置越界（播放列表数据变了）返回 false，
+   调用方改为"重新随机定位"。
+   ⚠ 随机列表目录必须重设为"目标歌曲所在目录"，否则位置会按旧目录的 N 解释
+   （配置槽位切换时目标歌曲与当前随机目录毫无关系）。 */
+static bool player_shuffle_adopt_position(uint32_t song, uint64_t saved_pos,
+                                          uint64_t *pos_out)
+{
+    if (s_song_count == 0) {
+        return false;
+    }
+    uint32_t dir = player_find_dir(song);
+    if (player_shuffle_ensure_dir(dir) != ESP_OK) {
+        return false;
+    }
+    const playlist_dir_entry_t *d = playlist_dir_at(dir);
+    int32_t in_dir = shuffle_player_get_index_at(saved_pos);
+    if (in_dir < 0 || (uint32_t)in_dir >= d->song_count) {
+        return false;
+    }
+    if (pos_out != NULL) {
+        *pos_out = saved_pos;
+    }
+    return true;
 }
 
 /* 重新生成随机位置并定位到指定歌曲：
@@ -429,7 +468,13 @@ static void player_post_cmd(player_cmd_t cmd, uint32_t arg)
     if (s_queue == NULL) {
         return;
     }
-    player_cmd_msg_t m = { cmd, arg, 0 };
+    /* ⚠ 先整体清零再逐字段赋值：player_cmd_msg_t 里有会增长的联合体式字段
+       （restore），聚合初始化漏字段在 -Werror=missing-field-initializers 下
+       直接编译失败 */
+    player_cmd_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.cmd = cmd;
+    m.arg = arg;
     /* 非阻塞投递：队列满则丢弃（控制器正忙时丢掉一两条控制命令影响不大），
        避免在高频点按或切歌时阻塞调用方（LVGL 等）线程 */
     if (xQueueSend(s_queue, &m, 0) != pdTRUE) {
@@ -443,7 +488,10 @@ static void player_post_cmd64(player_cmd_t cmd, uint64_t arg64)
     if (s_queue == NULL) {
         return;
     }
-    player_cmd_msg_t m = { cmd, 0, arg64 };
+    player_cmd_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.cmd = cmd;
+    m.arg64 = arg64;
     if (xQueueSend(s_queue, &m, 0) != pdTRUE) {
         ESP_LOGW(TAG, "command queue full, drop cmd=%d", (int)cmd);
     }
@@ -479,7 +527,7 @@ static void player_cmd_pause(void)
         /* 暂停时保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置，
            开机从歌曲开头开始）；随机模式下同步保存随机位置，
            保证断点续播回到同一序列 */
-        config_store_set_last_song(s_cur_global, 0);
+        config_store_set_last_song(s_cur_global);
         if (s_shuffle) {
             config_store_set_shuffle_pos(s_shuffle_pos);
         }
@@ -492,7 +540,7 @@ static void player_cmd_pause(void)
    随机模式下同时保存随机位置（切歌后 position 已推进到新歌）。 */
 static void player_save_new_song(void)
 {
-    config_store_set_last_song(s_cur_global, 0);
+    config_store_set_last_song(s_cur_global);
     if (s_shuffle) {
         config_store_set_shuffle_pos(s_shuffle_pos);
     }
@@ -609,6 +657,61 @@ static void player_task(void *arg)
             break;
         }
         case CMD_SET_SHUFFLE: player_cmd_set_shuffle(msg.arg != 0); break;
+        case CMD_RESTORE_CONFIG: {
+            /* 配置槽位切换：把"一套配置"的播放相关部分原子恢复（循环 / 随机 /
+               随机序列位置 / 当前歌曲），并立即开始播放。
+               ⚠ 必须在控制器任务里整条执行：循环模式与随机开关是播放器内部
+               状态，若由 UI 线程分别 set_xxx（各投一条命令）再选歌，命令之间
+               可能被其它切歌命令插入，出现"用旧循环模式播新列表"的错序。 */
+            const player_restore_cfg_t *r = &msg.restore;
+
+            /* 1. 循环模式 */
+            s_loop = (r->loop <= PLAYER_LOOP_LIST) ? (player_loop_mode_t)r->loop
+                                                   : PLAYER_LOOP_LIST;
+            config_store_set_loop_mode((uint8_t)s_loop);
+
+            /* 2. 随机开关与随机序列位置（空槽位/无记录时按顺序播放） */
+            s_shuffle = r->shuffle;
+            if (s_shuffle) {
+                if (r->shuffle_valid) {
+                    s_shuffle_pos = r->shuffle_pos;
+                    s_shuffle_valid = true;
+                } else {
+                    s_shuffle_valid = false;   /* 无序列记录：下面播放时重新定位 */
+                }
+            } else {
+                s_shuffle_valid = false;
+            }
+            config_store_set_shuffle(s_shuffle);
+            if (s_shuffle && s_shuffle_valid) {
+                config_store_set_shuffle_pos(s_shuffle_pos);
+            }
+
+            /* 3. 目标歌曲（越界回退第一首）并开始播放 */
+            uint32_t song = (r->song < s_song_count) ? r->song : 0;
+            ESP_LOGI(TAG, "restore config: loop=%d shuffle=%d song=#%u",
+                     (int)s_loop, (int)s_shuffle, (unsigned)song);
+            if (s_shuffle) {
+                /* 随机模式：优先精确恢复保存的随机序列位置（回到同一首歌、
+                   同一序列）；位置无法映射（播放列表数据变了）则"重新随机
+                   定位到目标歌曲"（与列表点歌一致） */
+                uint64_t pos = 0;
+                if (r->shuffle_valid &&
+                    player_shuffle_adopt_position(song, r->shuffle_pos, &pos)) {
+                    s_shuffle_pos = pos;
+                    s_shuffle_valid = true;
+                    config_store_set_shuffle_pos(pos);
+                    player_play_global(song);
+                } else {
+                    player_shuffle_relocate(song);
+                    player_play_global(song);
+                }
+                player_save_new_song();
+            } else {
+                player_play_global(song);
+            }
+            break;
+        }
         case CMD_FINISHED: {
             /* 播放结束收口（arg = mp3_player_stop_reason_t）：
                - NATURAL：正常自然播完 → 按循环模式自动续播，清空连续坏曲计数；
@@ -654,7 +757,7 @@ static void player_task(void *arg)
             /* 停止前保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置）；
                随机模式下同步保存随机位置 */
             if (mp3_player_get_state() != MP3_STATE_IDLE) {
-                config_store_set_last_song(s_cur_global, 0);
+                config_store_set_last_song(s_cur_global);
                 if (s_shuffle) {
                     config_store_set_shuffle_pos(s_shuffle_pos);
                 }
@@ -722,11 +825,10 @@ esp_err_t player_controller_init(void)
     s_bad_skip_count = 0;   /* 每次初始化清空坏曲计数 */
 
     /* 读取上次播放歌曲（NVS 持久化），供恢复随机列表目录 / 恢复播放用。
-       ⚠ NightPlayer 原版机制：只记忆歌曲，不记忆秒数位置（开机从歌曲
-       开头开始），last_pos 已不再使用。 */
+       ⚠ NightPlayer 原版机制：**只记歌曲、不记秒数位置**（开机从歌曲开头
+       开始），故 config_store 的位置接口已没有秒数输出参数。 */
     uint32_t last_global = 0;
-    uint32_t last_pos = 0;   /* 保留接口参数，值为 0（不记忆秒数） */
-    bool has_last = config_store_get_last_song(&last_global, &last_pos);
+    bool has_last = config_store_get_last_song(&last_global);
 
     /* 关机前播放状态记忆（NVS）：false=伪关机前已暂停/停止 → 开机只恢复
        当前歌曲不自动播放，随后紧跟 CMD_PAUSE 停在暂停态；
@@ -914,6 +1016,29 @@ void player_controller_set_shuffle(bool on)
     player_post_cmd(CMD_SET_SHUFFLE, on ? 1 : 0);
 }
 
+/* 配置槽位：恢复一套配置（循环 / 随机 / 随机序列位置 / 当前歌曲）并开始播放。
+   见 player_controller.h 与 ideas_and_exps/CONFIG_SLOTS.md。 */
+void player_controller_restore_config(player_loop_mode_t loop, bool shuffle,
+                                      bool shuffle_valid, uint64_t shuffle_pos,
+                                      uint32_t song)
+{
+    if (s_queue == NULL) {
+        return;   /* 控制器未初始化（重扫/重启途中）：忽略 */
+    }
+    player_cmd_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.cmd = CMD_RESTORE_CONFIG;
+    m.restore.loop          = (uint8_t)((loop <= PLAYER_LOOP_LIST) ? loop
+                                                                  : PLAYER_LOOP_LIST);
+    m.restore.shuffle       = shuffle;
+    m.restore.shuffle_valid = shuffle_valid;
+    m.restore.shuffle_pos   = shuffle_pos;
+    m.restore.song          = song;
+    if (xQueueSend(s_queue, &m, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "command queue full, drop CMD_RESTORE_CONFIG");
+    }
+}
+
 bool player_controller_get_shuffle(void)
 {
     return s_shuffle;
@@ -926,7 +1051,7 @@ void player_controller_save_last_position(void)
     }
     /* ⚠ NightPlayer 原版机制：只记忆当前歌曲，不记忆秒数位置
        （pos 恒为 0，开机从歌曲开头开始） */
-    config_store_set_last_song(s_cur_global, 0);
+    config_store_set_last_song(s_cur_global);
     /* 记录关机前播放状态（NVS）：true=当时在播放（开机自动播放），
        false=已暂停/停止（开机只恢复当前歌曲不自动播放，避免突然出声）。
        与当前歌曲一起保存，供 player_controller_init 恢复。 */
@@ -935,6 +1060,12 @@ void player_controller_save_last_position(void)
     if (s_shuffle) {
         config_store_set_shuffle_pos(s_shuffle_pos);
     }
+    /* 配置槽位：记录"离开时所在列表名"后把当前整套配置存回活跃槽位
+       （关机时自动保存到当前配置，见 ideas_and_exps/CONFIG_SLOTS.md）。
+       ⚠ 必须在上面 set_last_song / set_shuffle_pos 之后调用，否则存下去的是
+       旧位置 */
+    config_store_set_slot_list_name(s_dir_name);
+    config_store_save_active_slot();
     ESP_LOGI(TAG, "save last position: song #%u was_playing=%d%s",
              (unsigned)s_cur_global,
              (int)(mp3_player_get_state() == MP3_STATE_PLAYING),

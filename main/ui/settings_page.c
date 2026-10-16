@@ -6,6 +6,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/utils/sleep_timer.h"
+#include "ui/config_slot_popup.h"
 #include "ui/eq_popup.h"
 #include "ui/list_common.h"
 #include "ui/player_ticker.h"
@@ -72,9 +73,10 @@ static lv_obj_t *s_shuffle_status = NULL;  /* 顺序播放/随机播放 */
 static lv_obj_t *s_sleep_status  = NULL;   /* 睡眠定时：OFF / 剩余 MM:SS */
 static lv_obj_t *s_eq_status     = NULL;   /* EQ：当前 .eq 文件名 / 无 EQ */
 static lv_obj_t *s_rg_status     = NULL;   /* 回放增益：±x.x dB / 无增益 / 关闭 */
+static lv_obj_t *s_slot_status   = NULL;   /* 配置切换：当前配置 SAVE1~SAVE4 */
 
 /* ------------------------------------------------------------------ */
-/* 回放增益开关（第 8 格）                                              */
+/* 回放增益开关（第 5 格）                                              */
 /* ------------------------------------------------------------------ */
 
 /* 增益数值的文字色：
@@ -173,6 +175,20 @@ static void settings_refresh_eq(void)
     } else {
         lv_label_set_text(s_eq_status, "无 EQ");
     }
+}
+
+/* 配置切换格子状态文字：显示当前活跃配置槽位（SAVE1~SAVE4）。
+   数据源是 config_store 的活跃槽位索引——config_store_switch_slot 会通知
+   变更回调，本页文字随之刷新（不需要额外注册回调）。 */
+static void settings_refresh_slot(void)
+{
+    if (s_slot_status == NULL) {
+        return;
+    }
+    char buf[16];
+    snprintf(buf, sizeof(buf), "SAVE%u",
+             (unsigned)(config_store_get_active_slot() + 1u));
+    lv_label_set_text(s_slot_status, buf);
 }
 
 /* 自动息屏超时（config_store 配置）：不在此页展示，后续放独立的不常用
@@ -285,6 +301,8 @@ static void settings_config_changed_cb(void *ctx)
     settings_refresh_shuffle();
     settings_refresh_sleep();
     settings_refresh_eq();
+    /* 配置槽位：切换配置（含切换后的循环/随机/EQ 同步）后刷新本页 */
+    settings_refresh_slot();
     /* 回放增益：开关变化需立即刷新文字；数值用最近一次 tick 读到的曲目数据 */
     player_controller_status_t st;
     player_controller_get_status(&st);
@@ -400,6 +418,17 @@ static void eq_cell_cb(lv_event_t *e)
         return;
     }
     eq_popup_toggle(s_settings_page);
+}
+
+/* 配置切换格子：点击打开配置槽位选择弹窗（SAVE1~SAVE4）。
+   切换与应用（音量/EQ/睡眠定时/播放器）全部在弹窗模块内完成
+   （见 ui/config_slot_popup.c → core/storage/config_slots.c） */
+static void slot_cell_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+    config_slot_popup_toggle(s_settings_page);
 }
 
 /* ------------------------------------------------------------------ */
@@ -565,23 +594,20 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     lv_obj_add_event_cb(sleep_cell, sleep_cell_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(sleep_cell, sleep_cell_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* 格子 4~6：预留空位 */
-    for (int i = 0; i < 3; i++) {
-        settings_cell_create(grid);
-    }
-
-    /* 格子 7（左下角）：EQ 预设选择（FUTURE_PLAN 第 10 点）。
-       图标固定 "EQ" 字样；点击弹出选择列表（无 EQ / 扫描 .musicfx） */
+    /* 格子 4（左中）：EQ 预设选择（FUTURE_PLAN 第 10 点）。
+       图标固定 "EQ" 字样；点击弹出选择列表（无 EQ / 扫描 .musicfx）。
+       ⚠ 2026-11 从第 7 格（左下）移到第 4 格（左中）：第 9 格要留给"配置切换" */
     lv_obj_t *eq_cell = settings_cell_create(grid);
     settings_icon_label_create(eq_cell, "EQ", true);
     s_eq_status = settings_status_label_create(eq_cell, false);
     settings_refresh_eq();
     lv_obj_add_event_cb(eq_cell, eq_cell_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 格子 8（中下）：回放增益总开关。
+    /* 格子 5（中中）：回放增益总开关。
        文字图标用状态栏同款小字体排两行 "回放\n增益"；下方状态文字显示
        当前增益（"−9.1 dB" / "+3.2 dB"）、"无增益"（该曲无 .npd 元数据）
-       或"关闭"（总开关关闭），点击切换开关 */
+       或"关闭"（总开关关闭），点击切换开关。
+       ⚠ 2026-11 从第 8 格（中下）移到第 5 格（中中） */
     lv_obj_t *rg_cell = settings_cell_create(grid);
     settings_icon_label_create(rg_cell, "回放\n增益", false);
     /* ⚠ 状态文字必须用系统字体（ascii=false）："关闭"/"无增益"是中文 */
@@ -599,8 +625,20 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     /* 订阅播放状态轮询：切歌后刷新增益数值 */
     player_ticker_subscribe(settings_player_tick_cb, NULL);
 
-    /* 格子 9（右下角）：预留空位 */
-    settings_cell_create(grid);
+    /* 格子 6~8：预留空位 */
+    for (int i = 0; i < 3; i++) {
+        settings_cell_create(grid);
+    }
+
+    /* 格子 9（右下角）：配置切换（NightPlayer「配置插槽」，2026-11）。
+       图标用两行文字"配置\n切换"（系统字体不含 PUA 图标字形，只能排文字，
+       与回放增益格同理）；下方状态文字显示当前活跃配置 SAVE1~SAVE4。
+       点击弹出 4 个槽位的选择列表（见 ui/config_slot_popup.c） */
+    lv_obj_t *slot_cell = settings_cell_create(grid);
+    settings_icon_label_create(slot_cell, "配置\n切换", false);
+    s_slot_status = settings_status_label_create(slot_cell, false);
+    settings_refresh_slot();
+    lv_obj_add_event_cb(slot_cell, slot_cell_cb, LV_EVENT_CLICKED, NULL);
 
     /* 每秒刷新睡眠剩余时间（分:秒） */
     lv_timer_create(sleep_status_timer_cb, SLEEP_REFRESH_MS, NULL);
@@ -608,6 +646,7 @@ lv_obj_t *settings_page_create(lv_obj_t *tv)
     /* 订阅配置变更：其它入口修改配置（如通知栏亮度）时同步本页显示 */
     config_store_register_cb(settings_config_changed_cb, NULL);
 
-    ESP_LOGI(TAG, "settings page created (grid: loop/shuffle/sleep timer/EQ/replay gain)");
+    ESP_LOGI(TAG, "settings page created (grid: loop/shuffle/sleep timer/EQ/"
+                  "replay gain/config slot)");
     return page;
 }

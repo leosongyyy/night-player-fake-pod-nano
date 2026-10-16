@@ -144,6 +144,45 @@ deep_worker 栈保持 **8KB**（实测 HWM 约 7.4KB，够用）。⚠ 曾试图
 `esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）。
 有 → 栈必须内部 RAM，或把这段委托给内部栈任务（deep_worker）。
 
+### 2.5 关缓存的第二个禁区：**中断回调的代码**也必须在 IRAM
+
+关缓存不只影响"栈在 PSRAM"的任务——**代码本身在 flash 里**同样致命：缓存关掉
+后 CPU 取指失败，报的是
+
+```
+Guru Meditation Error: Core 0 panic'ed (Cache error).
+Cache disabled but cached memory region accessed
+```
+
+**实测崩溃（2026-11，配置插槽功能测试中复现）**：切配置槽位（NVS 写 flash）
+时命中 `performance_monitor` 的 500ms 频率采样点：
+
+```
+lvgl_port_task → lv_indev_read → slot_popup_row_cb → config_slots_switch
+  → config_store_switch_slot → cfg_write_u8 → nvs_set_u8 → esp_flash_write   ← 关缓存中
+      ↑ systimer 中断打进：timer_alarm_isr → timer_alarm_handler
+  → cpu_freq_isr_cb   ← PC 在 flash（0x4204c094）→ panic
+```
+
+**根因**：该回调用 `.dispatch_method = ESP_TIMER_ISR` 创建，**在 systimer 中断里
+直接执行**；而 systimer 中断注册时带 `ESP_INTR_FLAG_IRAM`
+（`esp_timer_impl_systimer.c`）——`spi_flash_disable_interrupts_caches_and_other_cpu()`
+里的 `esp_intr_noniram_disable()` **只屏蔽"非 IRAM"中断，屏蔽不掉它**。于是任何
+flash 操作期间它照常触发；回调没加 `IRAM_ATTR`（在 flash 里）→ 取指失败。
+
+**修法**：给回调加 `IRAM_ATTR`（`main/core/utils/performance_monitor.c` 的
+`cpu_freq_isr_cb`，它只调 `esp_clk_cpu_freq()`，后者本身就是 IRAM_ATTR，安全）。
+验证：`nm` 里该符号从 `0x4204c094`（flash）变成 `0x4037e04c`（IRAM）。
+
+⚠ **两条规则**：
+1. 凡是 `ESP_TIMER_ISR` / 任何 ISR 回调，**一律 `IRAM_ATTR`**，且只能调用
+   IRAM 安全函数（`ESP_LOGx`、`malloc`、`lv_*`、`nvs_*` 都不行）；
+2. **触发概率与 flash 写密度成正比**（单次写窗口约 1~10ms、采样周期 500ms →
+   单次约 0.2%~2%）。本次是"切配置槽位"把 NVS 写密度抬高后才暴露的——**新增
+   频繁写 NVS/flash 的功能时，要回头审一遍 ISR 回调是否都在 IRAM**。
+   该崩溃只在 `CONFIG_PERFORMANCE_MONITOR=y` 的构建（debug / releasecandidate）
+   存在，release 不带该模块故掩盖了这个 bug。
+
 ## 3. 迁移后实测
 
 ```

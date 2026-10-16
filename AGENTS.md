@@ -185,7 +185,12 @@ main/
       player_controller.h/.c  # 播放控制器（Core0 独立后台服务：位置维护/播放控制/循环/随机/坏曲事件）
       shuffle_player.h/.c     # 无限确定性随机播放列表（分块 + 确定性洗牌）
     storage/                # 播放器数据持久化
-      config_store.h/.c     # 用户配置存储（NVS：音量/亮度/循环/随机/睡眠/息屏超时/EQ/上次位置等）
+      config_store.h/.c     # 用户配置存储（NVS：音量/亮度/循环/随机/睡眠/息屏超时/EQ/上次位置等）。
+                            # ⚠ 内含**配置槽位层**（SAVE1~SAVE4，2026-11）：音量/循环/随机+随机位置/
+                            #   睡眠定时时长/EQ/当前歌曲 属于"当前配置"，随活跃槽位整体切换；应用侧
+                            #   get_xxx/set_xxx 签名与语义不变（无感），见 ideas_and_exps/CONFIG_SLOTS.md
+      config_slots.h/.c     # 配置槽位切换的**运行时应用**：音量/EQ/睡眠定时落硬件，播放部分交给
+                            #   player_controller_restore_config（原子恢复循环/随机/歌曲并播放）
       playlist.h/.c         # 播放列表只读解析（pldata 内存映射 → 目录/歌曲/字符串）
       playlist_store.h/.c   # 播放列表存储（pldata 分区"整体重写 + 头部 commit"语义）
       playlist_builder.h/.c # 播放列表构建器（SD 递归扫描 → PLST 格式 → 写 pldata）
@@ -223,12 +228,13 @@ main/
     dir_list.h/.c           # 目录/歌单列表页（virtual_list，/sdcard 头部 + 行图标）
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
     now_playing.h/.c        # 正在播放页（全屏封面 + 标题栏 + 控制栏/进度条，点击封面隐藏呼出）
-    settings_page.h/.c      # 播放设置页（九宫格：循环/随机/睡眠定时/EQ/回放增益开关）
+    settings_page.h/.c      # 播放设置页（九宫格：1循环/2随机/3睡眠定时/4 EQ/5回放增益/9配置切换，6~8 预留）
     settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/按键帮助/关于+开发者选项/重新扫描）；**分级懒加载**：外壳+根页面首次打开时建（44ms），子页首次进入才建，不占开机路径（见 DONE_PLANS #44）
     notification_panel.h/.c # 下拉控制中心（电池/亮度/音量竖条/睡眠开关/设置入口，LVGL 事件驱动）
     key_handler.h/.c        # 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）
     player_ticker.h/.c      # 播放器状态轮询刷新 + 坏曲事件 toast 拉取
     eq_popup.h/.c           # EQ 预设选择弹窗（列出 .musicfx 下 .eq 文件）
+    config_slot_popup.h/.c  # 配置槽位选择弹窗（SAVE1~SAVE4，活跃槽位高亮，见 CONFIG_SLOTS.md）
     toast.h/.c              # 全局 Toast 提示（底部弹出 + 环形倒计时，顶层透传）
     list_common.h/.c        # 列表页公共小工具
 components/

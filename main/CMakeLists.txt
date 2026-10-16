@@ -12,6 +12,7 @@ set(MAIN_SRCS
     "core/storage/playlist_builder.c"
     "core/storage/playlist.c"
     "core/storage/config_store.c"
+    "core/storage/config_slots.c"
     "core/hardware/audio/cs43131.c"
     "core/hardware/audio/mp3_player.c"
     "core/hardware/audio/eq.c"
@@ -48,6 +49,7 @@ set(MAIN_SRCS
     "ui/settings_menu.c"
     "ui/settings_page.c"
     "ui/eq_popup.c"
+    "ui/config_slot_popup.c"
     "ui/toast.c")
 
 # 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR

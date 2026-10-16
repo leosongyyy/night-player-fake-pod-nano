@@ -32,11 +32,22 @@ static const char *TAG = "config_store";
 #define KEY_TOUCH_TEST       "touchtest"
 #define KEY_WAS_PLAYING      "was_play"
 #define KEY_LAST_GLOBAL      "last_glob"
-#define KEY_LAST_POS         "last_pos"
 #define KEY_LAST_VALID       "last_valid"
+/* ⚠ 旧键 "last_pos"（播放秒数）已废弃：NightPlayer 机制只记"当前歌曲"，秒数
+   位置恒为 0，本项目**不读取也不写入**该键（历史值 0，留着无害） */
 #define KEY_EQ_NAME          "eqname"
 #define KEY_EQ_DATA          "eqdata"
 #define KEY_REPLAY_GAIN      "replaygain"   /* 回放增益总开关：0=关，1=开 */
+
+/* ---------- 配置槽位（SAVE1~SAVE4，见 config_store.h 文件头"配置槽位"） ----------
+   ⚠ 上面那批"可切换字段"的旧全局键**保留不删**：活跃槽位从未保存过时仍读写
+   它们（升级兼容，见 s_slot_active）；首次保存槽位后全局键冻结，后续以槽位为准。
+   槽位内字段（音量/循环/随机/随机位置/睡眠时长/EQ/最后歌曲）不再单独写全局键，
+   避免一次 set 两次 nvs_commit（每槽位整块 blob 一次写完）。 */
+#define KEY_ACTIVE_SLOT      "slot_active"                   /* 活跃槽位下标 */
+#define SLOT_KEY_PREFIX      "slot"                          /* 槽位 blob 前缀：slot0..slot3 */
+#define SLOT_BLOB_VERSION    1u                              /* 槽位 blob 结构版本（布局改了要 +1，
+                                                               旧版本 blob 自动视为空槽位） */
 
 /* 变更回调容量（设置页 + 通知栏等，够用） */
 #define CONFIG_STORE_MAX_CB  4
@@ -46,15 +57,41 @@ static const char *TAG = "config_store";
 static bool s_inited = false;
 static nvs_handle_t s_nvs = 0;
 
-static uint8_t  s_volume      = CONFIG_STORE_VOLUME_DEFAULT;
+/* ========== 可切换字段（属于"当前配置"，随配置槽位整体切换） ==========
+
+   ⚠ 这一块是"配置插槽"的核心：下面这些值不再各自独立持久化，而是打包进
+   "当前活跃槽位"的 blob（见 config_store_save_active_slot）。应用侧照旧用
+   get_xxx / set_xxx 访问，完全无感（见 config_store.h 文件头说明）。 */
+typedef struct {
+    uint8_t  volume;                /* 音量档位（0~30，0=静音） */
+    uint8_t  loop_mode;             /* 循环模式（player_loop_mode_t 取值） */
+    bool     shuffle;               /* 随机播放开关 */
+    bool     shuf_pos_valid;        /* 随机序列位置是否有记录 */
+    uint64_t shuf_pos;              /* 随机序列逻辑位置（uint64 无限序列） */
+    uint32_t sleep_default_min;     /* 睡眠定时时长（分钟；0=未定时） */
+    bool     last_valid;            /* 是否有"最后播放歌曲"记录 */
+    uint32_t last_global;           /* 最后播放歌曲全局下标 */
+    bool     eq_valid;              /* 是否选择了 EQ 预设 */
+    char     eq_name[EQ_FILE_NAME_MAX];   /* .eq 文件名（不含路径） */
+    eq_preset_t eq_data;            /* 解析后的 EQ 参数（eq_valid 时有效） */
+} config_live_t;
+
+static config_live_t s_live = {
+    .volume            = CONFIG_STORE_VOLUME_DEFAULT,
+    .loop_mode         = CONFIG_STORE_LOOP_DEFAULT,
+    .shuffle           = false,
+    .shuf_pos_valid    = false,
+    .shuf_pos          = 0,
+    .sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN,
+    .last_valid        = false,
+    .last_global       = 0,
+    .eq_valid          = false,
+    .eq_name           = "",
+};
+
+/* ========== 不可切换字段（全局共用一份，不随配置槽位切换） ========== */
+
 static uint8_t  s_brightness  = CONFIG_STORE_BRIGHTNESS_DEFAULT;
-static uint8_t  s_loop_mode   = CONFIG_STORE_LOOP_DEFAULT;
-static bool     s_shuffle     = false;
-/* 随机播放位置（uint64 拆高/低 32 位存储；valid 标志区分"无记录"） */
-static uint32_t s_shuf_pos_hi = 0;
-static uint32_t s_shuf_pos_lo = 0;
-static bool     s_shuf_pos_valid = false;
-static uint32_t s_sleep_def   = CONFIG_STORE_SLEEP_DEFAULT_MIN;
 static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
@@ -72,18 +109,54 @@ static bool     s_touch_test  = (CONFIG_STORE_TOUCH_TEST_DEFAULT != 0);
 /* 关机前播放状态：默认 true（无记录时开机自动播放，保持旧行为） */
 static bool     s_was_playing = true;
 /* 回放增益总开关（默认开）：关=所有歌按 0dB 播放，开=按 .npd 元数据增益。
-   设置页第 8 格切换并持久化；控制器轮询到变化后重新应用（见
+   设置页第 5 格切换并持久化；控制器轮询到变化后重新应用（见
    player_controller 的开关同步），故通知回调让设置页立即刷新文本 */
 static bool     s_replay_gain = (CONFIG_STORE_REPLAY_GAIN_DEFAULT != 0);
-static uint32_t s_last_global = 0;
-static uint32_t s_last_pos    = 0;
-static bool     s_last_valid  = false;
 
-/* EQ 预设选择（FUTURE_PLAN 第 10 点）：文件名 + 解析参数，开机直接恢复
-   DSP 状态（不依赖 SD 卡上的 .eq 文件仍存在）；无 EQ 时 s_eq_name[0] = 0 */
-static char        s_eq_name[EQ_FILE_NAME_MAX] = "";
-static bool        s_eq_data_valid = false;
-static eq_preset_t s_eq_data;   /* 仅在 s_eq_data_valid 时有意义 */
+/* ========== 配置槽位状态 ========== */
+
+/**
+ * 单个槽位的 NVS blob 布局（POD，直接 nvs_set_blob / nvs_get_blob）
+ *
+ * ⚠ 只放**纯数据**：eq_preset_t 是固定布局的纯数据（128 字节），可整块存；
+ *   字符串用定长数组。sizeof 见文件末尾的 _Static_assert 兜底（改动布局要
+ *   同步 bump SLOT_BLOB_VERSION，旧 blob 会被当作空槽位忽略）。
+ */
+typedef struct {
+    uint32_t version;                       /* = SLOT_BLOB_VERSION，版本不符视为空槽位 */
+    uint32_t last_global;                   /* 最后播放歌曲全局下标 */
+    uint32_t sleep_default_min;             /* 睡眠定时时长（分钟） */
+    uint64_t shuffle_pos;                   /* 随机序列逻辑位置 */
+    uint8_t  volume;                        /* 音量档位 0~30 */
+    uint8_t  loop_mode;                     /* 循环模式 */
+    uint8_t  shuffle;                       /* 随机开关 0/1 */
+    uint8_t  shuffle_pos_valid;             /* 随机位置有效 0/1 */
+    uint8_t  last_valid;                    /* 最后歌曲记录有效 0/1 */
+    uint8_t  eq_valid;                      /* 有 EQ 预设 0/1 */
+    uint8_t  eq_band_count;                 /* EQ 段数（与 eq_valid 冗余，便于校验） */
+    uint8_t  reserved;                      /* 对齐填充（显式写出，避免结构体隐式填充差异） */
+    char     eq_name[EQ_FILE_NAME_MAX];     /* .eq 文件名 */
+    eq_preset_t eq_data;                    /* EQ 参数（128B） */
+    char     last_list_name[CONFIG_STORE_SLOT_NAME_MAX];  /* 最后歌曲所在目录/歌单名
+                                                              （只用于 UI 显示 SAVE1 <列表名>） */
+} config_slot_blob_t;
+
+_Static_assert(sizeof(config_slot_blob_t) < 512,
+               "slot blob too large for NVS (24KB partition, 4 slots)");
+/* 4 个槽位 + 全局键必须能装进 nvs 分区（24KB，留足余量避免半写） */
+_Static_assert(sizeof(config_slot_blob_t) * CONFIG_STORE_SLOT_COUNT < 4096,
+               "all config slots must fit comfortably in the 24KB nvs partition");
+
+/* 各槽位已读到内存的 blob（开机 lazy 读取并缓存；NULL/version 不符 = 空槽位）。
+   ⚠ 只缓存"本会话读过的槽位"，最多 4 份 × ~320B ≈ 1.3KB，栈外的 .bss 常驻。 */
+static config_slot_blob_t s_slot_cache[CONFIG_STORE_SLOT_COUNT];
+static bool               s_slot_cache_valid[CONFIG_STORE_SLOT_COUNT] = { false };
+
+/* 当前活跃槽位下标（0 起）与其内容是否已保存过。
+   s_slot_active_saved=false 表示"还没落过盘"——此时可切换字段仍写旧全局键
+   （升级兼容），首次保存后冻结。 */
+static uint32_t s_slot_active = 0;
+static bool     s_slot_active_saved = false;
 
 /* 变更回调表 */
 typedef struct {
@@ -93,6 +166,136 @@ typedef struct {
 
 static config_cb_entry_t s_cbs[CONFIG_STORE_MAX_CB];
 static uint8_t s_cb_count = 0;
+
+/* ------------------------------------------------------------------ */
+/* 内部辅助                                                            */
+/* ------------------------------------------------------------------ */
+
+/* 槽位 blob 的 NVS 键名（"slot0".."slot3"；NVS 键名以 '\0' 结尾且 ≤15 字符） */
+static void slot_key(char *buf, size_t size, uint32_t idx)
+{
+    snprintf(buf, size, "%s%u", SLOT_KEY_PREFIX, (unsigned)idx);
+}
+
+/* 把内存中的可切换字段打包成槽位 blob（含 UI 显示的列表名快照） */
+static void slot_pack(config_slot_blob_t *b, const char *list_name)
+{
+    memset(b, 0, sizeof(*b));
+    b->version           = SLOT_BLOB_VERSION;
+    b->last_global       = s_live.last_global;
+    b->sleep_default_min = s_live.sleep_default_min;
+    b->shuffle_pos       = s_live.shuf_pos;
+    b->volume            = s_live.volume;
+    b->loop_mode         = s_live.loop_mode;
+    b->shuffle           = s_live.shuffle ? 1u : 0u;
+    b->shuffle_pos_valid = s_live.shuf_pos_valid ? 1u : 0u;
+    b->last_valid        = s_live.last_valid ? 1u : 0u;
+    b->eq_valid          = s_live.eq_valid ? 1u : 0u;
+    b->eq_band_count     = s_live.eq_valid ? s_live.eq_data.band_count : 0u;
+    if (s_live.eq_valid) {
+        snprintf(b->eq_name, sizeof(b->eq_name), "%s", s_live.eq_name);
+        b->eq_data = s_live.eq_data;
+    }
+    if (list_name != NULL) {
+        snprintf(b->last_list_name, sizeof(b->last_list_name), "%s", list_name);
+    }
+}
+
+/* 把槽位 blob 解包进内存可切换字段（切换槽位/开机加载时） */
+static void slot_unpack(const config_slot_blob_t *b)
+{
+    s_live.last_global       = b->last_global;
+    s_live.sleep_default_min = b->sleep_default_min;
+    s_live.shuf_pos          = b->shuffle_pos;
+    s_live.volume            = b->volume;
+    s_live.loop_mode         = b->loop_mode;
+    s_live.shuffle           = (b->shuffle != 0);
+    s_live.shuf_pos_valid    = (b->shuffle_pos_valid != 0);
+    s_live.last_valid        = (b->last_valid != 0);
+    s_live.eq_valid          = (b->eq_valid != 0) &&
+                               (b->eq_band_count > 0) &&
+                               (b->eq_band_count <= EQ_MAX_BANDS);
+    s_live.eq_name[0]        = '\0';
+    memset(&s_live.eq_data, 0, sizeof(s_live.eq_data));
+    if (s_live.eq_valid) {
+        snprintf(s_live.eq_name, sizeof(s_live.eq_name), "%s", b->eq_name);
+        s_live.eq_data = b->eq_data;
+    }
+    /* 音量/循环模式做一次范围防御（手改 NVS / 旧数据） */
+    if (s_live.volume > CONFIG_STORE_VOLUME_MAX) {
+        s_live.volume = CONFIG_STORE_VOLUME_MAX;
+    }
+    if (s_live.loop_mode > 2u) {   /* player_loop_mode_t 最大 LOOP_LIST=2 */
+        s_live.loop_mode = CONFIG_STORE_LOOP_DEFAULT;
+    }
+}
+
+/* 把槽位内容复位为"出厂默认 + 无位置记录"（切到空槽位时用） */
+static void slot_apply_defaults(void)
+{
+    s_live.volume            = CONFIG_STORE_VOLUME_DEFAULT;
+    s_live.loop_mode         = CONFIG_STORE_LOOP_DEFAULT;
+    s_live.shuffle           = false;
+    s_live.shuf_pos_valid    = false;
+    s_live.shuf_pos          = 0;
+    s_live.sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
+    s_live.last_valid        = false;
+    s_live.last_global       = 0;
+    s_live.eq_valid          = false;
+    s_live.eq_name[0]        = '\0';
+    memset(&s_live.eq_data, 0, sizeof(s_live.eq_data));
+}
+
+/* 从 NVS 读槽位 blob 到缓存；返回 true = 有效槽位（含版本校验） */
+static bool slot_cache_load(uint32_t idx)
+{
+    if (idx >= CONFIG_STORE_SLOT_COUNT) {
+        return false;
+    }
+    if (s_slot_cache_valid[idx]) {
+        return true;
+    }
+    if (s_nvs == 0) {
+        return false;
+    }
+    char key[16];
+    slot_key(key, sizeof(key), idx);
+    config_slot_blob_t b;
+    size_t len = sizeof(b);
+    if (nvs_get_blob(s_nvs, key, &b, &len) != ESP_OK) {
+        return false;   /* 空槽位（键不存在） */
+    }
+    if (len != sizeof(b) || b.version != SLOT_BLOB_VERSION) {
+        ESP_LOGW(TAG, "slot %u blob incompatible (len=%u ver=%u), treat as empty",
+                 (unsigned)idx, (unsigned)len, (unsigned)b.version);
+        return false;
+    }
+    s_slot_cache[idx] = b;
+    s_slot_cache_valid[idx] = true;
+    return true;
+}
+
+/* 把槽位 blob 写入 NVS 并更新缓存 */
+static void slot_cache_store(uint32_t idx, const config_slot_blob_t *b)
+{
+    if (idx >= CONFIG_STORE_SLOT_COUNT || s_nvs == 0) {
+        return;
+    }
+    char key[16];
+    slot_key(key, sizeof(key), idx);
+    esp_err_t err = nvs_set_blob(s_nvs, key, b, sizeof(*b));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob(%s) failed: %s", key, esp_err_to_name(err));
+        return;
+    }
+    err = nvs_commit(s_nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
+        return;
+    }
+    s_slot_cache[idx] = *b;
+    s_slot_cache_valid[idx] = true;
+}
 
 /* ------------------------------------------------------------------ */
 /* NVS 读写辅助                                                        */
@@ -189,6 +392,73 @@ static void config_notify(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* 槽位持久化辅助                                                      */
+/* ------------------------------------------------------------------ */
+
+/* 前向声明：下面的"旧键兼容写入"会用到 */
+void config_store_save_active_slot(void);
+
+/**
+ * @brief 可切换字段改动后的统一持久化出口（所有 set_xxx 末尾调用）
+ *
+ * 两条路（见 config_store.h 文件头"配置槽位"）：
+ *   1. 槽位从未保存过（升级上来的机器）→ 额外写一份旧全局键，保持与旧版本
+ *      固件/旧 NVS 布局的兼容；
+ *   2. 一律把当前配置整块写回当前活跃槽位（同一 blob 覆盖写，NVS 分页复用）。
+ */
+static void slot_persist_live(void)
+{
+    if (!s_slot_active_saved) {
+        /* 兼容层：首次保存槽位之前，把可切换字段同步写进旧全局键 */
+        cfg_write_u8(KEY_VOLUME, s_live.volume);
+        cfg_write_u8(KEY_LOOP_MODE, s_live.loop_mode);
+        cfg_write_u8(KEY_SHUFFLE, s_live.shuffle ? 1u : 0u);
+        cfg_write_u32(KEY_SLEEP_DEFAULT, s_live.sleep_default_min);
+        cfg_write_u32(KEY_LAST_GLOBAL, s_live.last_global);
+        /* ⚠ 秒数位置不保存（NightPlayer 机制：只记"当前歌曲"，开机从歌
+           曲开头开始）——旧键 last_pos 保持不写，其历史值为 0 */
+        cfg_write_u8(KEY_LAST_VALID, s_live.last_valid ? 1u : 0u);
+        if (s_live.shuf_pos_valid) {
+            cfg_write_u32(KEY_SHUFFLE_POS_HI, (uint32_t)(s_live.shuf_pos >> 32));
+            cfg_write_u32(KEY_SHUFFLE_POS_LO, (uint32_t)(s_live.shuf_pos & 0xFFFFFFFFu));
+            cfg_write_u8(KEY_SHUFFLE_POS_VAL, 1u);
+        } else {
+            cfg_write_u8(KEY_SHUFFLE_POS_VAL, 0u);
+        }
+        if (s_live.eq_valid) {
+            cfg_write_str(KEY_EQ_NAME, s_live.eq_name);
+            cfg_write_blob(KEY_EQ_DATA, &s_live.eq_data, sizeof(s_live.eq_data));
+        } else {
+            cfg_erase_key(KEY_EQ_NAME);
+            cfg_erase_key(KEY_EQ_DATA);
+        }
+    }
+    config_store_save_active_slot();
+}
+
+/* 载入指定槽位到内存（含"空槽位 → 出厂默认"分支）。
+   调用方负责随后 config_notify()（本函数不改活跃下标）。
+   log_why：日志前缀，用于区分"切槽位时载入新槽位"与其它时机，便于串口排查。 */
+static void slot_load_into_live(uint32_t idx, bool mark_saved, const char *log_why)
+{
+    if (slot_cache_load(idx)) {
+        slot_unpack(&s_slot_cache[idx]);
+        s_slot_active_saved = mark_saved;
+        ESP_LOGI(TAG, "%s: SAVE%u -> live (vol=%u loop=%u shuffle=%d sleep=%u min "
+                      "song=%s(%u))",
+                 log_why, (unsigned)(idx + 1u), (unsigned)s_live.volume,
+                 (unsigned)s_live.loop_mode, (int)s_live.shuffle,
+                 (unsigned)s_live.sleep_default_min,
+                 s_live.last_valid ? "yes" : "no", (unsigned)s_live.last_global);
+    } else {
+        slot_apply_defaults();
+        s_slot_active_saved = false;   /* 空槽位：仍处于兼容态（写旧全局键） */
+        ESP_LOGI(TAG, "%s: SAVE%u empty -> defaults", log_why,
+                 (unsigned)(idx + 1u));
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* 对外接口                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -222,20 +492,20 @@ void config_store_init(void)
        音量：范围 0~30 档（0=静音，1~30 线性映射 20%~80%）。旧版本存的是
        0~100 百分比，读出的值若超范围按"20%~80% → 1~30 档"线性迁移并写回，
        保证老设备升级后音量平滑过渡（开发期升级）。 */
-    if (nvs_get_u8(s_nvs, KEY_VOLUME, &s_volume) != ESP_OK) {
-        s_volume = CONFIG_STORE_VOLUME_DEFAULT;
-    } else if (s_volume > CONFIG_STORE_VOLUME_MAX) {
-        uint8_t old_pct = s_volume;   /* 旧版本存储的 0~100 百分比 */
+    if (nvs_get_u8(s_nvs, KEY_VOLUME, &s_live.volume) != ESP_OK) {
+        s_live.volume = CONFIG_STORE_VOLUME_DEFAULT;
+    } else if (s_live.volume > CONFIG_STORE_VOLUME_MAX) {
+        uint8_t old_pct = s_live.volume;   /* 旧版本存储的 0~100 百分比 */
         if (old_pct == 0) {
-            s_volume = CONFIG_STORE_VOLUME_MIN;
+            s_live.volume = CONFIG_STORE_VOLUME_MIN;
         } else if (old_pct <= 20) {
-            s_volume = 1;             /* 旧 1~20% 全部归到最小档 1（原配置下几乎无声） */
+            s_live.volume = 1;             /* 旧 1~20% 全部归到最小档 1（原配置下几乎无声） */
         } else if (old_pct >= 80) {
-            s_volume = CONFIG_STORE_VOLUME_MAX;
+            s_live.volume = CONFIG_STORE_VOLUME_MAX;
         } else {
-            s_volume = (uint8_t)(((uint32_t)(old_pct - 20) * 29u / 60u) + 1u);
+            s_live.volume = (uint8_t)(((uint32_t)(old_pct - 20) * 29u / 60u) + 1u);
         }
-        cfg_write_u8(KEY_VOLUME, s_volume);   /* 写回迁移结果，下次直接读到新档位 */
+        cfg_write_u8(KEY_VOLUME, s_live.volume);   /* 写回迁移结果，下次直接读到新档位 */
     }
     if (nvs_get_u8(s_nvs, KEY_BRIGHTNESS, &s_brightness) != ESP_OK) {
         s_brightness = CONFIG_STORE_BRIGHTNESS_DEFAULT;
@@ -245,31 +515,34 @@ void config_store_init(void)
     if (s_brightness < CONFIG_STORE_BRIGHTNESS_MIN) {
         s_brightness = CONFIG_STORE_BRIGHTNESS_MIN;
     }
-    if (nvs_get_u8(s_nvs, KEY_LOOP_MODE, &s_loop_mode) != ESP_OK) {
-        s_loop_mode = CONFIG_STORE_LOOP_DEFAULT;
+    if (nvs_get_u8(s_nvs, KEY_LOOP_MODE, &s_live.loop_mode) != ESP_OK) {
+        s_live.loop_mode = CONFIG_STORE_LOOP_DEFAULT;
     }
     uint8_t shuffle = 0;
     if (nvs_get_u8(s_nvs, KEY_SHUFFLE, &shuffle) != ESP_OK) {
-        s_shuffle = false;
+        s_live.shuffle = false;
     } else {
-        s_shuffle = (shuffle != 0);
+        s_live.shuffle = (shuffle != 0);
     }
     /* 随机播放位置：valid 标志为 1 才读取高/低 32 位 */
     uint8_t shuf_pos_valid = 0;
     if (nvs_get_u8(s_nvs, KEY_SHUFFLE_POS_VAL, &shuf_pos_valid) == ESP_OK
             && shuf_pos_valid != 0) {
-        s_shuf_pos_valid = true;
-        if (nvs_get_u32(s_nvs, KEY_SHUFFLE_POS_HI, &s_shuf_pos_hi) != ESP_OK) {
-            s_shuf_pos_hi = 0;
+        uint32_t hi = 0, lo = 0;
+        s_live.shuf_pos_valid = true;
+        if (nvs_get_u32(s_nvs, KEY_SHUFFLE_POS_HI, &hi) != ESP_OK) {
+            hi = 0;
         }
-        if (nvs_get_u32(s_nvs, KEY_SHUFFLE_POS_LO, &s_shuf_pos_lo) != ESP_OK) {
-            s_shuf_pos_lo = 0;
+        if (nvs_get_u32(s_nvs, KEY_SHUFFLE_POS_LO, &lo) != ESP_OK) {
+            lo = 0;
         }
+        s_live.shuf_pos = ((uint64_t)hi << 32) | lo;
     } else {
-        s_shuf_pos_valid = false;
+        s_live.shuf_pos_valid = false;
+        s_live.shuf_pos = 0;
     }
-    if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_sleep_def) != ESP_OK) {
-        s_sleep_def = CONFIG_STORE_SLEEP_DEFAULT_MIN;
+    if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_live.sleep_default_min) != ESP_OK) {
+        s_live.sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
     }
     uint8_t sleep_def_on = 0;
     if (nvs_get_u8(s_nvs, KEY_SLEEP_DEF_ON, &sleep_def_on) != ESP_OK) {
@@ -344,58 +617,223 @@ void config_store_init(void)
         s_was_playing = (was_play != 0);
     }
     uint8_t valid = 0;
+    /* ⚠ 秒数位置（旧键 last_pos）不读取也不保存：NightPlayer 机制只记"当前
+       歌曲"，开机从歌曲开头开始（该键历史上的值恒为 0） */
     if (nvs_get_u8(s_nvs, KEY_LAST_VALID, &valid) != ESP_OK || valid == 0) {
-        s_last_valid = false;
+        s_live.last_valid = false;
     } else {
-        s_last_valid = true;
-        if (nvs_get_u32(s_nvs, KEY_LAST_GLOBAL, &s_last_global) != ESP_OK) {
-            s_last_global = 0;
-        }
-        if (nvs_get_u32(s_nvs, KEY_LAST_POS, &s_last_pos) != ESP_OK) {
-            s_last_pos = 0;
+        s_live.last_valid = true;
+        if (nvs_get_u32(s_nvs, KEY_LAST_GLOBAL, &s_live.last_global) != ESP_OK) {
+            s_live.last_global = 0;
         }
     }
 
     /* EQ 预设选择：文件名 + 参数 blob 成对读取；只有一边（半写/手动改坏）
        视为无记录（后续用户重选会覆盖，不阻塞启动） */
-    s_eq_name[0] = '\0';
-    s_eq_data_valid = false;
+    s_live.eq_name[0] = '\0';
+    s_live.eq_valid = false;
+    memset(&s_live.eq_data, 0, sizeof(s_live.eq_data));
     size_t len = EQ_FILE_NAME_MAX;
-    if (nvs_get_str(s_nvs, KEY_EQ_NAME, s_eq_name, &len) == ESP_OK &&
-        s_eq_name[0] != '\0') {
-        size_t dlen = sizeof(s_eq_data);
-        if (nvs_get_blob(s_nvs, KEY_EQ_DATA, &s_eq_data, &dlen) == ESP_OK &&
-            dlen == sizeof(s_eq_data) && s_eq_data.band_count <= EQ_MAX_BANDS) {
-            s_eq_data_valid = true;
+    if (nvs_get_str(s_nvs, KEY_EQ_NAME, s_live.eq_name, &len) == ESP_OK &&
+        s_live.eq_name[0] != '\0') {
+        size_t dlen = sizeof(s_live.eq_data);
+        if (nvs_get_blob(s_nvs, KEY_EQ_DATA, &s_live.eq_data, &dlen) == ESP_OK &&
+            dlen == sizeof(s_live.eq_data) &&
+            s_live.eq_data.band_count <= EQ_MAX_BANDS &&
+            s_live.eq_data.band_count > 0) {
+            s_live.eq_valid = true;
         } else {
-            s_eq_name[0] = '\0';   /* 数据缺失/长度不符：视为无 EQ */
+            s_live.eq_name[0] = '\0';   /* 数据缺失/长度不符：视为无 EQ */
         }
     } else {
-        s_eq_name[0] = '\0';
+        s_live.eq_name[0] = '\0';
     }
+
+    /* 配置槽位：把"当前活跃槽位"的内容整份覆盖到上面读到的可切换字段上
+       （空槽位/首次升级无槽位记录时保持旧全局键的值，见 config_store.h） */
+    config_store_load_active_slot();
 
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
                   "sleep_def=%u min def_on=%d awake=%d screen_off=%u s "
                   "clkwheel=%d(rev=%d spd=%d) "
-                  "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u,pos=%u) shuf_pos=%s eq=%s(%u bands)",
-             (unsigned)s_volume, (unsigned)s_brightness, (unsigned)s_loop_mode,
-             (int)s_shuffle, (unsigned)s_sleep_def, (int)s_sleep_def_on,
+                  "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u) shuf_pos=%s eq=%s(%u bands) slot=%u(%s)",
+             (unsigned)s_live.volume, (unsigned)s_brightness,
+             (unsigned)s_live.loop_mode,
+             (int)s_live.shuffle, (unsigned)s_live.sleep_default_min,
+             (int)s_sleep_def_on,
              (int)s_sleep_awake, (unsigned)s_screen_off,
              (int)s_click_wheel, (int)s_cw_reverse, (unsigned)s_cw_speed,
              (int)s_batt_log, (unsigned)s_batt_log_min,
              (int)s_touch_test,
              (int)s_was_playing,
-             s_last_valid ? "yes" : "no",
-             (unsigned)s_last_global, (unsigned)s_last_pos,
-             s_shuf_pos_valid ? "yes" : "no",
-             s_eq_data_valid ? s_eq_name : "none",
-             s_eq_data_valid ? (unsigned)s_eq_data.band_count : 0u);
+             s_live.last_valid ? "yes" : "no",
+             (unsigned)s_live.last_global,
+             s_live.shuf_pos_valid ? "yes" : "no",
+             s_live.eq_valid ? s_live.eq_name : "none",
+             s_live.eq_valid ? (unsigned)s_live.eq_data.band_count : 0u,
+             (unsigned)(s_slot_active + 1u),
+             s_slot_active_saved ? "saved" : "legacy/empty");
+}
+
+/* ------------------------------------------------------------------ */
+/* 配置槽位（SAVE1~SAVE4）：存储层实现                                  */
+/* ------------------------------------------------------------------ */
+
+uint32_t config_store_slot_count(void)
+{
+    return CONFIG_STORE_SLOT_COUNT;
+}
+
+uint32_t config_store_get_active_slot(void)
+{
+    return s_slot_active;
+}
+
+void config_store_set_active_slot(uint32_t idx)
+{
+    if (idx >= CONFIG_STORE_SLOT_COUNT || idx == s_slot_active) {
+        return;
+    }
+    s_slot_active = idx;
+    cfg_write_u8(KEY_ACTIVE_SLOT, (uint8_t)idx);
+    ESP_LOGI(TAG, "active slot -> %u", (unsigned)(idx + 1u));
+}
+
+void config_store_load_active_slot(void)
+{
+    uint8_t idx = 0;
+    if (nvs_get_u8(s_nvs, KEY_ACTIVE_SLOT, &idx) != ESP_OK ||
+        idx >= CONFIG_STORE_SLOT_COUNT) {
+        idx = 0;   /* 无记录/脏数据：默认回到槽位 1 */
+    }
+    s_slot_active = idx;
+    /* 载入槽位内容；空槽位时保持 config_store_init 读到的旧全局键值。
+       ⚠ 不改活跃下标（已直接赋值），故不写 NVS、不通知——本函数在
+       config_store_init 内部调用，此时尚无回调注册。 */
+    if (slot_cache_load(idx)) {
+        slot_unpack(&s_slot_cache[idx]);
+        s_slot_active_saved = true;
+        ESP_LOGI(TAG, "active slot %u restored (vol=%u loop=%u shuffle=%d "
+                      "sleep=%u min last=%s(%u) eq=%s)",
+                 (unsigned)(idx + 1u), (unsigned)s_live.volume,
+                 (unsigned)s_live.loop_mode, (int)s_live.shuffle,
+                 (unsigned)s_live.sleep_default_min,
+                 s_live.last_valid ? "yes" : "no", (unsigned)s_live.last_global,
+                 s_live.eq_valid ? s_live.eq_name : "none");
+    } else {
+        s_slot_active_saved = false;
+        ESP_LOGI(TAG, "active slot %u empty: keep legacy global keys",
+                 (unsigned)(idx + 1u));
+    }
+}
+
+bool config_store_get_slot_info(uint32_t idx, config_store_slot_info_t *out)
+{
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (idx >= CONFIG_STORE_SLOT_COUNT) {
+        return false;
+    }
+    if (!slot_cache_load(idx)) {
+        return false;
+    }
+    const config_slot_blob_t *b = &s_slot_cache[idx];
+    if (out != NULL) {
+        out->has_data     = true;
+        out->last_valid   = (b->last_valid != 0);
+        out->last_global  = b->last_global;
+        snprintf(out->list_name, sizeof(out->list_name), "%s", b->last_list_name);
+    }
+    return true;
+}
+
+void config_store_get_slot_snapshot(uint32_t idx, config_store_slot_snapshot_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (idx >= CONFIG_STORE_SLOT_COUNT || !slot_cache_load(idx)) {
+        out->has_data = false;
+        return;
+    }
+    const config_slot_blob_t *b = &s_slot_cache[idx];
+    out->has_data           = true;
+    out->last_valid         = (b->last_valid != 0);
+    out->last_global        = b->last_global;
+    out->volume             = b->volume;
+    out->loop_mode          = b->loop_mode;
+    out->shuffle            = (b->shuffle != 0);
+    out->shuffle_pos_valid  = (b->shuffle_pos_valid != 0);
+    out->shuffle_pos        = b->shuffle_pos;
+    out->sleep_default_min  = b->sleep_default_min;
+    out->eq_valid           = (b->eq_valid != 0) && (b->eq_band_count > 0) &&
+                              (b->eq_band_count <= EQ_MAX_BANDS);
+    snprintf(out->list_name, sizeof(out->list_name), "%s", b->last_list_name);
+    if (out->eq_valid) {
+        snprintf(out->eq_name, sizeof(out->eq_name), "%s", b->eq_name);
+        out->eq_data = b->eq_data;
+    }
+}
+
+void config_store_save_active_slot(void)
+{
+    if (s_nvs == 0 || s_slot_active >= CONFIG_STORE_SLOT_COUNT) {
+        return;
+    }
+    /* 列表名快照由 UI 侧（config_slots）在切换/关机的保存时机写入，这里沿用
+       缓存里已有的名字，避免存储层反向依赖 playlist */
+    config_slot_blob_t b;
+    const char *name = s_slot_cache_valid[s_slot_active]
+                       ? s_slot_cache[s_slot_active].last_list_name : "";
+    slot_pack(&b, name);
+    slot_cache_store(s_slot_active, &b);
+    s_slot_active_saved = true;
+    ESP_LOGI(TAG, "SAVE%u saved to NVS: vol=%u loop=%u shuffle=%d sleep=%u min "
+                  "last=%u(%s)",
+             (unsigned)(s_slot_active + 1u), (unsigned)b.volume,
+             (unsigned)b.loop_mode, (int)b.shuffle,
+             (unsigned)b.sleep_default_min, (unsigned)b.last_global,
+             b.last_valid ? "valid" : "none");
+}
+
+void config_store_set_slot_list_name(const char *name)
+{
+    if (name == NULL || name[0] == '\0' || s_slot_active >= CONFIG_STORE_SLOT_COUNT) {
+        return;
+    }
+    /* ⚠ 只在**槽位已有真实数据**时记录名字：否则会把一个空槽位凭空"造"成
+       已保存槽位（save_active_slot 之后 UI 会显示成有配置）。 */
+    if (!slot_cache_load(s_slot_active)) {
+        return;
+    }
+    /* 只改内存缓存里的名字字段：随下一次 save_active_slot 一起落盘（避免
+       每次切歌都写一次 NVS） */
+    snprintf(s_slot_cache[s_slot_active].last_list_name,
+             sizeof(s_slot_cache[s_slot_active].last_list_name), "%s", name);
+}
+
+void config_store_switch_slot(uint32_t idx)
+{
+    if (idx >= CONFIG_STORE_SLOT_COUNT || idx == s_slot_active) {
+        return;
+    }
+    /* 1. 先把当前配置存回旧槽位（切换语义：切走前落盘） */
+    config_store_save_active_slot();
+    /* 2. 换活跃下标并记忆到 NVS（直接写，避免 set_active_slot 的重复提交） */
+    s_slot_active = idx;
+    cfg_write_u8(KEY_ACTIVE_SLOT, (uint8_t)idx);
+    /* 3. 载入目标槽位内容（空槽位 → 出厂默认 + 无位置记录） */
+    slot_load_into_live(idx, true, "switch: load new slot");
+    /* 4. 通知 UI（设置页等按新槽位的值刷新） */
+    config_notify();
 }
 
 uint8_t config_store_get_volume(void)
 {
-    return s_volume;
+    return s_live.volume;
 }
 
 uint8_t config_store_get_brightness(void)
@@ -405,28 +843,28 @@ uint8_t config_store_get_brightness(void)
 
 uint8_t config_store_get_loop_mode(void)
 {
-    return s_loop_mode;
+    return s_live.loop_mode;
 }
 
 bool config_store_get_shuffle(void)
 {
-    return s_shuffle;
+    return s_live.shuffle;
 }
 
 bool config_store_get_shuffle_pos(uint64_t *pos)
 {
-    if (!s_shuf_pos_valid) {
+    if (!s_live.shuf_pos_valid) {
         return false;
     }
     if (pos != NULL) {
-        *pos = ((uint64_t)s_shuf_pos_hi << 32) | s_shuf_pos_lo;
+        *pos = s_live.shuf_pos;
     }
     return true;
 }
 
 uint32_t config_store_get_sleep_default_min(void)
 {
-    return s_sleep_def;
+    return s_live.sleep_default_min;
 }
 
 bool config_store_get_sleep_def_on(void)
@@ -484,16 +922,13 @@ bool config_store_get_was_playing(void)
     return s_was_playing;
 }
 
-bool config_store_get_last_song(uint32_t *global, uint32_t *pos_s)
+bool config_store_get_last_song(uint32_t *global)
 {
-    if (!s_last_valid) {
+    if (!s_live.last_valid) {
         return false;
     }
     if (global != NULL) {
-        *global = s_last_global;
-    }
-    if (pos_s != NULL) {
-        *pos_s = s_last_pos;
+        *global = s_live.last_global;
     }
     return true;
 }
@@ -503,11 +938,11 @@ void config_store_set_volume(uint8_t vol)
     if (vol > CONFIG_STORE_VOLUME_MAX) {
         vol = CONFIG_STORE_VOLUME_MAX;
     }
-    if (vol == s_volume) {
+    if (vol == s_live.volume) {
         return;
     }
-    s_volume = vol;
-    cfg_write_u8(KEY_VOLUME, vol);
+    s_live.volume = vol;
+    slot_persist_live();
     config_notify();
 }
 
@@ -527,42 +962,39 @@ void config_store_set_brightness(uint8_t brightness)
 
 void config_store_set_loop_mode(uint8_t mode)
 {
-    if (mode == s_loop_mode) {
+    if (mode == s_live.loop_mode) {
         return;
     }
-    s_loop_mode = mode;
-    cfg_write_u8(KEY_LOOP_MODE, mode);
+    s_live.loop_mode = mode;
+    slot_persist_live();
     config_notify();
 }
 
 void config_store_set_shuffle(bool on)
 {
-    if (on == s_shuffle) {
+    if (on == s_live.shuffle) {
         return;
     }
-    s_shuffle = on;
-    cfg_write_u8(KEY_SHUFFLE, on ? 1 : 0);
+    s_live.shuffle = on;
+    slot_persist_live();
     config_notify();
 }
 
 void config_store_set_shuffle_pos(uint64_t pos)
 {
-    s_shuf_pos_hi = (uint32_t)(pos >> 32);
-    s_shuf_pos_lo = (uint32_t)(pos & 0xFFFFFFFFu);
-    s_shuf_pos_valid = true;
-    /* 内部状态（随机序列现场），UI 不展示，无需通知回调 */
-    cfg_write_u32(KEY_SHUFFLE_POS_HI, s_shuf_pos_hi);
-    cfg_write_u32(KEY_SHUFFLE_POS_LO, s_shuf_pos_lo);
-    cfg_write_u8(KEY_SHUFFLE_POS_VAL, 1);
+    s_live.shuf_pos = pos;
+    s_live.shuf_pos_valid = true;
+    /* 内部状态（随机序列现场），UI 不展示，无需通知回调；随槽位一起落盘 */
+    slot_persist_live();
 }
 
 void config_store_set_sleep_default_min(uint32_t minutes)
 {
-    if (minutes == s_sleep_def) {
+    if (minutes == s_live.sleep_default_min) {
         return;
     }
-    s_sleep_def = minutes;
-    cfg_write_u32(KEY_SLEEP_DEFAULT, minutes);
+    s_live.sleep_default_min = minutes;
+    slot_persist_live();
     config_notify();
 }
 
@@ -692,35 +1124,31 @@ void config_store_set_was_playing(bool playing)
         return;
     }
     s_was_playing = playing;
+    /* 非切换字段（全局共用）：仍写旧全局键，不属于任何槽位 */
     cfg_write_u8(KEY_WAS_PLAYING, playing ? 1 : 0);
 }
 
-void config_store_set_last_song(uint32_t global, uint32_t pos_s)
+void config_store_set_last_song(uint32_t global)
 {
-    s_last_global = global;
-    s_last_pos = pos_s;
-    s_last_valid = true;
-    if (s_nvs == 0) {
-        return;
-    }
-    cfg_write_u32(KEY_LAST_GLOBAL, global);
-    cfg_write_u32(KEY_LAST_POS, pos_s);
-    cfg_write_u8(KEY_LAST_VALID, 1);
+    s_live.last_global = global;
+    s_live.last_valid = true;
+    /* 位置类记录无 UI 展示，不通知回调；随槽位一起落盘 */
+    slot_persist_live();
 }
 
 bool config_store_get_eq(char *name, size_t name_size, eq_preset_t *preset_out)
 {
     if (name != NULL && name_size > 0) {
-        snprintf(name, name_size, "%s", s_eq_name);
+        snprintf(name, name_size, "%s", s_live.eq_name);
     }
     if (preset_out != NULL) {
-        if (s_eq_data_valid) {
-            *preset_out = s_eq_data;
+        if (s_live.eq_valid) {
+            *preset_out = s_live.eq_data;
         } else {
             memset(preset_out, 0, sizeof(*preset_out));
         }
     }
-    return s_eq_data_valid;
+    return s_live.eq_valid;
 }
 
 void config_store_set_eq(const char *name, const eq_preset_t *preset)
@@ -728,12 +1156,11 @@ void config_store_set_eq(const char *name, const eq_preset_t *preset)
     /* 无 EQ 语义：name 空/NULL 或预设为空（band_count=0）→ 清除记录 */
     if (preset == NULL || preset->band_count == 0 || name == NULL ||
         name[0] == '\0') {
-        bool had = s_eq_data_valid;
-        s_eq_name[0] = '\0';
-        s_eq_data_valid = false;
-        memset(&s_eq_data, 0, sizeof(s_eq_data));
-        cfg_erase_key(KEY_EQ_NAME);
-        cfg_erase_key(KEY_EQ_DATA);
+        bool had = s_live.eq_valid;
+        s_live.eq_name[0] = '\0';
+        s_live.eq_valid = false;
+        memset(&s_live.eq_data, 0, sizeof(s_live.eq_data));
+        slot_persist_live();   /* 槽位落盘；兼容态下同时清掉旧全局键 */
         if (had) {
             ESP_LOGI(TAG, "EQ cleared");
             config_notify();
@@ -745,19 +1172,18 @@ void config_store_set_eq(const char *name, const eq_preset_t *preset)
     char name_buf[EQ_FILE_NAME_MAX];
     snprintf(name_buf, sizeof(name_buf), "%s", name);
 
-    bool changed = !s_eq_data_valid ||
-                   strcmp(s_eq_name, name_buf) != 0 ||
-                   memcmp(&s_eq_data, preset, sizeof(s_eq_data)) != 0;
+    bool changed = !s_live.eq_valid ||
+                   strcmp(s_live.eq_name, name_buf) != 0 ||
+                   memcmp(&s_live.eq_data, preset, sizeof(s_live.eq_data)) != 0;
 
-    snprintf(s_eq_name, sizeof(s_eq_name), "%s", name_buf);
-    s_eq_data = *preset;
-    s_eq_data_valid = true;
+    snprintf(s_live.eq_name, sizeof(s_live.eq_name), "%s", name_buf);
+    s_live.eq_data = *preset;
+    s_live.eq_valid = true;
 
-    cfg_write_str(KEY_EQ_NAME, s_eq_name);
-    cfg_write_blob(KEY_EQ_DATA, &s_eq_data, sizeof(s_eq_data));
+    slot_persist_live();
     if (changed) {
-        ESP_LOGI(TAG, "EQ set: %s (%u bands)", s_eq_name,
-                 (unsigned)s_eq_data.band_count);
+        ESP_LOGI(TAG, "EQ set: %s (%u bands)", s_live.eq_name,
+                 (unsigned)s_live.eq_data.band_count);
         config_notify();
     }
 }
@@ -766,19 +1192,13 @@ void config_store_reset_position(void)
 {
     /* 内存标志全部置"无记录"，下次开机走"从第一首/重新随机"分支。
        位置类记录无 UI 展示，不通知变更回调 */
-    s_last_valid = false;
-    s_last_global = 0;
-    s_last_pos = 0;
-    s_shuf_pos_valid = false;
-    s_shuf_pos_hi = 0;
-    s_shuf_pos_lo = 0;
-    if (s_nvs == 0) {
-        return;
-    }
-    /* 只把 valid 标志写 0：与 config_store_init 的读取逻辑一致（valid=0 即无
-       记录），无需 erase 键值；保留旧值可在误操作后人工找回，不影响行为 */
-    cfg_write_u8(KEY_LAST_VALID, 0);
-    cfg_write_u8(KEY_SHUFFLE_POS_VAL, 0);
+    s_live.last_valid = false;
+    s_live.last_global = 0;
+    s_live.shuf_pos_valid = false;
+    s_live.shuf_pos = 0;
+    /* 写回槽位（空槽位仍处于兼容态：写旧全局键的 valid=0）。保留旧值可在
+       误操作后人工找回，不影响行为 */
+    slot_persist_live();
     ESP_LOGI(TAG, "position reset: last song & shuffle pos cleared");
 }
 

@@ -68,6 +68,12 @@ void app_main(void)
     // 用户配置存储（NVS）：尽早初始化，开机恢复音量/亮度/循环模式等
     ESP_LOGI(TAG, "Initialize config store (NVS)");
     config_store_init();
+    /* 配置槽位（NightPlayer「配置插槽」）：把"当前活跃配置"整份载入内存。
+       ⚠ 必须紧跟 config_store_init 且**早于任何读取可切换字段的动作**：
+       player_controller_init 要按 last_song / loop / shuffle 恢复现场，
+       下面还要按它应用音量与 EQ。空槽位/首次升级无槽位记录时保持旧全局键值
+       （见 core/storage/config_store.h 与 ideas_and_exps/CONFIG_SLOTS.md）。 */
+    config_store_load_active_slot();
     mem_trace_log("01-config_store");
 
     /* 深路径执行器（常驻大栈任务，Core0）：息屏/亮屏/伪关机的深调用链
@@ -216,6 +222,16 @@ void app_main(void)
         sleep_timer_set(boot_sleep_min);
         ESP_LOGI(TAG, "boot: sleep timer auto started (%u min)",
                  (unsigned)boot_sleep_min);
+    } else {
+        /* 配置槽位：关掉"开机默认开启"时，仍按**当前配置里存的定时时长**恢复
+           定时（每个配置各自保存自己的定时时长，见 CONFIG_SLOTS.md）。这里
+           在 sleep_timer_init 之后调用，故 `sleep_timer_set` 会真正建任务。 */
+        uint32_t slot_sleep_min = config_store_get_sleep_default_min();
+        if (slot_sleep_min > 0) {
+            sleep_timer_set(slot_sleep_min);
+            ESP_LOGI(TAG, "boot: sleep timer restored from config slot (%u min)",
+                     (unsigned)slot_sleep_min);
+        }
     }
 
     // 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）。
