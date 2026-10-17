@@ -534,16 +534,29 @@ static void player_cmd_pause(void)
     }
 }
 
-/* 手动切歌/自动续播后保存新曲位置（从头开始）：
-   保证用户"切走之后直接关机/断电"也能在下次开机恢复到最后听的歌。
-   注意：开机恢复播放走的是 CMD_PLAY_SONG/CMD_PLAY_SONG_RANDOM，不在此列。
-   随机模式下同时保存随机位置（切歌后 position 已推进到新歌）。 */
-static void player_save_new_song(void)
+/* 把"当前播放现场"（当前歌曲 + 随机序列位置 + 所在列表名）同步进
+   config_store 的活跃配置槽位（只写内存 + 槽位 blob，不触发 UI 通知：
+   位置类字段无 UI 展示）。
+   ⚠ 实现放在控制器内部（直接读 s_cur_global/s_shuffle_pos/s_dir_name），
+   不经过 player_controller_get_status——那样要在栈上拷一份 ~1KB 的状态快照。
+   调用者：配置槽位切换前（config_slots_switch）、伪关机保存
+   （player_controller_save_last_position）。
+   ⚠ **不要改成"每次切歌都调一次"**（2026-11 二次收敛）：那会让每次点歌/
+   翻页都写一遍整个槽位 blob（352B + commit，关缓存 5~20ms），而"切走时
+   记住了歌"这件事由切换前的这一次同步完整覆盖（见 CONFIG_SLOTS.md §七）。
+   随机模式下同时同步随机位置（切歌后 position 已推进到新歌）。 */
+static void player_sync_config(void)
 {
+    if (!s_ready || s_song_count == 0) {
+        return;
+    }
     config_store_set_last_song(s_cur_global);
     if (s_shuffle) {
         config_store_set_shuffle_pos(s_shuffle_pos);
     }
+    /* 列表名只是槽位列表的展示字段（"SAVE1 <列表名>"）：就地更新内存快照，
+       随下一次槽位保存一起落盘（本调用不写 NVS） */
+    config_store_set_slot_list_name(s_dir_name);
 }
 
 static void player_cmd_toggle(void)
@@ -625,12 +638,16 @@ static void player_task(void *arg)
         case CMD_PLAY:       player_cmd_play(); break;
         case CMD_PAUSE:      player_cmd_pause(); break;
         case CMD_TOGGLE:     player_cmd_toggle(); break;
-        case CMD_NEXT:       player_play_global(player_manual_next()); player_save_new_song(); break;
-        case CMD_PREV:       player_play_global(player_manual_prev()); player_save_new_song(); break;
+        case CMD_NEXT:       player_play_global(player_manual_next()); break;
+        case CMD_PREV:       player_play_global(player_manual_prev()); break;
         case CMD_SEEK:       mp3_player_seek(msg.arg); break;
         case CMD_PLAY_SONG:
             /* 用户从列表指定播放（或顺序模式开机恢复）：
-               随机模式下视为"重新随机"——重新生成随机位置并定位到该歌曲 */
+               随机模式下视为"重新随机"——重新生成随机位置并定位到该歌曲。
+               ⚠ **这里不落盘**（2026-11 二次收敛）：点歌是最高频的操作，每次
+               都写一遍槽位 blob 纯属浪费；"切走时记住这首歌"由
+               config_slots_switch() 在切换前调 player_controller_sync_config()
+               一次搞定（原来的 bug 正是"只在关机时写、切槽位前没写"）。 */
             if (s_shuffle) {
                 player_shuffle_relocate(msg.arg);
             }
@@ -694,7 +711,10 @@ static void player_task(void *arg)
             if (s_shuffle) {
                 /* 随机模式：优先精确恢复保存的随机序列位置（回到同一首歌、
                    同一序列）；位置无法映射（播放列表数据变了）则"重新随机
-                   定位到目标歌曲"（与列表点歌一致） */
+                   定位到目标歌曲"（与列表点歌一致）。
+                   ⚠ 这里只同步随机位置（上面已按需 set_shuffle_pos），**不写
+                   当前歌曲**——目标槽位的内容刚在上一步由 config_store 载入，
+                   歌曲本来就是这个值；省一次槽位 blob 写。 */
                 uint64_t pos = 0;
                 if (r->shuffle_valid &&
                     player_shuffle_adopt_position(song, r->shuffle_pos, &pos)) {
@@ -706,7 +726,6 @@ static void player_task(void *arg)
                     player_shuffle_relocate(song);
                     player_play_global(song);
                 }
-                player_save_new_song();
             } else {
                 player_play_global(song);
             }
@@ -730,7 +749,6 @@ static void player_task(void *arg)
             if (reason == MP3_STOP_NATURAL) {
                 s_bad_skip_count = 0;
                 player_play_global(player_auto_next());
-                player_save_new_song();
                 break;
             }
             /* 坏曲：上报事件（后写覆盖前写；UI 每 500ms 拉取一次并展示，
@@ -750,7 +768,6 @@ static void player_task(void *arg)
                      (int)reason, (unsigned)s_bad_skip_count,
                      (unsigned)PLAYER_BAD_SKIP_LIMIT);
             player_play_global(player_auto_next());
-            player_save_new_song();
             break;
         }
         case CMD_STOP:
@@ -1050,26 +1067,27 @@ void player_controller_save_last_position(void)
         return;
     }
     /* ⚠ NightPlayer 原版机制：只记忆当前歌曲，不记忆秒数位置
-       （pos 恒为 0，开机从歌曲开头开始） */
-    config_store_set_last_song(s_cur_global);
+       （pos 恒为 0，开机从歌曲开头开始）。
+       歌曲 + 随机位置 + 列表名先一起同步（player_sync_config）。 */
+    player_sync_config();
     /* 记录关机前播放状态（NVS）：true=当时在播放（开机自动播放），
        false=已暂停/停止（开机只恢复当前歌曲不自动播放，避免突然出声）。
        与当前歌曲一起保存，供 player_controller_init 恢复。 */
     config_store_set_was_playing(mp3_player_get_state() == MP3_STATE_PLAYING);
-    /* 随机模式下同步保存随机位置（关机前最后状态，开机完整恢复序列） */
-    if (s_shuffle) {
-        config_store_set_shuffle_pos(s_shuffle_pos);
-    }
-    /* 配置槽位：记录"离开时所在列表名"后把当前整套配置存回活跃槽位
+    /* 配置槽位：把当前整套配置存回活跃槽位
        （关机时自动保存到当前配置，见 ideas_and_exps/CONFIG_SLOTS.md）。
-       ⚠ 必须在上面 set_last_song / set_shuffle_pos 之后调用，否则存下去的是
-       旧位置 */
-    config_store_set_slot_list_name(s_dir_name);
+       ⚠ 必须在 player_sync_config 之后调用，否则存下去的是旧歌曲/旧位置 */
     config_store_save_active_slot();
     ESP_LOGI(TAG, "save last position: song #%u was_playing=%d%s",
              (unsigned)s_cur_global,
              (int)(mp3_player_get_state() == MP3_STATE_PLAYING),
              s_shuffle ? " (shuffle)" : "");
+}
+
+/* 配置槽位切换前把播放现场同步进活跃槽位（见头文件说明） */
+void player_controller_sync_config(void)
+{
+    player_sync_config();
 }
 
 void player_controller_get_status(player_controller_status_t *out)

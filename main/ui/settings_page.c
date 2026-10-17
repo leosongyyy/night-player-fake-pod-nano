@@ -103,13 +103,18 @@ static bool s_sleep_long_pressed = false;
 /* 状态文字刷新                                                         */
 /* ------------------------------------------------------------------ */
 
-/* 播放模式：图标与文字随循环方式切换（"文字压缩到一行"） */
+/* 播放模式：图标与文字随循环方式切换（"文字压缩到一行"）。
+   ⚠ 数据源用 config_store 而不是 player_controller_get_loop_mode()：切换配置
+   槽位时循环模式由控制器任务**异步**应用（CMD_RESTORE_CONFIG），配置变更回调
+   派发时控制器可能还没处理到，读控制器会显示上一个槽位的模式。config_store
+   的活跃槽位值在切换那一刻就已更新，是这里的正确来源（两者平时总是一致的：
+   player_controller_set_loop_mode 会同时写两处）。 */
 static void settings_refresh_loop(void)
 {
     if (s_loop_icon == NULL || s_loop_status == NULL) {
         return;
     }
-    switch (player_controller_get_loop_mode()) {
+    switch (config_store_get_loop_mode()) {
     case PLAYER_LOOP_ALL:
         lv_label_set_text(s_loop_icon, LV_SYMBOL_LOOP);
         lv_label_set_text(s_loop_status, "全部循环");
@@ -321,13 +326,15 @@ static void sleep_status_timer_cb(lv_timer_t *timer)
 /* ------------------------------------------------------------------ */
 
 /* 播放模式格子：点击在 全部循环 → 单曲循环 → 列表循环 间轮换。
-   player_controller_set_loop_mode 内部会写 NVS 并通知 config_store 回调。 */
+   player_controller_set_loop_mode 内部会写 NVS 并通知 config_store 回调。
+   ⚠ 取当前值用 config_store（不是 player_controller_get_loop_mode）：切换配置
+   槽位后控制器的循环模式是异步应用的，紧接着点击会从"上一个槽位的模式"起算。 */
 static void loop_cell_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
-    player_loop_mode_t mode = player_controller_get_loop_mode();
+    player_loop_mode_t mode = (player_loop_mode_t)config_store_get_loop_mode();
     mode = (player_loop_mode_t)(((int)mode + 1) % 3);
     player_controller_set_loop_mode(mode);
     ESP_LOGI(TAG, "loop mode -> %d", (int)mode);
@@ -342,7 +349,9 @@ static void shuffle_cell_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
-    bool on = !player_controller_get_shuffle();
+    /* ⚠ 当前值读 config_store（切换配置槽位后控制器是异步应用的；两者平时
+       一致：player_cmd_set_shuffle 会把结果写回 config_store） */
+    bool on = !config_store_get_shuffle();
     player_controller_set_shuffle(on);
     ESP_LOGI(TAG, "shuffle -> %d", (int)on);
     settings_refresh_shuffle();

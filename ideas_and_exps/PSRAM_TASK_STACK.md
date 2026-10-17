@@ -183,6 +183,11 @@ flash 操作期间它照常触发；回调没加 `IRAM_ATTR`（在 flash 里）�
    该崩溃只在 `CONFIG_PERFORMANCE_MONITOR=y` 的构建（debug / releasecandidate）
    存在，release 不带该模块故掩盖了这个 bug。
 
+> 🆕 2026-11：**LVGL 对象已搬进 PSRAM**，于是这条规则多了一层后果——ISR 里除了代码
+> 不能在 flash，**连碰 LVGL 对象都不行了**。全工程"谁会在关缓存窗口里跑"的完整清单
+> 与逐项审计见 **`FLASH_WRITE_VS_PSRAM.md`**（结论：目前只有一个 IRAM 中断
+> `cpu_freq_isr_cb`，且不碰 PSRAM；NVS 写入口唯一、调用栈全在内部 RAM）。
+
 ## 3. 迁移后实测
 
 ```

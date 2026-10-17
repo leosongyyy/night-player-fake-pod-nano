@@ -82,8 +82,8 @@ config_store（core/storage/config_store.c）
 | 时机 | 位置 | 说明 |
 | --- | --- | --- |
 | 每次 `set_xxx` | `slot_persist_live()` | **增量存回当前活跃槽位**。同一 blob 反复覆盖写，NVS 分页复用，不会无限增长；这样"改完直接长按关机/断电"也不丢 |
-| 切换槽位前 | `config_store_switch_slot()` 第 1 步 | 把当前整套存回**旧**槽位 |
-| 伪关机 | `player_controller_save_last_position()` | 记完最后播放的歌曲/随机位置后，存回当前槽位（"后续关机时会自动保存到当前配置"） |
+| 切换槽位前 | `config_slots_switch()` → `player_controller_sync_config()` → `config_store_switch_slot()` 第 1 步 | 先把**播放现场**（当前歌曲 / 随机位置 / 列表名）同步进活跃槽位，再整份存回**旧**槽位 |
+| 伪关机 | `player_controller_save_last_position()` | 同一个 `player_sync_config()` 同步现场后存回当前槽位（"后续关机时会自动保存到当前配置"） |
 
 "记忆使用的配置" = 切换时把下标写进 NVS 键 `slot_active`，开机
 `config_store_load_active_slot()` 读回来并整份载入。
@@ -106,7 +106,8 @@ config_store（core/storage/config_store.c）
 存储层只管存/取，**不碰硬件**（避免 `config_store` 反向依赖音频/播放器）。
 运行时应用集中在 `core/storage/config_slots.c` 的 `config_slots_switch()`：
 
-1. 记下"离开时所在列表名"（`config_store_set_slot_list_name`）→ 再切；
+1. 把**播放现场**同步进活跃槽位（`player_controller_sync_config()`：当前歌曲 +
+   随机位置 + 所在列表名）→ 再切；
 2. `config_store_switch_slot(idx)`：存旧槽位 → 换下标（写 NVS）→ 载入新槽位 →
    `config_notify()`（设置页等 UI 随即刷新为新值）；
 3. **音量**：`audio_set_volume_level()`（直接落 DAC，不等下次播放）；
@@ -114,7 +115,8 @@ config_store（core/storage/config_store.c）
 5. **睡眠定时**：`sleep_timer_set()`（按槽位存的**原时长**重新开表，0 = 关闭）；
 6. **播放器**：`player_controller_restore_config()` → 控制器任务里**原子**恢复
    循环模式 / 随机开关 / 随机序列位置 / 当前歌曲，然后开始播放；
-7. Toast："已切换到 SAVE2（<列表名>）"。
+7. Toast：**只报槽位编号**「已切换到 SAVE2」——列表名可能长达 128 字节，
+   塞进底部提示框会溢出/折行（列表名在槽位弹窗里看，见 §4.2）。
 
 ### 为什么播放部分要单独一条命令
 
@@ -173,25 +175,32 @@ config_store（core/storage/config_store.c）
 ## 六、验证
 
 1. **存储**：开机日志 `config loaded: ... slot=N(saved/legacy/empty)`；切槽位日志
-   `active slot -> N` / `slot N saved: ...`。
-2. **切换**：设置页第 9 格 → 弹窗（当前槽位黄色）→ 点 SAVE2 → 立即换列表/歌曲/
-   音量/EQ/定时；Toast 提示带列表名。
+   `active slot -> N` / `switch: load new slot: SAVE N -> live (...)`
+   / `SAVE N saved to NVS: ... last=<歌曲>(valid) list=<列表名>`。
+2. **切换**：设置页第 9 格 → 弹窗（当前槽位黄色、行文本带列表名）→ 点 SAVE2 →
+   立即换列表/歌曲/音量/EQ/定时；Toast 只显示「已切换到 SAVE2」（不带列表名）。
 3. **记忆**：在 SAVE2 下关机 → 重启后仍是 SAVE2（日志 + 设置页状态文字）。
 4. **回切**：SAVE1 改了音量/换了歌 → 切 SAVE2 → 再切回 SAVE1，应回到离开时的状态。
+   ⚠ 重点测"**从列表点一首歌后立刻切槽位**"（旧实现必错，见 §七）。
 5. **升级兼容**（重要，用旧固件造数据）：先用旧固件跑一次配好音量/循环/EQ →
    刷本固件 → 配置应原样保留（日志 `active slot N empty: keep legacy global keys`），
    关机后变成 `slot 1 saved`。
 6. **空槽位**：点从未保存过的槽位 → 回到默认音量/列表循环/顺序播放/EQ 关闭/无定时，
-   从第一首开始播放，且该槽位随后变为"已保存"。
+   从第一首开始播放，且该槽位随后变为"已保存"（弹窗里也应有列表名，不再是光秃秃的
+   `SAVE2`）。
+7. **配置通知不再崩**：开着播放，反复点"随机/播放模式/音量"与切槽位，
+   串口不应出现 `task_wdt` / `lv_inv_area` 卡死。
 
 ### 踩坑提醒
 
 - **别在 `set_xxx` 里回写 `set_xxx`**：`slot_persist_live()` 直接操作 NVS 与缓存，
   不重新走 setter（否则递归 + 重复通知）。
-- **`config_store_set_slot_list_name()` 只对已有数据的槽位生效**：否则会把空槽位
-  凭空"造"成已保存槽位，UI 上表现为"SAVE3 明明没配过却有内容"。
-- **`config_slots_switch()` 必须跑在 LVGL 上下文（持锁）**：`switch_slot` 会同步触发
-  `config_store` 变更回调，回调方（设置页）直接操作 LVGL 控件。
+- **`config_store_set_slot_list_name()` 只改内存、不写 NVS**：名字与 `last_global`
+  一起放在 `s_live` 里，随下一次 `config_store_save_active_slot()` 落盘。
+  （旧实现把它写进"槽位缓存"并要求槽位已有数据，见 §七 bug A。）
+- **`config_slots_switch()` 必须跑在 LVGL 上下文（持锁）**：切换后
+  `config_store` 会请求一次 UI 刷新（**延迟派发**，见 §七 bug B）；`config_slots_switch`
+  本身还会直接操作 Toast/音量/EQ，同样要在 LVGL 上下文中调用。
 - **改 `config_slot_blob_t` 布局要 bump `SLOT_BLOB_VERSION`**，否则老 blob 会被按新
   布局解释（读出垃圾）。bump 后老槽位自动变"空槽位"，属于可接受的降级。
 - **⚠ 本功能抬高 NVS 写密度后暴露了一个潜伏崩溃**（切槽位 → NVS 写 flash 期间命中
@@ -200,3 +209,106 @@ config_store（core/storage/config_store.c）
   屏蔽不掉**。已给回调加 `IRAM_ATTR` 修复，完整机理与两条规则见
   `PSRAM_TASK_STACK.md` §2.5。**今后凡新增"频繁写 NVS/flash"的功能，都要回头
   审一遍 ISR 回调是否都在 IRAM。**
+
+---
+
+## 七、2026-11 两个真机 bug 与修复（务必别回退）
+
+### bug A：切走再切回"还是原来的数据"，关机再开机才"保存"
+
+**现象**（用户实测）：改完当前配置直接切到别的槽位，那个槽位没被保存；切回来还是
+原来的数据。只有 SAVE1（唯一一个已有数据的槽位）看起来"会保存"，其它槽位都要
+"关机再开机一次"才保存。
+
+**根因不是 NVS 写失败，而是"切走时存下去的是旧值"**——槽位里最显眼的字段是
+**当前列表/歌曲**，而它有两个漏洞：
+
+1. **从列表点歌不落盘**：`ui/playlist_page.c` → `player_controller_play_song()` →
+   `CMD_PLAY_SONG`，旧实现只 `player_play_global()`，**不调用 `player_save_new_song()`**。
+   于是 `config_store` 里的 `last_global` 仍是上一首；切走时存下去的就是上一首，
+   切回来当然播回原来那首。
+   而**伪关机走的是 `player_controller_save_last_position()`，它读控制器实时状态
+   `s_cur_global`** → 所以"关机再开机一次就对了"。这条差异正是现象的来源。
+2. **空槽位存不进列表名**：`config_store_set_slot_list_name()` 旧实现写在槽位缓存里、
+   且要求"槽位已有数据"。空槽位第一次保存时名字被丢掉，弹窗只显示 `SAVE2`
+   （看起来像"没保存"），要等下一次保存（如关机）才补上。
+   SAVE1 之所以"正常"，是因为它是唯一一个**早就有数据（升级兼容的旧全局键/首次
+   关机）**的槽位：`last_valid` 本来就有值，名字也在缓存里。
+
+**修复**：
+- `player_controller.c`：新增内部 `player_sync_config()`（歌曲 + 随机位置 + 列表名
+  一起写进活跃槽位）。
+- 新增公开接口 **`player_controller_sync_config()`**，`config_slots_switch()` 在
+  `config_store_switch_slot()` **之前**调用它 → 存入旧槽位的一定是"此刻真正在播的歌"；
+  伪关机保存也复用它（不再各写一遍）。
+  ⚠ **不要**为了"记住歌曲"去给 `CMD_PLAY_SONG` / 切歌路径加落盘（第一版就是这么修的，
+  随后按 §七.3 收敛掉了）：切换前的那一次同步已经把"切走时记住这首歌"完全覆盖。
+- `config_store.c`：把 `last_list_name` 收进 `config_live_t s_live`（与 `last_global`
+  成对打包/解包），`config_store_save_active_slot()` 不再从槽位缓存取名字，
+  `set_slot_list_name()` 不再要求槽位已有数据（且仍然只写内存、不写 NVS）。
+- `settings_page.c`：循环/随机格子的**当前值改读 `config_store`**（切槽位后控制器是
+  异步应用的，紧接着点击会从上一个槽位的值起算）。
+
+### bug A 的二次收敛（2026-11）：**不按曲落盘**
+
+第一版修复给 `CMD_PLAY_SONG`（点歌）和 `CMD_RESTORE_CONFIG` 加了
+`player_save_new_song()`，虽然有 bug 也修好了，但**点歌是全项目最高频的操作**：
+每点一次歌就要把整个槽位 blob（352B + `nvs_commit`，关缓存 5~20ms）写一遍，还要
+在 `player_ctrl` 那个只有 4KB 的栈上跑完整的 NVS/flash 路径（实测 HWM 只剩 1464B）。
+既然"切走时记住"已由切换前的 `player_controller_sync_config()` 覆盖，这些写入纯属
+冗余，已全部删除（`player_save_new_song()` 也随之消失）：
+
+| 路径 | 现在是否写 NVS | 说明 |
+| --- | --- | --- |
+| 点歌（`CMD_PLAY_SONG`）/ 上一曲 / 下一曲 / 自然播完 / 坏曲跳过 | **否** | 只更新内存里的 `s_cur_global`；切槽位前同步 1 次、伪关机时同步 1 次就够 |
+| 切槽位（`CMD_RESTORE_CONFIG`） | 否 | 目标槽位内容刚载入，写入的是同样的值；随机位置也随同步/切换落盘 |
+| 暂停 / 停止 | 是 | 低频且是"暂停后直接断电"的最后保障，保留 |
+| 切随机开关 / 开机恢复随机起点 | 是 | 用户动作 / 每次开机一次，保留 |
+| 切槽位前、伪关机 | 是 | **唯一的两个"主动保存"时机**（`player_sync_config`） |
+
+**代价（有意接受）**：非正常断电（拔电池、长按 A 键到 3s 由硬件硬切、崩溃重启）时，
+"上次播放的歌曲"会回退到上一次落盘点（暂停/停止/切槽位/伪关机）——正常走
+伪关机（睡眠定时、低电、A 键长按 1.2s）不受影响。**换来的收益**：点歌/翻页这条
+最高频路径完全不写 flash，"切走再切回"的正确性却与之前一模一样。
+
+> ✅ **这条行为已与用户确认为"预期"，不是缺陷**：原版 NightPlayer 就是这个语义
+> ——安卓版清后台、强制停止、应用崩溃都**不保存**，只有正常退出才保存。本固件里
+> "正常退出"对应**伪关机**（睡眠定时 / 低电 / A 键长按 1.2s），它一定会保存。
+> ⚠ **所以今后不要把它当 bug 去"加固"**：不要再给点歌/翻页/自然播完加落盘，
+> 也不要设计"崩溃前抢救一下"之类的机制。
+
+同一轮里还给两个"位置类 setter"加了**等值短路**（`config_store_set_last_song` /
+`config_store_set_shuffle_pos`：值+valid 标志都没变就直接返回）。原因是从真机日志
+看到一次切槽位会连着打 3 条 `SAVE2 saved to NVS`——分别是同步时的 `last_song`、
+`set_shuffle_pos`（RESTORE 里先写快照值、再写 adopt 后的值，两次是同一个数），
+全是冗余。现在一次切槽位**只写 1 次**槽位 blob（由 `config_store_switch_slot`
+在换下标前完成），加 1 次 1 字节的 `slot_active`。
+
+### bug B：切配置/切随机播放时死机（task_wdt，卡在 lv_inv_area）
+
+**现象**（用户实测串口）：
+```
+E task_wdt: CPU 0: player_ctrl
+--- lv_inv_area (lv_refr.c:302)
+--- lv_label_refr_text / lv_label_set_text (lv_label.c)
+--- settings_refresh_loop (settings_page.c:122)
+--- settings_config_changed_cb (settings_page.c:300)
+--- config_notify (inlined) ← config_store_set_shuffle (config_store.c:980)
+--- player_cmd_set_shuffle (inlined) ← player_task (player_controller.c:659)
+```
+
+**根因**：`config_store` 的 `set_xxx` 旧实现**在调用者线程里同步执行变更回调**，
+而回调方（设置页/状态栏/通知栏）直接改 LVGL 控件。`player_ctrl` 任务里调
+`config_store_set_shuffle()` 时，回调就在**非 LVGL 任务**里改 LVGL 对象树，与同核
+（Core0）的 LVGL 任务渲染并发 → 对象树/脏区链表被破坏，卡死在 `lv_inv_area` 死循环，
+IDLE0 得不到调度 → task_wdt。
+
+> 不是"NVS 写 flash 期间 PSRAM 不可用"：那条路只会 panic（见 `PSRAM_TASK_STACK.md`
+> §2.5），不会卡在 LVGL 的脏区遍历里；而且调用栈明确是**回调链**进了 LVGL。
+
+**修复**：`config_store` 的通知改为**延迟派发**——
+`set_xxx` 只置 `s_notify_pending`（任何任务都可以安全调用），
+`config_store_notify_dispatch()` 由 `ui/app.c` 的一个 **100ms lv_timer** 在
+LVGL 任务上下文里统一调用（`config_notify_timer_cb`）。
+延迟只影响"数值/文字标签刷新"，音量/EQ/亮度等硬件应用仍由调用方立即执行。
+因此：**不要再把回调改回 `set_xxx` 内同步执行**，也不要在 `set_xxx` 里调任何 LVGL API。

@@ -74,6 +74,13 @@ typedef struct {
     bool     eq_valid;              /* 是否选择了 EQ 预设 */
     char     eq_name[EQ_FILE_NAME_MAX];   /* .eq 文件名（不含路径） */
     eq_preset_t eq_data;            /* 解析后的 EQ 参数（eq_valid 时有效） */
+    /* "最后播放歌曲"所在的目录/歌单名（纯 UI 展示用：槽位列表显示
+       "SAVE1 <列表名>"）。⚠ 与 last_global 同属一个槽位，必须一起打包/解包：
+       2026-11 修复前它只存在槽位缓存里，且 config_store_set_slot_list_name()
+       要求"槽位已有数据"——于是**首次保存一个空槽位时名字被丢掉**（列表里
+       只剩 "SAVE2"，看起来像"没保存"）。放进 s_live 后，任何一次保存都会
+       连同列表名一起落盘，不再依赖缓存状态。 */
+    char     list_name[CONFIG_STORE_SLOT_NAME_MAX];
 } config_live_t;
 
 static config_live_t s_live = {
@@ -87,6 +94,7 @@ static config_live_t s_live = {
     .last_global       = 0,
     .eq_valid          = false,
     .eq_name           = "",
+    .list_name         = "",
 };
 
 /* ========== 不可切换字段（全局共用一份，不随配置槽位切换） ========== */
@@ -178,7 +186,7 @@ static void slot_key(char *buf, size_t size, uint32_t idx)
 }
 
 /* 把内存中的可切换字段打包成槽位 blob（含 UI 显示的列表名快照） */
-static void slot_pack(config_slot_blob_t *b, const char *list_name)
+static void slot_pack(config_slot_blob_t *b)
 {
     memset(b, 0, sizeof(*b));
     b->version           = SLOT_BLOB_VERSION;
@@ -196,9 +204,7 @@ static void slot_pack(config_slot_blob_t *b, const char *list_name)
         snprintf(b->eq_name, sizeof(b->eq_name), "%s", s_live.eq_name);
         b->eq_data = s_live.eq_data;
     }
-    if (list_name != NULL) {
-        snprintf(b->last_list_name, sizeof(b->last_list_name), "%s", list_name);
-    }
+    snprintf(b->last_list_name, sizeof(b->last_list_name), "%s", s_live.list_name);
 }
 
 /* 把槽位 blob 解包进内存可切换字段（切换槽位/开机加载时） */
@@ -221,6 +227,8 @@ static void slot_unpack(const config_slot_blob_t *b)
         snprintf(s_live.eq_name, sizeof(s_live.eq_name), "%s", b->eq_name);
         s_live.eq_data = b->eq_data;
     }
+    /* 列表名快照（纯展示用，与 last_global 成对） */
+    snprintf(s_live.list_name, sizeof(s_live.list_name), "%s", b->last_list_name);
     /* 音量/循环模式做一次范围防御（手改 NVS / 旧数据） */
     if (s_live.volume > CONFIG_STORE_VOLUME_MAX) {
         s_live.volume = CONFIG_STORE_VOLUME_MAX;
@@ -244,6 +252,7 @@ static void slot_apply_defaults(void)
     s_live.eq_valid          = false;
     s_live.eq_name[0]        = '\0';
     memset(&s_live.eq_data, 0, sizeof(s_live.eq_data));
+    s_live.list_name[0]      = '\0';
 }
 
 /* 从 NVS 读槽位 blob 到缓存；返回 true = 有效槽位（含版本校验） */
@@ -381,9 +390,39 @@ static void cfg_erase_key(const char *key)
     nvs_commit(s_nvs);
 }
 
-/* 通知所有已注册的变更回调（在调用者线程上下文同步执行） */
+/* ------------------------------------------------------------------ */
+/* 变更通知（延迟派发）                                                 */
+/* ------------------------------------------------------------------ */
+
+/* 待派发的变更通知标志（多任务写、LVGL 任务读并清）。
+   ⚠⚠ 这里是**唯一**能让 UI 回调安全执行的设计：`set_xxx` 可能在任何任务里
+   被调用（尤其是播放控制器的 player_ctrl 任务），而回调方（设置页/状态栏/
+   通知栏）直接操作 LVGL 控件。2026-11 真实事故：player_ctrl 调
+   config_store_set_shuffle → 回调里 lv_label_set_text 在**非 LVGL 任务**里
+   改 LVGL 对象树，与同核的 LVGL 渲染并发 → 卡死在 lv_inv_area，
+   task_wdt 触发（CPU0: player_ctrl）。所以 set_xxx 一律只置脏标记，
+   由 LVGL 任务的定时器统一派发（见 ui/app.c 的 config_notify_timer_cb）。 */
+static volatile bool s_notify_pending = false;
+
+/* 请求一次变更通知（只置标志，绝不在这里调回调） */
 static void config_notify(void)
 {
+    s_notify_pending = true;
+}
+
+bool config_store_notify_pending(void)
+{
+    return s_notify_pending;
+}
+
+void config_store_notify_dispatch(void)
+{
+    if (!s_notify_pending) {
+        return;
+    }
+    /* 先清标志再回调：回调里若又发生 set_xxx，会在下一轮再派发一次，
+       不会丢通知也不会无限递归 */
+    s_notify_pending = false;
     for (uint8_t i = 0; i < s_cb_count; i++) {
         if (s_cbs[i].cb != NULL) {
             s_cbs[i].cb(s_cbs[i].ctx);
@@ -783,20 +822,21 @@ void config_store_save_active_slot(void)
     if (s_nvs == 0 || s_slot_active >= CONFIG_STORE_SLOT_COUNT) {
         return;
     }
-    /* 列表名快照由 UI 侧（config_slots）在切换/关机的保存时机写入，这里沿用
-       缓存里已有的名字，避免存储层反向依赖 playlist */
+    /* 列表名快照已经和 last_global 一起放在 s_live 里（由
+       config_store_set_slot_list_name 写入），这里整块打包即可——
+       不再从槽位缓存里取名字，也不受"槽位是否已有数据"影响 */
     config_slot_blob_t b;
-    const char *name = s_slot_cache_valid[s_slot_active]
-                       ? s_slot_cache[s_slot_active].last_list_name : "";
-    slot_pack(&b, name);
+    slot_pack(&b);
     slot_cache_store(s_slot_active, &b);
     s_slot_active_saved = true;
     ESP_LOGI(TAG, "SAVE%u saved to NVS: vol=%u loop=%u shuffle=%d sleep=%u min "
-                  "last=%u(%s)",
+                  "last=%u(%s) list=%s eq=%s",
              (unsigned)(s_slot_active + 1u), (unsigned)b.volume,
              (unsigned)b.loop_mode, (int)b.shuffle,
              (unsigned)b.sleep_default_min, (unsigned)b.last_global,
-             b.last_valid ? "valid" : "none");
+             b.last_valid ? "valid" : "none",
+             b.last_list_name[0] ? b.last_list_name : "-",
+             b.eq_valid ? b.eq_name : "none");
 }
 
 void config_store_set_slot_list_name(const char *name)
@@ -804,15 +844,14 @@ void config_store_set_slot_list_name(const char *name)
     if (name == NULL || name[0] == '\0' || s_slot_active >= CONFIG_STORE_SLOT_COUNT) {
         return;
     }
-    /* ⚠ 只在**槽位已有真实数据**时记录名字：否则会把一个空槽位凭空"造"成
-       已保存槽位（save_active_slot 之后 UI 会显示成有配置）。 */
-    if (!slot_cache_load(s_slot_active)) {
+    /* ⚠ 只改内存里的活跃配置（纯展示字段），**不写 NVS**：避免每次切歌都写
+       flash；随下一次 config_store_save_active_slot 一起落盘。
+       2026-11 修复：旧实现把名字写进"槽位缓存"，且要求槽位已存在数据，
+       导致空槽位第一次保存时列表名丢失（弹窗只剩 "SAVE2"）。 */
+    if (strcmp(s_live.list_name, name) == 0) {
         return;
     }
-    /* 只改内存缓存里的名字字段：随下一次 save_active_slot 一起落盘（避免
-       每次切歌都写一次 NVS） */
-    snprintf(s_slot_cache[s_slot_active].last_list_name,
-             sizeof(s_slot_cache[s_slot_active].last_list_name), "%s", name);
+    snprintf(s_live.list_name, sizeof(s_live.list_name), "%s", name);
 }
 
 void config_store_switch_slot(uint32_t idx)
@@ -982,6 +1021,13 @@ void config_store_set_shuffle(bool on)
 
 void config_store_set_shuffle_pos(uint64_t pos)
 {
+    /* 值+有效标志都没变就直接返回（2026-11）：本 setter 是**每次切槽位/暂停/
+       关机都会调**的高频接口，而每次调用都会整块重写槽位 blob。切槽位时
+       player_controller 的 CMD_RESTORE_CONFIG 会连续两次写入同一个随机位置
+       （先写快照值、再写 adopt 后的值），没有这条短路就会白写两遍 flash。 */
+    if (s_live.shuf_pos_valid && s_live.shuf_pos == pos) {
+        return;
+    }
     s_live.shuf_pos = pos;
     s_live.shuf_pos_valid = true;
     /* 内部状态（随机序列现场），UI 不展示，无需通知回调；随槽位一起落盘 */
@@ -1130,6 +1176,13 @@ void config_store_set_was_playing(bool playing)
 
 void config_store_set_last_song(uint32_t global)
 {
+    /* 值+有效标志都没变就直接返回（2026-11）：切槽位前/伪关机前的
+       player_controller_sync_config() 会无条件调本函数，若歌曲没变就没有
+       必要重写整个槽位 blob（真正必须落盘的那次由
+       config_store_switch_slot / save_active_slot 自己完成）。 */
+    if (s_live.last_valid && s_live.last_global == global) {
+        return;
+    }
     s_live.last_global = global;
     s_live.last_valid = true;
     /* 位置类记录无 UI 展示，不通知回调；随槽位一起落盘 */

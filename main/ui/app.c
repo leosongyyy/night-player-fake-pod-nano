@@ -24,6 +24,12 @@ static const char *TAG = "app";
 /* 状态栏电量/音量刷新周期（ms）：电压 0.01V 精度，每 5 秒更新一次 */
 #define STATUS_BATTERY_REFRESH_MS  5000
 
+/* 配置变更通知派发周期（ms）：config_store 的 set_xxx 只置"待通知"标志，
+   由本文件创建的 lv_timer 在 LVGL 任务里统一派发（原因见 config_store.h
+   的变更回调说明与 app_ui_create 注释）。100ms 足够"按下即见"，又不会因为
+   高频改配置（拖音量）反复重绘。 */
+#define CONFIG_NOTIFY_POLL_MS      100
+
 /* 当前页面名称（与 main_ui 的四页滑动 tab 下标一一对应） */
 static const char *const PAGE_NAMES[] = {
     "目录 / 歌单",   /* tab 0 */
@@ -85,11 +91,20 @@ static void status_refresh_volume(void)
 }
 
 /* 配置变更回调：音量（按键调节）变化后立即刷新状态栏音量显示。
-   config_store 回调在调用 set_xxx 的线程上下文同步执行（按键任务持锁调用）。 */
+   ⚠ 本回调由 ui/app.c 的派发定时器在 LVGL 任务上下文里调用（config_store 的
+   set_xxx 只置标志，不再在调用者线程里同步回调），可以安全操作 LVGL。 */
 static void app_config_changed_cb(void *ctx)
 {
     (void)ctx;
     status_refresh_volume();
+}
+
+/* 配置变更通知派发定时器（LVGL 任务上下文）：把 config_store 里累积的
+   "待通知"标志兑现成一次 UI 刷新（状态栏音量 / 通知栏滑块 / 设置页文字）。 */
+static void config_notify_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    config_store_notify_dispatch();
 }
 
 /* 状态栏周期刷新：电量（电池图标按百分比分级 + 电压 0.01V）+ 音量（实时跟随）。
@@ -175,6 +190,15 @@ static lv_obj_t *create_status_bar(void)
 
 void app_ui_create(void)
 {
+    /* 配置变更通知派发定时器（100ms）：config_store 的所有 set_xxx 只置"待通知"
+       标志，回调（状态栏音量/通知栏滑块/设置页文字）统一在这里、在 LVGL 任务
+       上下文里执行。
+       ⚠ 不能改成"在 set_xxx 里同步回调"：set_xxx 会被播放控制器任务
+       （player_ctrl）调用，回调里 lv_label_set_text 会在非 LVGL 任务里改对象
+       树 → 2026-11 实测卡死在 lv_inv_area 并触发 task_wdt。
+       延迟 100ms 只影响"数值标签刷新"，硬件（音量/EQ/亮度）仍由调用方立即应用。 */
+    lv_timer_create(config_notify_timer_cb, CONFIG_NOTIFY_POLL_MS, NULL);
+
     /* 【路径B】"热点对象优先内部 RAM"的窗口已下移到 ui/main_ui.c，只覆盖两个
        滚动列表页（目录 / 播放列表）；状态栏与下拉控制中心照旧走 PSRAM。
        依据（钉更多并不会更快，只是白吃内存余量）：IRAM_AUDIT_LVGL9.md §13。 */

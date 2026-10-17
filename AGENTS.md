@@ -187,9 +187,12 @@ main/
     storage/                # 播放器数据持久化
       config_store.h/.c     # 用户配置存储（NVS：音量/亮度/循环/随机/睡眠/息屏超时/EQ/上次位置等）。
                             # ⚠ 内含**配置槽位层**（SAVE1~SAVE4，2026-11）：音量/循环/随机+随机位置/
-                            #   睡眠定时时长/EQ/当前歌曲 属于"当前配置"，随活跃槽位整体切换；应用侧
+                            #   睡眠定时时长/EQ/当前歌曲+列表名 属于"当前配置"，随活跃槽位整体切换；应用侧
                             #   get_xxx/set_xxx 签名与语义不变（无感），见 ideas_and_exps/CONFIG_SLOTS.md
-      config_slots.h/.c     # 配置槽位切换的**运行时应用**：音量/EQ/睡眠定时落硬件，播放部分交给
+                            # ⚠ 变更通知是**延迟派发**的：set_xxx 只置标志，回调由 UI 层的 100ms lv_timer
+                            #   （config_store_notify_dispatch）在 LVGL 任务里跑——任何任务都能安全 set_xxx
+      config_slots.h/.c     # 配置槽位切换的**运行时应用**：切换前先 player_controller_sync_config()
+                            #   把播放现场存进旧槽位，再落音量/EQ/睡眠定时，播放部分交给
                             #   player_controller_restore_config（原子恢复循环/随机/歌曲并播放）
       playlist.h/.c         # 播放列表只读解析（pldata 内存映射 → 目录/歌曲/字符串）
       playlist_store.h/.c   # 播放列表存储（pldata 分区"整体重写 + 头部 commit"语义）
@@ -313,7 +316,7 @@ patches/
   - **内部 RAM 余量**：仅裁格式时稳态 **84.2KB**；再叠加"路径B"（把两个滚动列表页的热对象钉在内部 RAM）后稳态 **38.8KB**、开机完成最大连续块 **11.3KB**、DMA 最大连续块 **11.3KB**——比 `LVGL9_MIGRATION.md` §10.4 记录的 29.5KB/20KB 更宽裕，且列表快速滚动帧率从 11fps 提到 15fps 量级、慢速滚动 20+fps。
   - ⚠ **改任何与 LVGL 对象分配位置有关的东西，必须同时看帧率和内部 RAM 余量**：本次实测三个性能杠杆的排序是"**对象放哪（内部 RAM 21fps vs PSRAM 11fps）>> blend 放哪（11 vs 9）>> 字体方案（11 vs 12）**"，与"blend 是绘制热点"的直觉相反（滚动开销主要在对象树遍历/布局，对象工作集约 88KB 远超本芯片 32KB 数据 cache）。
   - 详见 `ideas_and_exps/IRAM_AUDIT_LVGL9.md`：§10 四配置对照表、§11 两次失败实验（把对象全部搬回内部 RAM 会直接见底）、§13 路径B 的最终方案与注意点。
-- **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。
+- **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。**「写 flash 与 PSRAM 的关系」已做完整审计，见 `ideas_and_exps/FLASH_WRITE_VS_PSRAM.md`**——要点：① 写 flash 期间两颗核都被停住、只屏蔽"非 IRAM"中断，所以**不会**与 LVGL 渲染并发，被冻结的核恢复后数据完好；② 真正的两条硬约束是"PSRAM 栈任务不许直接写 flash"（有断言）与"IRAM ISR 不许碰任何 PSRAM 数据/`lv_*`/FreeType 缓存/播放列表 mmap"（**无断言，靠纪律**；LVGL 对象搬进 PSRAM 后这条从"不规范"升级为"必崩"）；③ 全项目 NVS 写入口唯一（`config_store.c`）、调用栈全在内部 RAM；PSRAM 栈任务的关缓存段全部委托 deep_worker；④ PSRAM 缓冲写 flash 由 `esp_flash_write` 的 32B 栈弹跳兜住（能用，但慢）。
 - 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 240MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
 - **自动关机策略（power_service 守护任务，1s tick，触发即走既有伪关机链 `fake_shutdown_enter`）**：① 息屏且暂停超时（`CONFIG_PAUSE_AUTO_SHUTDOWN_MIN`，默认 10 分钟）；② 电池电压**持续**低于 **3.45V**（`CONFIG_LOW_BATTERY_SHUTDOWN_SEC`，默认 60 秒，0=关闭；阈值 `BATTERY_CRITICAL_LOW_MV` 与开机拒启共用，见 battery.h）。⚠ 暂无充电检测，充电态电压被抬高不会误触发。
 - 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep 或走既有伪关机。
@@ -332,7 +335,7 @@ patches/
   - 排查这类"画面残留/黑线"时，第一步就是把时钟退回 40 MHz 做对照实验。
 
 - **代码注释一律中文**；函数/变量使用 snake_case 命名，模块前缀（display_/touch_/lvgl_port_/notif_/player_/config_store_ 等）。
-- **LVGL 线程安全**：非 LVGL 任务的线程操作 UI 必须先 `lvgl_port_lock(-1)`，用完 `lvgl_port_unlock()`；LVGL 任务回调（timer/event）内已持锁，无需重复加锁。config_store 的 set_xxx 会同步触发已注册回调，UI 注册方须保证回调运行在 LVGL 任务上下文（持锁）。
+- **LVGL 线程安全**：非 LVGL 任务的线程操作 UI 必须先 `lvgl_port_lock(-1)`，用完 `lvgl_port_unlock()`；LVGL 任务回调（timer/event）内已持锁，无需重复加锁。**config_store 的 `set_xxx` 只置"待通知"标志、绝不同步调回调**：已注册回调由 `ui/app.c` 的 100ms lv_timer（`config_store_notify_dispatch()`）在 LVGL 任务上下文统一派发——所以任何任务都可以安全 set_xxx，而回调体内可以放心操作 LVGL 控件。⚠ **不要把通知改回"在 set_xxx 里同步执行回调"**：`player_ctrl` 任务会调 set_xxx，回调里的 `lv_label_set_text` 会在非 LVGL 任务里改对象树，2026-11 实测卡死 `lv_inv_area` 并触发 task_wdt（见 `CONFIG_SLOTS.md` §七 bug B）。
 - **改完即烧录**：首次烧录时，若未指定串口号，则列出串口并询问用户，后续修改完成后直接构建并烧录到对应串口并验证。
 - **新模块记得更新 `main/CMakeLists.txt`**：新增源码文件需纳入 `MAIN_SRCS`（部分模块受 Kconfig 条件编译控制，见 CMakeLists 注释）。
 - **⚠ 禁止用 shell 文本改写工具编辑源文件（真实事故）**：曾用 `Get-Content -Raw` + `-replace` + `Set-Content` 管道批量删行，**编码往返把 `main/ui/settings_menu.c` 里 163 行中文注释/字符串变成了替换字符（U+FFFD）**——ASCII 代码完好，中文全毁，只能 `git checkout` 取回 HEAD 再逐条重放本次会话的改动（includes、rescan 的 PSRAM 栈 + deep_worker 委托、ClickWheel 覆盖层与开关行），代价是一次完整的恢复流程。规则: 改文件**只用文件编辑工具**（`edit`/`write`），不要用 shell 的 `Set-Content`/`Out-File`/`>` 重定向/`-replace` 管道改写源码；

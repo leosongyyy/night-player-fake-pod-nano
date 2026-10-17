@@ -77,6 +77,9 @@ extern "C" {
  *
  * 保存时机（三条路，保证"切走再切回"与"断电重启"都不丢）：
  *   1. 切换槽位前：先把当前活跃槽位存回 NVS（config_store_switch_slot 内部）；
+ *      调用方（core/storage/config_slots）必须在切换前把**播放现场**同步进来
+ *      （当前歌曲/随机位置/列表名，见 player_controller_sync_config）——
+ *      否则存下去的是"上一次落盘的歌曲"，表现为"切走再切回还是原来那首"；
  *   2. 每次 set_xxx：增量存回当前活跃槽位（同一 blob 反复覆盖，NVS 分页复用，
  *      不会无限增长；这样"改完直接长按关机/断电"也不会丢）；
  *   3. 伪关机：player_controller 记完最后播放位置后存回当前槽位。
@@ -88,8 +91,12 @@ extern "C" {
  * 第一次保存（关机或切换）后全局键冻结、后续以槽位为准。
  *
  * 设计要点：
- *   - 所有 set_xxx 写 NVS 并通知已注册的变更回调（config_store_register_cb），
- *     UI 通过回调同步各页面的控件显示（例如通知栏亮度滑块与设置页共用配置源）；
+ *   - 所有 set_xxx 写 NVS，并**只置一个"待通知"标志**；真正的变更回调由
+ *     LVGL 任务的定时器统一派发（config_store_notify_dispatch）——因此
+ *     **任何任务都可以安全调用 set_xxx**，不会在非 LVGL 任务里碰 LVGL 对象
+ *     （2026-11 事故：player_ctrl 任务里 set_shuffle 直接跑 UI 回调 → 卡死
+ *     lv_inv_area → task_wdt）。UI 通过回调同步各页面的控件显示（例如通知栏
+ *     亮度滑块与设置页共用配置源），延迟 ≤ 派发定时器周期（100ms）；
  *   - 本模块只负责"存储 + 通知"，不直接操作硬件（音量/亮度/循环模式的
  *     "立即生效"由调用方在 LVGL 上下文中执行，如 display_set_brightness
  *     必须在持锁时调用；槽位切换的运行时应用见 core/storage/config_slots）；
@@ -309,7 +316,12 @@ void config_store_set_loop_mode(uint8_t mode);
 /** @brief 设置随机播放开关并持久化 */
 void config_store_set_shuffle(bool on);
 
-/** @brief 保存随机播放位置并持久化（由 player_controller 调用） */
+/**
+ * @brief 保存随机播放位置并持久化（由 player_controller 调用）
+ *
+ * ⚠ 值（且 valid 标志）未变时**直接返回、不写 NVS**：切槽位/暂停/关机会反复
+ *   调本接口，整块重写槽位 blob 没必要（见 CONFIG_SLOTS.md §七.3）。
+ */
 void config_store_set_shuffle_pos(uint64_t pos);
 
 /** @brief 设置睡眠定时的默认时长并持久化（分钟，0=关闭） */
@@ -360,7 +372,10 @@ void config_store_set_replay_gain(bool on);
 void config_store_set_was_playing(bool playing);
 
 /** @brief 保存上次播放歌曲并持久化（由 player_controller 调用）。
- *          ⚠ 只记歌曲下标，不记秒数位置（NightPlayer 机制，见 get_last_song） */
+ *          ⚠ 只记歌曲下标，不记秒数位置（NightPlayer 机制，见 get_last_song）
+ *          ⚠ 值与 valid 标志未变时**直接返回、不写 NVS**：切槽位前/伪关机前的
+ *            player_controller_sync_config() 会无条件调它，歌曲没变就不该重写
+ *            槽位 blob（真正必须落盘的那次由 switch_slot / save_active_slot 做） */
 void config_store_set_last_song(uint32_t global);
 
 /** @brief 清除"上次播放位置"与"随机播放位置"记录（failsafe 界面"重置歌曲位置"
@@ -426,14 +441,33 @@ void config_store_get_slot_snapshot(uint32_t idx, config_store_slot_snapshot_t *
 void config_store_save_active_slot(void);
 
 /**
- * @brief 记录"当前列表名"快照（UI 显示 SAVE1 <列表名> 用，由 UI 侧调用）
+ * @brief 记录"当前列表名"快照（UI 显示 SAVE1 <列表名> 用，由 UI/播放侧调用）
  *
- * 存进**当前活跃槽位**的内存缓存（下次 config_store_save_active_slot 时随
- * blob 一起落盘）。config_store 不认识 playlist，故名字由调用方提供。
+ * 存进**当前活跃槽位**的内存配置（与 last_global 同属一个槽位，下次
+ * config_store_save_active_slot 时随 blob 一起落盘；本函数**不写 NVS**）。
+ * config_store 不认识 playlist，故名字由调用方提供。
  *
  * @param name 目录/歌单名（NULL 或空串忽略）
  */
 void config_store_set_slot_list_name(const char *name);
+
+/**
+ * @brief 是否有尚未派发的配置变更通知（调试/可选查询用）
+ *
+ * set_xxx 只置"待通知"标志，真正的回调派发见 config_store_notify_dispatch。
+ */
+bool config_store_notify_pending(void);
+
+/**
+ * @brief 派发待处理的配置变更通知（**必须在 LVGL 任务上下文调用**）
+ *
+ * 由 ui/app.c 的一个 100ms lv_timer 周期调用。所有已注册回调（设置页/状态栏/
+ * 通知栏）都在这里、在 LVGL 任务里执行，因此可以安全操作 LVGL 控件。
+ *
+ * 无待通知时立即返回；派发期间若有新的 set_xxx 发生，会在下一轮再派发一次
+ * （不丢通知、不递归）。
+ */
+void config_store_notify_dispatch(void);
 
 /**
  * @brief 切换活跃槽位（存储层）：先保存当前槽位 → 再载入目标槽位到内存
@@ -453,8 +487,10 @@ void config_store_switch_slot(uint32_t idx);
 /**
  * @brief 注册配置变更回调（最多 4 个，重复注册会覆盖同名项）
  *
- * 回调在调用 set_xxx 的线程上下文中同步执行。UI 注册方需保证回调运行在
- * LVGL 任务上下文（持锁），例如滑块/按钮事件回调内触发 set_xxx 的场景。
+ * ⚠ **回调不在 set_xxx 里同步执行**：set_xxx 只置"待通知"标志，回调统一由
+ *   config_store_notify_dispatch() 在 **LVGL 任务上下文**里派发（ui/app.c 的
+ *   100ms 定时器），因此回调内可以安全操作 LVGL 控件，且任何任务都可以调用
+ *   set_xxx（不会在非 LVGL 任务里碰 UI 对象树）。
  *
  * @param cb  回调函数（NULL 忽略）
  * @param ctx 透传给回调的用户上下文

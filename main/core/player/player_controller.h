@@ -176,6 +176,19 @@ void player_controller_restore_config(player_loop_mode_t loop, bool shuffle,
                                       bool shuffle_valid, uint64_t shuffle_pos,
                                       uint32_t song);
 
+/**
+ * @brief 把当前播放现场（歌曲 / 随机序列位置 / 所在列表名）同步进活跃配置槽位
+ *
+ * 只写 config_store 的内存配置 + 当前槽位 blob（不触发 UI 通知，也不改播放
+ * 状态），目的是让"切走前保存旧槽位"存到的是**此刻真正在播的歌**。
+ *
+ * ⚠ 调用点：core/storage/config_slots 切换槽位前（必须在
+ *   config_store_switch_slot 之前，否则存下去的是上一次落盘的旧歌曲）；
+ *   伪关机保存播放位置时也走它（player_controller_save_last_position 内部）。
+ *   控制器未就绪（重扫/重启途中）时不做任何事，可安全调用。
+ */
+void player_controller_sync_config(void);
+
 /** @brief 读取播放器状态快照（供前端界面刷新） */
 void player_controller_get_status(player_controller_status_t *out);
 
