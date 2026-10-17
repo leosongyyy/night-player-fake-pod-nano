@@ -736,8 +736,11 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_clear_flag(grab_bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *grab_label = lv_label_create(grab_bar);
-    lv_label_set_text(grab_label, "向上滑动关闭");
-    lv_obj_set_style_text_font(grab_label, UI_SYSTEM_FONT, 0);
+    /* 图标+文字混排：必须用内嵌位图字体（UI_ICON_TEXT_FONT）——它缺字时回退到
+       LVGL 内置 montserrat_24，LV_SYMBOL_UP 才能画出来；TTF 系统字体没有 PUA
+       区图标字形，用一个字就会变成方块（2026-10 TTF 迁移时曾因此删掉图标） */
+    lv_label_set_text(grab_label, LV_SYMBOL_UP " 向上滑动关闭");
+    lv_obj_set_style_text_font(grab_label, UI_ICON_TEXT_FONT, 0);
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
