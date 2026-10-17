@@ -36,9 +36,9 @@ static const char *TAG = "dir_list";
 #define DIR_LIST_Y        (UI_STATUS_BAR_H + UI_TITLE_BAR_H)
 #define DIR_LIST_H        (DIR_CARD_H - UI_TITLE_BAR_H)
 
-/* 目录行固定高度：完整字体 line_height=33，内容区需容纳（item_height-12≥33），
-   故取 52（见 VIRTUAL_LIST_USAGE.md 踩坑 5） */
-#define DIR_ITEM_H        52
+/* 目录行固定高度：与歌曲列表共用 UI_LIST_ITEM_H（两页行距/行数必须一致；
+   历史遗留：本页曾单独写 52，导致两页行高不同。定义见 list_common.h） */
+#define DIR_ITEM_H        UI_LIST_ITEM_H
 
 /* 等待播放器就绪的轮询周期（ms）：UI 创建早于 player_controller_init */
 #define DIR_REFRESH_MS    300

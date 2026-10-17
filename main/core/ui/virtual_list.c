@@ -71,16 +71,21 @@ static virtual_list_state_t *vlist_get_state(lv_obj_t *list)
 
 /* 把跑马灯开关应用到所有行槽的文本 label：
    开启 → 循环滚动（图标保持不动）；关闭 → 裁剪。
-   （不再随滚动临时切换：常驻行滚动时不被重绑，跑马灯保持连续，
-     只有新进入视口的行会从头开始，属正常表现）
-   滚动的节奏（起始延迟/轮数/轮间停顿）统一由 core/ui/global_style 管理 */
+   滚动的节奏（起始延迟/轮数/轮间停顿）统一由 core/ui/global_style 管理；
+   "滚动期间统一暂停"也由它负责，本函数只管"这一页该不该有跑马灯"。 */
 static void vlist_apply_marquee(virtual_list_state_t *st)
 {
-    lv_label_long_mode_t mode = st->marquee_enable
+    const bool want = st->marquee_enable;
+    lv_label_long_mode_t mode = want
         ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_CLIP;
     for (uint32_t i = 0; i < st->row_count; i++) {
         lv_label_set_long_mode(st->rows[i].text, mode);
-        if (st->marquee_enable) {
+        /* ⚠ 必须用 set_suppressed 登记"这一行**本来就不该滚**"（非列表页/离开页面
+           时上层会 set_marquee(false)）。不登记的话，SCROLL_END 的自动恢复
+           会把它当成"被滚动暂停过"而重新开成 CIRCULAR —— 表现为离开列表页后
+           其它页的跑马灯自己跑起来（真机实测 bug，见 global_style.c 说明 ②）。 */
+        global_style_marquee_set_suppressed(st->rows[i].text, !want);
+        if (want) {
             global_style_marquee_attach(st->rows[i].text);
         }
     }
@@ -199,6 +204,24 @@ static void vlist_scroll_event_cb(lv_event_t *e)
 {
     lv_obj_t *list = lv_event_get_current_target(e);
     vlist_rebind(vlist_get_state(list), list, false);
+}
+
+/* 滚动开始 / 结束：滚动期间统一暂停跑马灯（用户要求：滚动由用户主动触发，
+   优先保它的手感）。实测依据：跑马灯动画每帧都会让整块视口重新失效，而滚动
+   本来就要整块重绘，叠加后一帧要画多次。
+   ⚠ 用 LVGL 自己的 SCROLL_BEGIN/SCROLL_END 成对事件（手势拖动、惯性、
+   scroll_to 动画都会发），**不要再加"位移停 N 毫秒才算停"的定时器**——
+   恢复后的观感由动画模板自带的 1 s 起始延迟负责。 */
+static void vlist_scroll_begin_event_cb(lv_event_t *e)
+{
+    (void)e;
+    global_style_marquee_set_scroll_active(true);
+}
+
+static void vlist_scroll_end_event_cb(lv_event_t *e)
+{
+    (void)e;
+    global_style_marquee_set_scroll_active(false);
 }
 
 /* 点击事件（由行容器冒泡到列表）：找出被点的行对应的条目并选中。
@@ -382,8 +405,10 @@ lv_obj_t *virtual_list_create(lv_obj_t *parent,
     /* 路径B：本列表的热对象窗口到此结束（绑定阶段的文本缓冲另开小窗口） */
     lvgl_mem_set_internal_prefer(false);
 
-    /* 事件：滚动重绑 + 点击选中 */
+    /* 事件：滚动重绑 + 点击选中 + 跑马灯暂停/恢复 */
     lv_obj_add_event_cb(list, vlist_scroll_event_cb, LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(list, vlist_scroll_begin_event_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+    lv_obj_add_event_cb(list, vlist_scroll_end_event_cb, LV_EVENT_SCROLL_END, NULL);
     lv_obj_add_event_cb(list, vlist_click_event_cb, LV_EVENT_CLICKED, NULL);
 
     /* 初始绑定（渲染首屏可见条目） */
@@ -462,6 +487,12 @@ void virtual_list_set_marquee(lv_obj_t *list, bool enable)
         return;
     }
     st->marquee_enable = enable;
+    if (enable) {
+        /* 防御：被切换成"这一页要跑马灯"时，说明用户已经在看这一页、不可能
+           还在滚动 —— 顺手清掉全局暂停标记。若某次滚动因为对象被重建等原因
+           没收到 SCROLL_END，这里就是唯一的兜底（否则跑马灯会永久不动）。 */
+        global_style_marquee_set_scroll_active(false);
+    }
     vlist_apply_marquee(st);   /* 立即切换所有行文本的长文本模式 */
 }
 

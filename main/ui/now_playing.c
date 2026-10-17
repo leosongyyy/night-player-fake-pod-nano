@@ -885,12 +885,17 @@ void now_playing_set_marquee(bool enable)
         ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_CLIP;
     if (s_title_label != NULL) {
         lv_label_set_long_mode(s_title_label, mode);
+        /* 登记"这一页不该滚"：否则 SCROLL_END 的自动恢复会把它当成
+           "被滚动暂停过"而重开（离开播放页后跑马灯自己跑起来，见
+           core/ui/global_style.h 的 set_suppressed 说明） */
+        global_style_marquee_set_suppressed(s_title_label, !enable);
         if (enable) {
             global_style_marquee_attach(s_title_label);   /* 按全局节奏重跑 */
         }
     }
     if (s_sub_label != NULL) {
         lv_label_set_long_mode(s_sub_label, mode);
+        global_style_marquee_set_suppressed(s_sub_label, !enable);
         if (enable) {
             global_style_marquee_attach(s_sub_label);
         }

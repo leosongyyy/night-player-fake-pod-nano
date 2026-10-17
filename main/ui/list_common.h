@@ -34,6 +34,14 @@ extern "C" {
 /** 列表页左右缩进（px）：卡片两侧距屏幕边缘的黑边（含设置页同款留白） */
 #define UI_CARD_MARGIN_X  15
 
+/** 列表行高度（px）：**目录页与歌曲页必须一致**（历史遗留：目录页曾单独用 52，
+    导致两页行数/行距/滚动步进都不统一）。
+ *  下限约束：虚拟列表给文本留 12px（上下各 6）的居中余量，故
+ *  `UI_LIST_ITEM_H - 12` 必须 ≥ 系统字体 line_height（完整字体 33 / 精简字体约 20），
+ *  取 56 对两套字体都成立（见 VIRTUAL_LIST_USAGE.md 踩坑 5）。
+ *  ⚠ 它同时决定 `virtual_list` 的行槽数与 pad_top，改它等于改两页的可见行数。 */
+#define UI_LIST_ITEM_H  56
+
 /**
  * @brief 应用 tab 页通用样式（黑底、无边框、无内边距、不可滚动）
  * @param page tab 页容器（lv_tabview_add_tab 的返回值）

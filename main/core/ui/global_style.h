@@ -91,3 +91,49 @@ void global_style_marquee_attach(lv_obj_t *label);
  * 所以**真正的换歌依旧是"停顿 1 秒 → 滚 N 轮"**，1 秒初始延迟不受影响。
  */
 void global_style_marquee_set_text(lv_obj_t *label, const char *text);
+
+/**
+ * @brief 通知"列表正在滚动"（BEGIN）/ 已停止（END），滚动期间统一暂停所有跑马灯
+ *
+ * 动机（实测）：跑马灯动画每帧都会让可见行整块重新失效，而滚动本身就已经
+ * 让整个视口失效——两者叠加等于"一帧画多次"。用户已确认"跑马灯帧率低一点
+ * 不影响手感，滚动才是用户主动触发的，优先保它"，故滚动期间统一暂停。
+ *
+ * 语义（**内部没有任何定时器**，调用方直接按 LVGL 的滚动事件开/关）：
+ * - `active=true`（挂在 `LV_EVENT_SCROLL_BEGIN`）：把当前处于
+ *   `LV_LABEL_LONG_SCROLL_CIRCULAR` 的跑马灯全部切到 `LV_LABEL_LONG_CLIP`
+ *   （动画被删除，彻底停下），并记住哪些原本在滚；
+ * - `active=false`（挂在 `LV_EVENT_SCROLL_END`）：只把**原本在滚的**恢复成
+ *   CIRCULAR 并按全局节奏从头重跑（非当前页那些已被抑制的仍保持 CLIP）。
+ * - **幂等**：传入与当前相同的状态直接返回，所以也可以每帧都调。
+ *
+ * 恢复后不会立刻滚动：动画模板自带 `GLOBAL_STYLE_MARQUEE_START_DELAY_MS`
+ * （默认 1 s 起始延迟），观感上就是"停手后过一会儿才重新开始"——这正是
+ * 不需要"位移停 250 ms 才认为停了"那种定时器猜测的原因。
+ *
+ * 整个机制只作用于通过 `global_style_marquee_attach()` 登记过的 label，
+ * label 被销毁时由 `LV_EVENT_DELETE` 自动移出登记表（**绝不用
+ * `lv_obj_is_valid()` 轮询**，见 global_style.c 上方说明 ①），可安全重复调用。
+ *
+ * ⚠ 必须在 LVGL 上下文调用（已持 lvgl_port_lock 或在 LVGL 事件/定时器回调内）。
+ */
+void global_style_marquee_set_scroll_active(bool active);
+
+/**
+ * @brief 主动抑制 / 解除抑制某个 label 的跑马灯（非当前页、画布接管绘制）
+ *
+ * 与"被滚动暂停"的区别（**很重要，别用混**）：
+ * - 滚动暂停（`set_scroll_active`）的语义是"**暂时**停"，`LV_EVENT_SCROLL_END`
+ *   时会自动恢复成 CIRCULAR；
+ * - 本函数 `suppressed=true` 的语义是"**永远不要跑马灯**"，任何自动恢复路径
+ *   都会跳过它（`attach()` 也会直接返回）。
+ *
+ * 所以上层主动把一批 label 切成 CLIP 时（例如 `virtual_list_set_marquee()`
+ * 在非列表页关闭、画布接管绘制、或播放页离开）必须用**本函数**登记，
+ * 否则滚动一停它们就会被恢复成 CIRCULAR —— 表现为"离开列表页后其它页的
+ * 跑马灯自己跑起来"（实验分支真机定位到的 bug）。
+ *
+ * @param label      已经 attach 过的 label（未登记则自动登记）
+ * @param suppressed true = 抑制，false = 解除抑制
+ */
+void global_style_marquee_set_suppressed(lv_obj_t *label, bool suppressed);

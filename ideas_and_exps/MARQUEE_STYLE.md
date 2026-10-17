@@ -221,3 +221,103 @@ ESP_LOGI(TAG, "TAKEOVER [%s] start=%d end=%d time=%u act=%d cnt=%u pause=%u",
 正常应看到 `cnt=3`（总轮数）、`act=-1000`（起始延迟来自模板）、
 `end` 为负的滚动距离；若 `cnt=0xFFFF` 说明没接管成功（`lv_anim_get()` 没有拿到
 LVGL 那条滚动动画）。
+
+---
+
+## 9. 登记表：滚动期统一暂停 + "抑制"与"暂停"正交（2026-11）
+
+> 本节记录从实验分支 `listview_perf_improvement` 回灌的两件事：**滚动期间统一暂停
+> 跑马灯**（性能），以及它暴露出来的**两个真实 bug 的修法**（正确性）。
+> ⚠ 本节之前的章节是 LVGL 8.4 时代写的（§2 的"动画模板只支持一半"等结论已随
+> LVGL 9 迁移失效，见 `LVGL9_MIGRATION.md`）；本节内容全部针对 **LVGL 9.4**。
+
+### 9.1 为什么要暂停
+
+列表滚动时，视口本来就必须整块重绘（面板没有显存滚动能力）。而跑马灯动画每帧都会
+让可见行**再次**失效 ⇒ 同一帧要画多次。实验分支实测：把跑马灯在滚动期间停掉后，
+滚动帧耗时从 38 ms 量级降到 20 ms 量级。
+
+用户已确认取舍：**"跑马灯帧率低一点不影响手感，滚动才是用户主动触发的，优先保它。"**
+所以现在的行为是：
+
+- 滚动开始（`LV_EVENT_SCROLL_BEGIN`）→ 所有跑马灯切 `LV_LABEL_LONG_CLIP`
+  （动画被删除，彻底停下）；
+- 滚动结束（`LV_EVENT_SCROLL_END`）→ 只把**原本在滚的那批**恢复成
+  `SCROLL_CIRCULAR`，并按全局节奏从头重跑。
+
+实现入口：`virtual_list.c` 的 `vlist_scroll_begin_event_cb()` /
+`vlist_scroll_end_event_cb()` 两个回调，各自只调一次
+`global_style_marquee_set_scroll_active(true/false)`（该函数**幂等**）。
+
+> **为什么不用"位移停 N 毫秒才算停"的定时器**（第一版就是这么写的，已删）：
+> ① LVGL 9 本来就成对发 `SCROLL_BEGIN`/`SCROLL_END`（手势拖动
+> `lv_indev_scroll.c`、程序化滚动与滚动动画结束 `lv_obj_scroll.c`），比"猜"准；
+> ② 恢复后**不需要延迟**——动画模板自带 `GLOBAL_STYLE_MARQUEE_START_DELAY_MS`
+> （默认 1 s 起始延迟），观感天然是"停手后过一会儿才重新开始"；
+> ③ 少一个定时器就少一类 bug（那个定时器还踩过"默认无限重复、回调里只清句柄
+> 不停定时器 → 每次滚动手势泄漏一个孤儿定时器"的坑）。
+>
+> 唯一要防的边界：若某次滚动因对象重建等原因**丢了 `SCROLL_END`**，全局暂停标记
+> 会一直为真、跑马灯再也不动。兜底放在 `virtual_list_set_marquee(true)`（= 切到
+> 列表页、不可能还在滚）里顺手把标记清掉。
+
+### 9.2 登记表本身（`global_style.c` 顶部）
+
+暂停/恢复必须知道"哪些 label 现在在滚"，于是 `attach()` 时把 label 登记进一张
+固定容量表（`GS_MARQUEE_REG_MAX = 48`；本项目实际 9+9+2 = 20 个）。
+
+**必须记住的一条：登记项的生命周期交给 `LV_EVENT_DELETE`，绝不用
+`lv_obj_is_valid()` 轮询。**
+
+| 做法 | 代价 |
+|---|---|
+| `lv_obj_is_valid()` | **① 很贵**：从屏幕开始递归遍历整棵对象树，每个登记项扫一遍；**② 不可靠**：label 删除后内存可能被 LVGL 复用成别的类，指针仍然"在树里" → 校验通过 → 对一个非 label 对象调 `lv_label_set_long_mode()` → 行为未定义 → LVGL 任务卡死 → `task_wdt` 超时（真机 backtrace 落在 `gs_marquee_apply_all → obj_valid_child`） |
+| `LV_EVENT_DELETE` 回调 | O(1) 摘除，框架保证只发一次 |
+
+真机症状（踩过）：滚动停下那一刻必定卡死一次，因为那正是"恢复跑马灯"的
+路径被触发的时刻（当时是 250 ms 定时器；现在已经换成 `LV_EVENT_SCROLL_END`，
+但**这条结论与触发方式无关**，照样适用）。
+
+### 9.3 "被暂停"与"被抑制"必须是两个状态
+
+| 状态 | 语义 | 谁写 | 会不会被自动恢复 |
+|---|---|---|---|
+| `marquee_off` | **因滚动暂时停下** | `set_scroll_active(true)` 内部 | 会，`SCROLL_END` 时恢复 |
+| `no_marquee` | **这一页本来就该没有跑马灯** | 上层 `global_style_marquee_set_suppressed(label, true)` | **永不**，任何自动路径都跳过它 |
+
+调用约定（**很容易用混，务必按这个来**）：
+
+- 上层主动把某批 label 切成 CLIP 时（`virtual_list_set_marquee(false)` / 离开列表页 /
+  `now_playing_set_marquee(false)` / 离开播放页）→ **必须**调
+  `global_style_marquee_set_suppressed(label, true)`；
+- 滚动机制自己只用 `set_scroll_active()`，**不要**去写 `no_marquee`。
+
+不这么做的后果（真实 bug）：非当前页的 label 被切成 CLIP 后，只要滚动停过一次，
+恢复路径就会把它当成"被滚动暂停过"而重开成 CIRCULAR —— 表现为
+**"离开列表页后，其它页的跑马灯自己跑起来"**。
+
+> ⚠ 本项目**没有**"用户可关闭跑马灯"的开关（历史文档里出现过这种说法，是误解）。
+> `set_suppressed` 服务的真实场景只有两个：**非当前页关闭省电**、以及画布接管绘制
+> （后者只在实验分支上）。
+
+### 9.4 一条相关的 LVGL 坑（曾经踩过）：定时器默认是无限重复的
+
+第一版用 `lv_timer_create()` 做"停手 250 ms 后恢复"，回调里只把句柄清 NULL、
+没有删定时器。而 `lv_timer_create()` 的默认 `repeat_count` 是 **-1（无限重复）**，
+于是那根定时器继续每 250 ms 触发一次、而句柄已经丢了 —— 每次滚动手势都多留一个
+孤儿定时器，长时间使用持续泄漏。
+
+**教训（对以后任何 `lv_timer` 都成立）**：要一次性必须是
+`lv_timer_set_repeat_count(timer, 1)`（配合默认 `auto_delete`），或者在回调里
+`lv_timer_delete`。**现在的实现已经不再需要任何定时器**（见 §9.1）。
+
+### 9.5 验证记录（2026-11，回灌 master 后）
+
+- 编译：debug 构建通过，无新增警告与告警；
+- 启动日志新增 `gstyle: marquee style: ...`（与 §8 一致，懒初始化一次）；
+- 整机启动、播放、列表加载正常；临时 tick 探针确认 `lv_tick` 与真实时间 1:1 推进
+  （见 `DISPLAY_FREEZE_TRIAGE.md` §6）。
+
+**待用户真机确认的项**（滚动期暂停是行为变更）：滚动时超长标题暂时不滚，松手
+（`SCROLL_END`，含惯性结束）后约 1 s 起始延迟再开始滚；从列表页滑到其它页时
+那一页没有跑马灯、再滑回来正常。

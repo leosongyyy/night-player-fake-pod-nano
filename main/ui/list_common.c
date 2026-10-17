@@ -25,8 +25,13 @@ static void title_bar_delete_cb(lv_event_t *e)
 
 void ui_page_style(lv_obj_t *page)
 {
-    lv_obj_set_style_bg_color(page, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
+    /* ⚠ 页面背景**透明**：黑底由 main_ui 的 tabview 内容容器（cont）统一提供。
+       原因见 main_ui_create() 里的说明——partial 模式下每个不透明整块背景都会
+       让每个绘制块多填一遍 2 万像素，一帧下来是好几毫秒；页面这一层被 cont
+       完全覆盖，纯属重复。视觉不变（同一个黑色）。
+       ⚠ 本函数只用于 tabview 里的四个页面；新建**全屏覆盖层**（不挂在 tabview
+       下）时不要用它，必须自己铺不透明底色。 */
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(page, 0, 0);
     lv_obj_set_style_pad_all(page, 0, 0);
     lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
@@ -163,35 +168,68 @@ void ui_card_bg_create(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
     if (corner < 0) {
         corner = 0;
     }
-
-    /* 底层：整卡圆角矩形 —— 顶部两角圆角轮廓由此显现
-       （圆角缺口处透出父容器黑色） */
-    lv_obj_t *round = lv_obj_create(parent);
-    lv_obj_set_pos(round, x, y);
-    lv_obj_set_size(round, w, h);
-    lv_obj_set_style_bg_color(round, UI_CARD_COLOR, 0);
-    lv_obj_set_style_bg_opa(round, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(round, corner, 0);
-    lv_obj_set_style_border_width(round, 0, 0);
-    lv_obj_set_style_pad_all(round, 0, 0);
-    lv_obj_clear_flag(round, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(round, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_clear_flag(round, LV_OBJ_FLAG_CLICKABLE);
-
-    /* 上层：直角矩形盖住圆角矩形的下半边（高 2*corner，含底部两角圆角
-       缺口）——同色无缝，视觉底部变直角；与顶层内容无交叠（内容在
-       更高 z 序） */
-    if (h > 2 * corner) {
-        lv_obj_t *straight = lv_obj_create(parent);
-        lv_obj_set_pos(straight, x, y + h - 2 * corner);
-        lv_obj_set_size(straight, w, 2 * corner);
-        lv_obj_set_style_bg_color(straight, UI_CARD_COLOR, 0);
-        lv_obj_set_style_bg_opa(straight, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(straight, 0, 0);
-        lv_obj_set_style_border_width(straight, 0, 0);
-        lv_obj_set_style_pad_all(straight, 0, 0);
-        lv_obj_clear_flag(straight, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scrollbar_mode(straight, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_clear_flag(straight, LV_OBJ_FLAG_CLICKABLE);
+    /* 圆角不能超过半高（否则 LVGL 会把 radius 夹到 min(w,h)/2，视觉退化） */
+    if (corner > h / 2) {
+        corner = h / 2;
     }
+
+    /* ================== 为什么拆成"圆角帽 + 直角主体" ==================
+     * ⚠ 直接用一个整卡圆角矩形（radius=corner）会让**整个卡片区域**都走 LVGL
+     *   的"复杂矩形"绘制路径：lv_draw_sw_fill.c 里只有
+     *       if(dsc->radius == 0 && grad_dir == LV_GRAD_DIR_NONE)  →  快速路径
+     *   其余情况都要先生成圆角掩码、再逐像素带掩码混合。而圆角其实只出现在
+     *   卡片顶部 corner 高的一条弧上。
+     *   实测影响：列表滚动时卡片区域每帧要被重画多次（partial 模式的绘制块），
+     *   每次都走圆角掩码路径，单这一项就吃掉好几毫秒。
+     *
+     * 拆法（视觉完全等价）：
+     *   · 圆角帽：高 2*corner，radius=corner（高度 2*corner 时 LVGL 不会夹小
+     *     radius，四角都是标准弧）；它自己的**上面两角**就是卡片的圆角轮廓；
+     *   · 直角主体：从"圆角帽的下弧起点"（y+corner）一直铺到卡片底部，
+     *     radius=0 → 走快速路径（纯色 COVER 填充近似 memset）。它同时盖住
+     *     圆角帽的**下面两角**（否则会露出两个圆角缺口），于是底部天然直角。
+     *   ⇒ 列表内容区完全落在"直角主体"里，滚动重绘时不再碰掩码路径。
+     */
+    const lv_coord_t cap_h = (lv_coord_t)(2 * corner);
+    if (corner > 0 && h > cap_h) {
+        lv_obj_t *cap = lv_obj_create(parent);
+        lv_obj_set_pos(cap, x, y);
+        lv_obj_set_size(cap, w, cap_h);
+        lv_obj_set_style_bg_color(cap, UI_CARD_COLOR, 0);
+        lv_obj_set_style_bg_opa(cap, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(cap, corner, 0);
+        lv_obj_set_style_border_width(cap, 0, 0);
+        lv_obj_set_style_pad_all(cap, 0, 0);
+        lv_obj_clear_flag(cap, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(cap, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_clear_flag(cap, LV_OBJ_FLAG_CLICKABLE);
+    } else if (corner > 0) {
+        /* 卡片本身太矮（h ≤ 2*corner）：画不了"帽+主体"，退回单个圆角矩形。
+           本项目实际不会走到这里（列表卡片远高于 60 px）。 */
+        lv_obj_t *round = lv_obj_create(parent);
+        lv_obj_set_pos(round, x, y);
+        lv_obj_set_size(round, w, h);
+        lv_obj_set_style_bg_color(round, UI_CARD_COLOR, 0);
+        lv_obj_set_style_bg_opa(round, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(round, corner, 0);
+        lv_obj_set_style_border_width(round, 0, 0);
+        lv_obj_set_style_pad_all(round, 0, 0);
+        lv_obj_clear_flag(round, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(round, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_clear_flag(round, LV_OBJ_FLAG_CLICKABLE);
+        return;
+    }
+
+    /* 直角主体：从 y+corner 铺到底（恰好覆盖圆角帽的下弧，视觉上底部为直角） */
+    lv_obj_t *straight = lv_obj_create(parent);
+    lv_obj_set_pos(straight, x, (lv_coord_t)(y + corner));
+    lv_obj_set_size(straight, w, (lv_coord_t)(h - corner));
+    lv_obj_set_style_bg_color(straight, UI_CARD_COLOR, 0);
+    lv_obj_set_style_bg_opa(straight, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(straight, 0, 0);
+    lv_obj_set_style_border_width(straight, 0, 0);
+    lv_obj_set_style_pad_all(straight, 0, 0);
+    lv_obj_clear_flag(straight, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(straight, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(straight, LV_OBJ_FLAG_CLICKABLE);
 }

@@ -103,21 +103,38 @@ void lvgl_port_unregister_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
 void lvgl_port_set_touch_handle(esp_lcd_touch_handle_t touch_handle);
 
 /**
- * @brief 挂起 LVGL（停止 tick 计时 + 挂起 LVGL 任务）
+ * @brief 挂起 LVGL（冻结 LVGL 时间 + 挂起 LVGL 任务）
  *
- * 供息屏/深度休眠前调用：停止 lv_tick（LVGL 时间冻结，恢复后动画从暂停点
- * 继续）并挂起 LVGL 任务（停止刷屏与触摸轮询）。恢复用 lvgl_port_resume。
+ * 供息屏/深度休眠前调用：冻结 lv_tick（LVGL 时间停在这一刻，恢复后动画从
+ * 暂停点继续）并挂起 LVGL 任务（停止刷屏与触摸轮询）。恢复用 lvgl_port_resume。
  * 深度休眠（deepsleep）场景无需恢复，唤醒后系统重启重新初始化。
+ *
+ * ⚠ tick 来自 `lv_tick_set_cb()` 的硬件时间（见 lvgl_port.c 的
+ * `lvgl_port_tick_cb`），这里的"冻结"只是记一个暂停标记，**不再**去
+ * stop/start esp_timer —— 那套曾是"整屏定格"的根因，见
+ * ideas_and_exps/DISPLAY_FREEZE_TRIAGE.md。
  */
 void lvgl_port_suspend(void);
 
 /**
- * @brief 恢复 LVGL（恢复任务 + 重新启动 tick 计时）
+ * @brief 恢复 LVGL（解冻 LVGL 时间 + 恢复任务）
  *
  * 与 lvgl_port_suspend 配对，供息屏唤醒后调用。恢复后 LVGL 任务继续
- * 刷屏与触摸轮询，tick 时间从挂起时刻继续（无跳变）。
+ * 刷屏与触摸轮询，tick 时间从挂起时刻继续（无跳变、不补跑挂起期间到期的 timer）。
  */
 void lvgl_port_resume(void);
+
+/**
+ * @brief 取"刷屏提交失败"的累计次数（0 = 全部成功）
+ *
+ * `esp_lcd_panel_draw_bitmap()` 的返回值不再被忽略：失败时计一次数并按
+ * 前 3 次 / 每 256 次打一条 `ESP_LOGE`。排查屏类问题（QSPI/DMA/面板状态）
+ * 时这是第一个该看的数字——失败通常成串出现，日志本身不能拖垮帧率。
+ */
+uint32_t lvgl_port_flush_error_count(void);
+
+/** @brief 清空刷屏失败计数（开始一次观察前调用） */
+void lvgl_port_flush_stats_reset(void);
 
 #ifdef __cplusplus
 }

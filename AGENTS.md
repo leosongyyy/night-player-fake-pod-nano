@@ -156,7 +156,7 @@ idfc help --all            # 全部命令与参数
 - 播放核心：本地 MP3 播放（Helix 解码，实测 5000+ 首大曲库），按**文件夹**组织、支持 **`.pl` 文本歌单**；**循环模式**（全部/列表/单曲）+ **顺序/随机**；**无限确定性随机播放**（分块 + 确定性洗牌，断点续播）；回放增益；**EQ 均衡器**（10 段浮点 PeakEQ + 预增益，NightPlayer 兼容 `.eq` 文件）；**封面/歌曲信息**（`.npd` 元数据 + JPEG 封面解码）
 - 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
-- LVGL 移植层：显示驱动、2ms tick、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
+- LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
 - 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 低电拒启（<3.45V 停充电警告屏）→ 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）
 - UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=音量档位、中=当前页面名、右=电池电压）、下拉控制中心（电池/亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
 - 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：电池电压日志开关/采样间隔、触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效）、全局 Toast 提示
@@ -212,7 +212,7 @@ main/
       touch_test.h/.c       # 触摸区域测试（白点跟随 + 淡出；运行时开关，开发者选项控制）
       virtual_list.h/.c     # 通用虚拟滚动列表（固定行槽复用，600+ 长列表可靠；v9 的坐标为 int32_t，不再需要 LARGE_COORD）
       click_wheel.h/.c      # 虚拟 ClickWheel 速滑按钮（屏幕层黄色圆钮，按住绕屏中心画圈翻页 + 12 灰点指示；⚠ 不可挂 lv_layer_top——会让被下拉控制中心遮住的页面内容每帧重绘、严重掉帧，见 CLICK_WHEEL_USAGE.md 与 DONE_PLANS #38；滚完整个列表的圈数由条目数按对数模型 y=log_1.618(x)-7 决定；NVS 三项配置 click_wheel / clkwheel_rev / clkwheel_spd（默认开/正常/普通），设置菜单 →「虚拟 ClickWheel 选项」子页（开启/滑动方向/速度：普通×1.00、快速×0.75、极速×0.50 点击循环）可调，均立即生效——以上全部见 DONE_PLANS #42）
-      global_style.h/.c     # 全局 UI 风格/动画统一样式（跑马灯：起始延迟 + 滚动 N 轮 + 轮间停顿，参数在头文件宏里，**不进 Kconfig**；v9 的 lv_label 已原生认动画模板里的轮数，只需维护模板 + lv_obj_set_style_anim；⚠ 改跑马灯文本必须用 global_style_marquee_set_text()——裸 lv_label_set_text 即使内容相同也会重建动画，会表现为"重绑列表时跑马灯全被打回起点"，见 MARQUEE_STYLE.md 与 DONE_PLANS #40）
+      global_style.h/.c     # 全局 UI 风格/动画统一样式（跑马灯：起始延迟 + 滚动 N 轮 + 轮间停顿，参数在头文件宏里，**不进 Kconfig**；v9 的 lv_label 已原生认动画模板里的轮数，只需维护模板 + lv_obj_set_style_anim；⚠ 改跑马灯文本必须用 global_style_marquee_set_text()——裸 lv_label_set_text 即使内容相同也会重建动画，会表现为"重绑列表时跑马灯全被打回起点"，见 MARQUEE_STYLE.md 与 DONE_PLANS #40；另有**label 登记表**：滚动期间统一暂停跑马灯（停手 250 ms 恢复），且"被滚动暂停(marquee_off)"与"被抑制(no_marquee，非当前页)"是两个正交状态——上层主动切 CLIP 时必须调 set_suppressed()，登记项靠 LV_EVENT_DELETE 摘除、**绝不用 lv_obj_is_valid()**，见 MARQUEE_STYLE.md §9）
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
       fake_shutdown.h/.c        # 伪关机（睡眠定时器到点；A 键长按"等待断电"，深链委托 deep_worker）
@@ -314,7 +314,7 @@ patches/
   - ⚠ **改任何与 LVGL 对象分配位置有关的东西，必须同时看帧率和内部 RAM 余量**：本次实测三个性能杠杆的排序是"**对象放哪（内部 RAM 21fps vs PSRAM 11fps）>> blend 放哪（11 vs 9）>> 字体方案（11 vs 12）**"，与"blend 是绘制热点"的直觉相反（滚动开销主要在对象树遍历/布局，对象工作集约 88KB 远超本芯片 32KB 数据 cache）。
   - 详见 `ideas_and_exps/IRAM_AUDIT_LVGL9.md`：§10 四配置对照表、§11 两次失败实验（把对象全部搬回内部 RAM 会直接见底）、§13 路径B 的最终方案与注意点。
 - **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。
-- 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（停 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 240MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
+- 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 240MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
 - **自动关机策略（power_service 守护任务，1s tick，触发即走既有伪关机链 `fake_shutdown_enter`）**：① 息屏且暂停超时（`CONFIG_PAUSE_AUTO_SHUTDOWN_MIN`，默认 10 分钟）；② 电池电压**持续**低于 **3.45V**（`CONFIG_LOW_BATTERY_SHUTDOWN_SEC`，默认 60 秒，0=关闭；阈值 `BATTERY_CRITICAL_LOW_MV` 与开机拒启共用，见 battery.h）。⚠ 暂无充电检测，充电态电压被抬高不会误触发。
 - 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep 或走既有伪关机。
 
@@ -323,6 +323,13 @@ patches/
 > 硬件/音频/UI 的具体技术细节与踩坑（开机防白屏、显示初始化耗时、触摸异步初始化、触摸数据只读一次、CS43131 采样极性/时钟策略、MP3 采样率限制、音频浮点路径+Clamp、JPEG 封面后台解码、虚拟列表的长列表坐标（v9 起坐标天然 int32_t）、完整字体不运行时加载等）均在各模块源码注释与 `ideas_and_exps/` 设计文档中，读代码/文档时可自然了解；此处仅保留跨项目通用约定。
 >
 > ⚠ **涉及 LVGL 时先看 `ideas_and_exps/LVGL9_MIGRATION.md`**：项目 2026-10 已从 LVGL 8.4 升到 9.4，部分历史文档（`MARQUEE_STYLE.md`、`VIRTUAL_LIST_USAGE.md`、`IRAM_DMA_AUDIT.md`、`DONE_PLANS.md` 等）里的 API/内存结论是 8.4 时代的，读到时请对照该迁移文档。
+
+- ⚠⚠ **LVGL 的 tick 由 `lv_tick_set_cb()` 直接读硬件时间（`esp_timer_get_time()`），绝不要再用 `esp_timer` 周期回调喂 `lv_tick_inc()`**（2026-11 真实事故，详见 `ideas_and_exps/DISPLAY_FREEZE_TRIAGE.md`）：IDF 6.1 把 esp_timer 拆成"任务派发/中断派发"两条 systimer alarm 通道，混用时其收尾逻辑会丢掉任务派发通道的闹钟，该通道上的定时器**从此永不到期**。而本项目 `performance_monitor.c` 正有一个 `ESP_TIMER_ISR`（中断派发）的采样定时器 —— 触发条件齐备。曾表现为**整屏定格、日志无异常、按键音频正常、息屏再亮屏才"恢复"**（因为 tick 停了 ⇒ LVGL 所有 timer 一起停）。两个必须记住的点：① `lv_tick_set_cb()` **必须在 `lv_init()` 之后调用**（`lv_init()` 会 `lv_memzero` 整个 `lv_global_t`，写在前面会被清掉 → `lv_tick_get()` 恒为 0 → 只在 `lv_refr_now` 时刷一帧）；② 若真的需要周期性回调，**不要依赖 esp_timer 任务派发**，用 `vTaskDelay` 任务或（只做极短操作的）`ESP_TIMER_ISR` + `IRAM_ATTR` 回调。
+- **⚠ partial 刷屏的两个绘制层事实（2026-11 实测，改 UI 层级时必看）**：① **每一层不透明整块背景 = 每个绘制块多填一遍 2 万像素**。现在 `scr` / `tabview` / tab 页全部透明，黑底**只由** `main_ui` 的 tabview 内容容器（`cont`）提供；新建页面（`ui_page_style`）不要再铺底色，新建**全屏覆盖层**（设置菜单/开机流程/伪关机，不挂 tabview）则必须自己铺不透明底色，否则会露出绘制缓冲里的旧帧残影。② 卡片背景是"圆角帽（高 `2*corner`）+ 直角主体（从 `y+corner` 到底）"两段，视觉等价于整卡圆角，但列表区因此走 `radius==0` 的纯色快速填充路径、不再每帧走圆角掩码（`lv_draw_sw_fill.c` 只有 `radius==0 && grad==NONE` 才走快速路径）。改圆角半径/卡片高度时两段要一起核对。
+- **QSPI 像素时钟 `AMOLED_QSPI_MAX_PCLK` 保持 40 MHz**（`display.h`；2026-11 曾上调到 80 MHz 做实验，**已回退**）。
+  - 40 MHz ≈ 16 MB/s，而一帧全屏 423 KB，列表滚动每帧要重发整个视口（约 340 KB）→ 光传输就 21 ms 以上，这是本机帧率的**带宽天花板**，不要指望靠优化绘制代码突破。
+  - ⚠⚠ **80 MHz 在本机会留下"偶发 1px 纯黑竖线"残留**（实测），**不要再调回去**：症状是被局部重绘的区域**左边缘多出一条贯穿该区域高度的 1px 黑线**，且随对象的**宽度变化**累积（变宽时被一起清掉）；连 LVGL 自带的 FPS 监视器、进度条时长标签都有，说明是**QSPI 传输时序边际**而不是绘制逻辑。判定依据：同一份固件只把时钟退回 40 MHz，全部黑线立刻消失。
+  - 排查这类"画面残留/黑线"时，第一步就是把时钟退回 40 MHz 做对照实验。
 
 - **代码注释一律中文**；函数/变量使用 snake_case 命名，模块前缀（display_/touch_/lvgl_port_/notif_/player_/config_store_ 等）。
 - **LVGL 线程安全**：非 LVGL 任务的线程操作 UI 必须先 `lvgl_port_lock(-1)`，用完 `lvgl_port_unlock()`；LVGL 任务回调（timer/event）内已持锁，无需重复加锁。config_store 的 set_xxx 会同步触发已注册回调，UI 注册方须保证回调运行在 LVGL 任务上下文（持锁）。

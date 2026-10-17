@@ -96,7 +96,17 @@ extern "C" {
   #define EXAMPLE_LCD_X_GAP              10
   #define EXAMPLE_LCD_Y_GAP              0
   #define TOUCH_IC_CONFIG                CST820_ID
-  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000    //80M也是可行的，但杜邦线不行
+  /* QSPI 像素时钟。**这是全局刷屏带宽的硬上限，直接决定能跑多少帧**：
+     4 条数据线 × pclk，40 MHz ≈ 16 MB/s；一帧全屏 = 460×460×2B = 423 KB，
+     列表滚动时每帧都要重发整个视口（约 340 KB），40 MHz 下光传输就要 21 ms
+     以上，帧间隔被压在 45~60 ms（约 20 fps）——这是本机当前的带宽天花板。
+     ⚠ **2026-11 实测：80 MHz 在这块屏上会留下"偶发 1px 黑竖线"残留**
+       （表现为被局部重绘的区域左边缘多出一条 1px 黑线，对象变宽后才被清掉；
+       连 LVGL 自带的 FPS 监视器、进度时长标签都有，与小尺寸局部刷新强相关，
+       说明是传输时序边际而非绘制逻辑）。同一固件回到 40 MHz 即完全消失，
+       故**保持 40 MHz**，不要为几毫秒 render 去冒这个风险。
+     ⚠ 只在这块屏的排线过长 / 杜邦线飞线时才需要再降（症状是花屏/噪点）。 */
+  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
 #else
   #error "Unsupported screen size"
 #endif

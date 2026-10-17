@@ -118,7 +118,22 @@ static void main_tabs_changed_cb(lv_event_t *e)
 void main_ui_create(void)
 {
     lv_obj_t *scr = lv_scr_act();
+
+    /* ================== 让"整块底色"每帧只铺一次 ==================
+     * ⚠ partial 刷屏模式下，一帧会被切成若干个 460×46 的绘制块，而**每个**
+     *   不透明整块背景都要在块内把 2 万像素填一遍。原来的层级是
+     *       scr(黑) → tabview(主题底色) → cont(黑) → tab 页(黑) → 卡片(深灰)
+     *   也就是同一个像素被填了 5 次。
+     *   所以：**只保留 cont 这一层黑底**，scr / tabview / tab 页全部透明。
+     *   每层都被它上面一层完全覆盖（tabview 是 460×460 全屏、tab 页是等大的
+     *   tile），所以视觉完全不变（都是同一个黑色），只是不再重复填充。
+     * ⚠ 改这里必须保证"每个像素都有一层不透明背景兜底"，否则没被覆盖的区域
+     *   会露出绘制缓冲里的旧帧残影（partial 模式不吃"没画到"这一套）。
+     *   当前兜底者是 tabview 的内容容器 cont；全屏覆盖层（设置菜单
+     *   settings_menu、开机流程 boot_flow、伪关机 fake_shutdown）都各自铺了
+     *   不透明黑底，所以它们显示时也不依赖 scr 的底色。 */
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_TRANSP, 0);
 
     /* 四页滑动主界面：基于 LVGL 内置 lv_tabview（demo_widgets 同款设计），
        隐藏顶部 tab 按钮条后即为纯横向滑动翻页（类 Android ViewPager）：
@@ -132,6 +147,10 @@ void main_ui_create(void)
     lv_obj_set_pos(tv, 0, 0);
     lv_obj_set_size(tv, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     s_tv = tv;
+
+    /* tabview 自身也透明：黑底由下面的 cont 提供（见上方说明） */
+    lv_obj_set_style_bg_opa(tv, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(tv, 0, 0);
 
     /* 隐藏 tab 按钮条（保留滑动切换），内容区占满。
        LVGL 8 无 lv_obj_set_style_display，用 HIDDEN 标志（flex 布局中不占空间） */

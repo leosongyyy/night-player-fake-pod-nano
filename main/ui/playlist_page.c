@@ -34,9 +34,9 @@ static const char *TAG = "playlist_page";
 #define PLIST_LIST_Y     (UI_STATUS_BAR_H + UI_TITLE_BAR_H)
 #define PLIST_LIST_H     (PLIST_CARD_H - UI_TITLE_BAR_H)
 
-/* 歌曲行固定高度：完整字体 line_height=33，内容区 44px 足够（56-12=44，
-   见 VIRTUAL_LIST_USAGE.md 踩坑 5） */
-#define PLIST_ITEM_H     56
+/* 歌曲行固定高度：与目录页共用 UI_LIST_ITEM_H（两页行距/行数必须一致，
+   定义见 list_common.h；完整字体 line_height=33，内容区 44px 足够） */
+#define PLIST_ITEM_H     UI_LIST_ITEM_H
 
 /* 等待播放器就绪的轮询周期（ms） */
 #define PLIST_REFRESH_MS 300

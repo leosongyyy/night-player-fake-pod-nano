@@ -14,7 +14,13 @@
 static const char *TAG = "lvgl_port";
 static SemaphoreHandle_t lvgl_mux = NULL;
 static TaskHandle_t s_lvgl_task = NULL;   /* LVGL 任务句柄（供息屏/深度休眠前挂起） */
-static esp_timer_handle_t s_tick_timer = NULL; /* LVGL tick 定时器（息屏挂起时停止，恢复时重启） */
+/* LVGL 时间来源：见下方 lvgl_port_tick_cb —— 直接读硬件时间（esp_timer_get_time），
+   **不再**用 esp_timer 定时器喂 lv_tick_inc（那正是"整屏定格"的根因，
+   见 ideas_and_exps/DISPLAY_FREEZE_TRIAGE.md）。下面两个变量实现息屏时的"冻结"：
+     s_tick_pause_start_us  ≥0 表示时间已冻结，值 = 冻结起点
+     s_tick_paused_total_us 累计被冻结的时长（恢复后从暂停点继续，不补跑） */
+static volatile int64_t s_tick_pause_start_us  = -1;
+static volatile int64_t s_tick_paused_total_us = 0;
 /* ---- LVGL 9 对象（v8 的 disp_drv/indev_drv/draw_buf 静态结构体已改为不透明句柄）----
    v9 的显示/输入设备由 lv_display_create() / lv_indev_create() 动态创建，
    这里保存句柄；绘制缓冲仍是自管的两块 DMA 内存（见 lvgl_port_init）。 */
@@ -38,7 +44,9 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    重点盯 `heap_caps_get_free_size(MALLOC_CAP_DMA)`、FPS 与 SD 读失败日志，
    若再现 allocate_dma_buf 失败/无故跳曲，退回 /12。 */
 #define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
-#define EXAMPLE_LVGL_TICK_PERIOD_MS    2
+/* ⚠ 本移植层已没有"tick 周期"这个概念：tick 由 lv_tick_set_cb() 直接读硬件时间，
+   原来是"esp_timer 每 2 ms 回调一次 lv_tick_inc(2)"，那套正是整屏定格的根因
+   （见 lvgl_port_tick_cb 上方注释）。保留这行注释只为提醒后来者别再引回来。 */
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
 /* ⚠ 栈 20KB（LVGL 9 迁移时 6KB→12KB；2026-10 TTF 迁移再 12KB→20KB）：
@@ -71,6 +79,25 @@ bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_pa
         lv_display_flush_ready(*disp);
     }
     return false;
+}
+
+/* 刷屏提交的失败记账：esp_lcd_panel_draw_bitmap() 返回 ESP_ERR_* 时**不能**再
+   静默吞掉（原实现完全忽略返回值）—— 屏类问题（QSPI/DMA/面板状态）的第一个
+   可信信号就是它，否则只能看到"画面不动"却查不出是谁拒绝了传输。
+   ⚠ 刷屏是热路径（滚动时约 500 次/秒），失败通常成串出现，所以只在
+   前 3 次与每 256 次打一条日志，避免日志本身把帧率压垮。 */
+static volatile uint32_t s_flush_err_cnt = 0;   /* 累计失败次数 */
+
+/* 清空刷屏失败计数（供上层在"开始一次观察"前重置） */
+void lvgl_port_flush_stats_reset(void)
+{
+    s_flush_err_cnt = 0;
+}
+
+/* 取累计的刷屏失败次数（0 = 全部成功） */
+uint32_t lvgl_port_flush_error_count(void)
+{
+    return s_flush_err_cnt;
 }
 
 /* v9 的 flush 回调签名：像素数据是 uint8_t*（不再有 lv_color_t*），
@@ -108,7 +135,17 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 #endif
 
     // copy a buffer's content to a specific area of the display
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+    const esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1,
+                                                    offsetx2 + 1, offsety2 + 1, px_map);
+    if (err != ESP_OK) {
+        const uint32_t n = ++s_flush_err_cnt;
+        if (n <= 3 || (n % 256) == 0) {
+            ESP_LOGE(TAG, "panel draw_bitmap failed: %s (area %dx%d+%d+%d, total %u)",
+                     esp_err_to_name(err), (int)(offsetx2 - offsetx1 + 1),
+                     (int)(offsety2 - offsety1 + 1), (int)offsetx1, (int)offsety1,
+                     (unsigned)n);
+        }
+    }
 }
 
 /* 重绘区域对齐回调：v9 不再有 disp_drv.rounder_cb，改为给显示对象挂
@@ -134,10 +171,44 @@ static void lvgl_rounder_cb(lv_event_t *e)
     area->y2 = ((y2 >> 1) << 1) + 1;
 }
 
-static void increase_lvgl_tick(void *arg)
+/* ====================================================================
+ * LVGL tick：直接取硬件时间，**不用 esp_timer 定时器喂 lv_tick_inc**
+ *
+ * ⚠⚠ 2026-11 真实事故（整屏定格、日志无异常，详见
+ *    ideas_and_exps/DISPLAY_FREEZE_TRIAGE.md）：
+ * 原实现是"esp_timer 每 2 ms 回调一次 → lv_tick_inc(2)"。而 IDF 6.1 的
+ * esp_timer 把定时器拆成**两条独立的 systimer alarm 通道**
+ * （`timestamp_id[0]`=任务派发、`[1]`=中断派发，见
+ * `esp_timer_impl_common.c`），混合使用时它靠比较两个 timestamp 来猜
+ * "这次中断是哪条通道触发的"，猜错就把**任务派发那条通道的闹钟时间**
+ * 清成 UINT64_MAX —— 此后任务派发的定时器**永远不再到期**：
+ *   · tick 回调计数归零、`esp_timer_is_active()` 仍返回 1、
+ *     `esp_timer_get_next_alarm()` 显示闹钟时间早已过去；
+ *   · 而本项目的 performance_monitor 正有一个 `ESP_TIMER_ISR`
+ *     （中断派发）的 500 ms 采样定时器 —— 两个通道同时存在，条件齐备。
+ * 后果：LVGL 的 tick 停 ⇒ 所有 lv_timer 一起停 ⇒ **整屏定格**，
+ * 触摸/按键/音频全正常（它们不依赖 LVGL tick），息屏再亮屏
+ * （走 lv_refr_now 全屏重刷）才"看起来恢复"。
+ *
+ * 修复：tick 改由 LVGL 9 的 `lv_tick_set_cb()` 提供，时间直接来自
+ * systimer 计数（`esp_timer_get_time()`）——**一个 esp_timer 都不用**，
+ * 任务派发路径坏掉也与 LVGL 无关，还顺带省掉 500 次/秒的中断开销。
+ *
+ * ⚠ `lv_tick_set_cb()` **必须在 `lv_init()` 之后调用**：`lv_init()` 里
+ *   `lv_global_init()` 会 `lv_memzero(global, sizeof(lv_global_t))`，
+ *   把 tick_get_cb 一起清零。写在前面 → `lv_tick_get()` 恒为 0 →
+ *   界面只在 lv_refr_now（解锁/亮屏）时刷一帧（实测踩过）。
+ * ==================================================================== */
+static uint32_t lvgl_port_tick_cb(void)
 {
-    /* Tell LVGL how many milliseconds has elapsed */
-    lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
+    /* 冻结期间（息屏挂起）返回挂起那一刻的时间：LVGL 的所有 timer/动画
+       从暂停点继续，不会在恢复后一次性补跑挂起期间到期的 timer。 */
+    const int64_t now_us = (s_tick_pause_start_us >= 0)
+                           ? s_tick_pause_start_us
+                           : esp_timer_get_time();
+    /* 减去累计冻结时长 → 恢复后时间轴连续（uint32 毫秒，约 49.7 天回绕，
+       LVGL 内部按无符号差值比较，回绕安全） */
+    return (uint32_t)((now_us - s_tick_paused_total_us) / 1000);
 }
 
 bool lvgl_port_lock(int timeout_ms)
@@ -311,6 +382,10 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     ESP_LOGI(TAG, "Initialize LVGL library");
     lv_init();
 
+    /* tick 必须**在 lv_init() 之后**注册（lv_init 会清零 lv_global_t，
+       见 lvgl_port_tick_cb 上方注释）。 */
+    lv_tick_set_cb(lvgl_port_tick_cb);
+
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
     /* ⚠ 必须 MALLOC_CAP_DMA：SPI 主机发送时若缓冲不是 DMA 能力，会为每次传输
@@ -349,14 +424,9 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     // 设置旋转角度
     // lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90); // 旋转90度
 
-    ESP_LOGI(TAG, "Install LVGL tick timer");
-    // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
-    const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback = &increase_lvgl_tick,
-        .name = "lvgl_tick"
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &s_tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
+    /* tick 已在 lv_init() 之后用 lv_tick_set_cb() 接到硬件时间上，
+       这里**不再**创建 esp_timer 定时器喂 lv_tick_inc —— 那正是整屏
+       定格的根因，详见 lvgl_port_tick_cb 上方的长注释。 */
 
     lvgl_mux = xSemaphoreCreateMutex();
     assert(lvgl_mux);
@@ -390,12 +460,12 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
 
 void lvgl_port_suspend(void)
 {
-    /* 1. 停止 LVGL tick 计时：LVGL 时间冻结，恢复后动画/定时器从暂停点继续，
-          避免挂起期间积累的 tick 在恢复后一次性触发大量过期 timer。
-          已停止（重复挂起，如息屏后睡眠定时器再走伪关机）时返回
-          ESP_ERR_INVALID_STATE，容忍。 */
-    if (s_tick_timer != NULL) {
-        esp_timer_stop(s_tick_timer);
+    /* 1. 冻结 LVGL 时间：记下冻结起点，之后 lv_tick_get() 停在这一刻，
+          恢复后动画/定时器从暂停点继续（不会把挂起时长一次性补跑）。
+          实现见 lvgl_port_tick_cb —— **不再**去 stop 一个 esp_timer。
+          重复挂起（如息屏后睡眠定时器再走伪关机）时保留最早的起点。 */
+    if (s_tick_pause_start_us < 0) {
+        s_tick_pause_start_us = esp_timer_get_time();
     }
     /* 2. 挂起 LVGL 任务：停止刷屏与触摸轮询。
            息屏/深度休眠前调用；deepsleep 场景无需恢复（唤醒后重启），
@@ -408,20 +478,16 @@ void lvgl_port_suspend(void)
 
 void lvgl_port_resume(void)
 {
-    /* 1. 恢复 LVGL 任务：重新开始刷屏与触摸轮询。
+    /* 1. 解冻 LVGL 时间：把整段冻结时长记进累计偏移，tick 从暂停点继续。
+          ⚠ 必须先于 vTaskResume —— 恢复后 LVGL 任务第一件事就是读 tick。 */
+    if (s_tick_pause_start_us >= 0) {
+        s_tick_paused_total_us += esp_timer_get_time() - s_tick_pause_start_us;
+        s_tick_pause_start_us = -1;
+    }
+    /* 2. 恢复 LVGL 任务：重新开始刷屏与触摸轮询。
            任务恢复后若尝试获取 LVGL 互斥锁会等待调用方释放（见调用方流程） */
     if (s_lvgl_task != NULL) {
         vTaskResume(s_lvgl_task);
         ESP_LOGI(TAG, "LVGL task resumed");
-    }
-    /* 2. 重新启动 tick 计时：LVGL 时间从挂起时刻继续。
-          ⚠ 勿用 ESP_ERROR_CHECK：tick 已在运行（异常状态）时返回
-          ESP_ERR_INVALID_STATE，容忍即可，不影响功能。 */
-    if (s_tick_timer != NULL) {
-        esp_err_t err = esp_timer_start_periodic(s_tick_timer,
-                                                 EXAMPLE_LVGL_TICK_PERIOD_MS * 1000);
-        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG, "restart lvgl tick failed: %s", esp_err_to_name(err));
-        }
     }
 }
