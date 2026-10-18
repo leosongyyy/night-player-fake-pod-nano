@@ -11,8 +11,10 @@
 /* 1. fake_shutdown_enter()            普通伪关机（睡眠定时器到点）：     */
 /*    关尽外设含显示屏（主动关屏省电），deepsleep，B 键按下唤醒重启。      */
 /*    ⚠ 不再由双按触发：双按已改为息屏/亮屏切换（见 core/utils/power_service */
-/* 2. fake_shutdown_wait_power_off()   A 键（电源键）长按 2s 触发：     */
-/*    配合成品机电源侧"长按 3 秒硬断电"的关机芯片——固件在长按 2s 时     */
+/* 2. fake_shutdown_wait_power_off()   A 键（电源键）长按触发：          */
+/*    配合成品机电源侧"长按 3 秒硬断电"的关机芯片——固件在长按阈值时刻   */
+/*    （亮屏 KEY_A_LONG_PRESS_ON_MS 1200ms / 息屏 KEY_A_LONG_PRESS_OFF_MS */
+/*    900ms，宏在 ui/key_handler.h）                                      */
 /*    保存配置、优雅停播、停外设，屏幕定格提示画面（不主动关屏），       */
 /*    随后 deepsleep：用户继续按住 A 键满 3s 即由硬件断电（屏幕靠断电    */
 /*    自然熄灭，向用户展示"关机已完成"）；若未断电，按 B 键（GPIO0，     */
@@ -35,7 +37,8 @@
    进入 deepsleep 后芯片睡眠，调用方任务被冻结，函数不再返回。 */
 void fake_shutdown_enter(void);
 
-/* A 键（电源键）长按 2s 触发的"等待断电"伪关机：
+/* A 键（电源键）长按（亮屏 1200ms / 息屏 900ms，见 ui/key_handler）
+   触发的"等待断电"伪关机：
    保存配置 → 优雅停播 → 屏幕定格提示 → 停外设（不含屏幕）→ deepsleep。
    用户继续按住 A 键满 3s 由关机芯片硬件断电；按 B 键唤醒即取消关机。
    与 fake_shutdown_enter 相同，经 deep_worker 执行；断电或唤醒重启后

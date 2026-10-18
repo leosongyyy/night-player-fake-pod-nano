@@ -74,7 +74,7 @@
 - 🔎 **查 menuconfig 配置项**（标题 / 说明全文 / 当前值，**纯客户端命令**，不触发构建）：
   ```powershell
   idfc menuconfig search "IRAM SPIRAM"          # 多关键词 AND 检索（每页 20 条，--page N 翻页）
-  idfc menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
+  idfc menuconfig desc CONFIG_LOW_BATTERY_SHUTDOWN_SEC   # 单项详情（含 help 全文）
   ```
   ⚠ 需要该构建类型**至少成功构建过一次**（`kconfig_menus.json` / `sdkconfig.json` 由 ESP-IDF 在配置阶段生成）；缺失时会提示先 `build` 并退出码 1。没有匹配项同样退出码 1。想改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先用它确认"这项是干什么的、现在是多少"。
 - **⚠ 若提示 `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1）**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**：在任意目录执行 `idfc start-server`（普通权限即可；也可以让用户开一个终端自己跑）。服务器是常驻进程、且**它的控制台就是启动它的那个窗口，窗口一关就停**，所以每次遇到连接错误都应先检查/提醒启动服务器。
@@ -278,7 +278,7 @@ patches/
 | 39 | 音频 DIN | I2S 数据输出（`core/hardware/audio/audio.c`） |
 | 40 | 音频 BCK | I2S 位时钟，主机输出（`core/hardware/audio/audio.c`） |
 | 41 | CS43131 RESET# | DAC 复位，低有效，经 3.3→1.8V 电平转换（`core/hardware/audio/cs43131.c`） |
-| 48 | A 键（电源键） | 按键接 GND，内部上拉（`core/hardware/button_service.c`）。⚠ 与电源侧**3 秒关机芯片复用同一按键**：长按满 **1.2s** 固件伪关机（`fake_shutdown_wait_power_off`，保存配置+停外设+定格提示+deepsleep；阈值 `CONFIG_BUTTON_LONG_PRESS_MS`），继续按住满 3s 由硬件直接断电/开机。非 RTC GPIO，无法用于 deepsleep 唤醒 |
+| 48 | A 键（电源键） | 按键接 GND，内部上拉（`core/hardware/button_service.c`）。⚠ 与电源侧**3 秒关机芯片复用同一按键**：长按满阈值固件伪关机（`fake_shutdown_wait_power_off`，保存配置+停外设+定格提示+deepsleep）——**亮屏 1.2s（`KEY_A_LONG_PRESS_ON_MS`）/ 息屏 0.9s（`KEY_A_LONG_PRESS_OFF_MS`），宏在 `ui/key_handler.h`**，息屏更短是因为息屏长按要先点亮屏幕（耗时数百毫秒），得从 3 秒硬断电窗口里省回来；继续按住满 3s 由硬件直接断电/开机。非 RTC GPIO，无法用于 deepsleep 唤醒 |
 
 **历史注释规划（源码 `main.c` 旧版注释，当前未启用、未验证）：**
 - LCD 相关：`TFT_TE = 6`（撕裂效果同步）

@@ -121,7 +121,7 @@ idfc flash                                 # 烧录到已保存的串口
 idfc monitor --wait-for "App started"      # 串口监视，命中后退出
 idfc run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
 idfc menuconfig search "IRAM SPIRAM"        # 查配置项（标题/说明/当前值），纯客户端
-idfc menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS   # 单项详情（含 help 全文）
+idfc menuconfig desc CONFIG_LOW_BATTERY_SHUTDOWN_SEC   # 单项详情（含 help 全文）
 idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
 ```
 
@@ -181,7 +181,7 @@ idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 i
 - **纯客户端命令**：只读 `build/<构建类型>/config/` 下的 `kconfig_menus.json`（全部选项 + 标题 + 说明全文 + 依赖）与 `sdkconfig.json`（当前生效值），**不经过 IDF 服务器、也不触发构建**。
 - ⚠ **必须先成功构建过一次**：这两个 json 由 ESP-IDF 在**配置阶段**生成（实测 debug 版 `kconfig_menus.json` 2.6MB / 4079 个节点、`sdkconfig.json` 1730 个键）。缺失时命令会提示先 `build` 并以退出码 1 退出。
 - 退出码：`0` 成功；`1` = 参数错误 / 缺少构建产物 / **没有匹配项** / 页码越界。
-- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `idfc menuconfig desc CONFIG_BUTTON_LONG_PRESS_MS` 会连说明全文一起打出来。
+- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `idfc menuconfig desc CONFIG_LOW_BATTERY_SHUTDOWN_SEC` 会连说明全文一起打出来。
 
 ---
 

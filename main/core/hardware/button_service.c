@@ -10,25 +10,23 @@ static const char *TAG = "button";
 
 /* A 键：GPIO48，GPIO-按钮-GND，外部无上拉，需启用内部上拉。
    ⚠ A 键与成品机电源侧的 3 秒关机芯片复用同一按键：长按超过 3 秒由硬件
-   直接断电/开机；固件在长按 2 秒（BUTTON_LONG_PRESS_MS）时主动伪关机。 */
+   直接断电/开机；固件在长按阈值（亮屏 1200ms / 息屏 900ms，见 ui/key_handler.h
+   的 KEY_A_LONG_PRESS_ON_MS / _OFF_MS）时刻主动伪关机。 */
 #define BUTTON_A_PIN        GPIO_NUM_48
 /* B 键：GPIO0，按键接 GND，外部已有 10kΩ 上拉，无需内部上拉。
    注意 GPIO0 为 strapping 引脚：复位时若被按住会进入下载模式，属硬件特性。
    GPIO0 是 RTC GPIO，deepsleep 后按下可唤醒（取消关机）。 */
 #define BUTTON_B_PIN        GPIO_NUM_0
 
-/* A 键长按阈值（ms）：单键按住超过该时长即上报长按事件（无需等待抬起）。
-   与电源侧关机芯片的 3 秒硬断电配合：固件在阈值时刻主动保存配置并伪关机，
-   剩余窗口（3s - 阈值）足够完成 NVS 写入与停外设。
-   经 Kconfig CONFIG_BUTTON_LONG_PRESS_MS 配置（默认 1200ms）：
-   曾用 2000ms 实测偶发"按了却没看到提示"——用户按满 3s 时提示只显示
-   约 1 秒甚至一闪而过（伪关机流程本身还要耗时），降到 1.2s 后提示显示
-   窗口约 1.8s，更容易观察。 */
-#ifdef CONFIG_BUTTON_LONG_PRESS_MS
-#define BUTTON_A_LONG_PRESS_MS  CONFIG_BUTTON_LONG_PRESS_MS
-#else
+/* A 键长按**静态兜底**阈值（ms）：单键按住超过该时长即上报长按事件（无需抬起）。
+   ⚠ 正常情况下这个值用不上：应用层（ui/key_handler.c）会在每次按下 A 键时
+   通过 button_service_set_a_long_press_provider 给出当时的阈值
+   （亮屏 1200ms / 息屏 900ms，宏定义在 ui/key_handler.h，含取值理由与
+   "阈值 + 亮屏耗时 + 保存耗时 必须明显小于 3s 硬断电"的约束）。
+   本值只用于"提供者未注册"的场景（开机早期、button_service 单独使用时），
+   取亮屏态的值。⚠ core/ 不能反向依赖 ui/，所以这里不引用 key_handler.h，
+   改阈值时两处口径要保持一致（当前 1200ms）。 */
 #define BUTTON_A_LONG_PRESS_MS  1200
-#endif
 
 /* B 键长按阈值（ms）：B 键（GPIO0）可安全长按，亮屏=音量-10、息屏=上一曲，
    判定缩短到 600ms 提升响应速度（用户要求 2026-09-03）。
@@ -63,7 +61,10 @@ enum {
 typedef struct {
     gpio_num_t pin;         /* GPIO 编号 */
     bool       pullup_en;   /* 是否启用内部上拉 */
-    uint32_t   long_press_ms; /* 本键长按阈值（ms），A/B 可不同（A=1200，B=600） */
+    uint32_t   long_press_ms; /* 本键静态长按阈值（ms），A/B 可不同（A=1200，B=600） */
+    uint32_t   active_long_press_ms; /* 本次按压实际使用的阈值（按下时刻取值）：
+                                        默认 = long_press_ms，A 键可由动态提供者
+                                        覆盖（息屏 900 / 亮屏 1200） */
     bool       raw_level;   /* 最近一次原始采样电平（true=高=抬起） */
     uint8_t    stable_cnt;  /* 当前原始电平已连续稳定的采样次数 */
     bool       level;       /* 去抖后的稳定电平（true=高=抬起） */
@@ -90,6 +91,11 @@ static bool s_simultaneous = false;
 static button_event_cb_t s_cb = NULL;
 static void *s_cb_ctx = NULL;
 
+/* A 键长按阈值的动态提供者（可选）：在每次按下 A 键时调用一次，
+   返回本次按压的阈值（ms），0 = 沿用静态默认值。用于"息屏 900 / 亮屏 1200"
+   这类随屏幕状态变化的阈值（见 button_service.h 的说明）。 */
+static button_long_press_provider_t s_a_long_press_provider = NULL;
+
 /* 打印日志并转发用户回调 */
 static void button_report(button_event_t event)
 {
@@ -101,8 +107,9 @@ static void button_report(button_event_t event)
         ESP_LOGI(TAG, "B key (GPIO%d) short press", BUTTON_B_PIN);
         break;
     case BUTTON_EVENT_A_LONG:
+        /* 打印本次按压实际生效的阈值（息屏 900 / 亮屏 1200），便于串口验证 */
         ESP_LOGI(TAG, "A key (GPIO%d) long press (%u ms)",
-                 BUTTON_A_PIN, (unsigned)BUTTON_A_LONG_PRESS_MS);
+                 BUTTON_A_PIN, (unsigned)s_buttons[BTN_IDX_A].active_long_press_ms);
         break;
     case BUTTON_EVENT_B_LONG:
         ESP_LOGI(TAG, "B key (GPIO%d) long press (%u ms)",
@@ -142,11 +149,14 @@ static void button_scan(void)
         if (b->level == raw) {
             /* 去抖后的电平未变化：若处于"按住"状态，检查是否达到长按阈值。
                长按条件：单键按住（另一键未按下，双按交互不触发长按）、
-               非开机初始按压、按住时长 >= 阈值。上报一次后不再重复。 */
+               非开机初始按压、按住时长 >= 阈值。上报一次后不再重复。
+               ⚠ 用 active_long_press_ms（按下时刻取定的阈值）而不是静态值：
+               息屏态 900ms 与亮屏态 1200ms 的切换按"按下那一刻"的屏幕状态
+               决定，避免按住期间屏幕状态变化导致阈值中途跳变。 */
             if (b->pressed && !b->long_reported && !b->initial_hold
                 && !s_buttons[1 - i].pressed
                 && esp_timer_get_time() - b->press_start_us
-                   >= (int64_t)b->long_press_ms * 1000) {
+                   >= (int64_t)b->active_long_press_ms * 1000) {
                 b->long_reported = true;
                 button_report((i == BTN_IDX_A) ? BUTTON_EVENT_A_LONG
                                                : BUTTON_EVENT_B_LONG);
@@ -159,6 +169,15 @@ static void button_scan(void)
             /* ---- 按下（低电平） ---- */
             b->pressed = true;
             b->long_reported = false;
+            /* 取定本次按压的长按阈值：A 键可由动态提供者覆盖（息屏更短，
+               亮屏默认），B 键只用静态值 */
+            b->active_long_press_ms = b->long_press_ms;
+            if (i == BTN_IDX_A && s_a_long_press_provider != NULL) {
+                const uint32_t dyn = s_a_long_press_provider();
+                if (dyn > 0) {
+                    b->active_long_press_ms = dyn;
+                }
+            }
             if (b->initial_hold) {
                 /* 开机初始按压（长按 3s 开机后未及时松手）：不启动长按计时，
                    等首次抬起后恢复正常检测 */
@@ -194,7 +213,7 @@ static void button_scan(void)
                 s_simultaneous = false;
             } else if (!was_long) {
                 /* 单键且未上报过长按：抬起即上报单击；
-                   已上报过长按（如 A 键长按 2s 关机）的抬起不再补报单击 */
+                   已上报过长按（如 A 键长按关机）的抬起不再补报单击 */
                 button_report((i == BTN_IDX_A) ? BUTTON_EVENT_A_SHORT : BUTTON_EVENT_B_SHORT);
             }
         }
@@ -234,6 +253,8 @@ void button_service_init(void)
         s_buttons[i].initial_hold   = (gpio_get_level(s_buttons[i].pin) == 0);
         s_buttons[i].long_reported  = false;
         s_buttons[i].press_start_us = 0;
+        /* 本次按压阈值先取静态默认值（每次按下沿还会重新取定） */
+        s_buttons[i].active_long_press_ms = s_buttons[i].long_press_ms;
     }
 
     xTaskCreatePinnedToCore(button_task, "button_svc",
@@ -248,4 +269,11 @@ void button_service_register_cb(button_event_cb_t cb, void *ctx)
 {
     s_cb = cb;
     s_cb_ctx = ctx;
+}
+
+void button_service_set_a_long_press_provider(button_long_press_provider_t fn)
+{
+    /* 只保存指针：后续按下 A 键时，按下沿调用一次取得本次阈值
+       （单字写入，与按键任务并发安全；已按住的按压沿用按下时刻取到的值） */
+    s_a_long_press_provider = fn;
 }

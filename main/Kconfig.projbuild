@@ -82,19 +82,6 @@ menu "FakePodNanoNightPlayer 应用配置"
             关闭：使用 2bit 索引色版 default_cover（约 52KB，省 Flash，
                   但渲染需逐像素查调色板，滑动时略卡，适合调试）。
 
-    config BUTTON_LONG_PRESS_MS
-        int "A 键长按触发伪关机的阈值（毫秒）"
-        default 1200
-        range 500 5000
-        help
-            A 键（GPIO48，与电源侧 3 秒关机芯片复用）按住超过该时长，
-            固件主动伪关机（保存配置、停外设、定格提示后 deepsleep）。
-            阈值须明显小于 3000ms（硬件断电时间），给保存/停外设留出窗口。
-            曾用 2000ms 实测偶发"按了却没触发"（按满 3s 直接硬件断电，
-            提示一闪而过），默认改为 1200ms 便于观察提示画面。
-            ⚠ 仅影响 A 键；B 键（GPIO0）长按阈值固定 600ms
-            （见 button_service.c 的 BUTTON_B_LONG_PRESS_MS）。
-
     config PAUSE_AUTO_SHUTDOWN_MIN
         int "息屏暂停超时自动伪关机（分钟，0=关闭）"
         default 10

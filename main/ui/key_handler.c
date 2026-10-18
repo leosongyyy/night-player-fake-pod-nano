@@ -27,6 +27,17 @@ static const char *TAG = "key_handler";
 #define VOL_STEP_SHORT   1
 #define VOL_STEP_LONG_B  10
 
+/* A 键长按阈值：亮屏 / 息屏两档，宏定义在 ui/key_handler.h
+   （KEY_A_LONG_PRESS_ON_MS / KEY_A_LONG_PRESS_OFF_MS）。
+   由 button_service 在每次按下 A 键时调用下方 provider 取值：
+   息屏按 A 键长按会**先点亮屏幕**再走伪关机保存流程，亮屏耗时要靠更短的
+   阈值省回来，否则极罕见情况下可能来不及保存就被 3s 硬断电。 */
+static uint32_t a_long_press_ms_provider(void)
+{
+    return power_service_is_screen_off() ? KEY_A_LONG_PRESS_OFF_MS
+                                         : KEY_A_LONG_PRESS_ON_MS;
+}
+
 /* 调节音量：config_store（持久化 + 通知 UI 回调）+ audio（写 CS43131 硬件）。
    ⚠ 顺序必须是【先 audio_set_volume_level 再 config_store_set_volume】：
    config_store 的变更回调（状态栏音量 label 等）会读取 audio_get_volume_level()，
@@ -126,7 +137,10 @@ static void on_button_event(button_event_t event, void *ctx)
 void key_handler_init(void)
 {
     button_service_register_cb(on_button_event, NULL);
+    /* A 键长按阈值随屏幕状态变化：息屏 900ms / 亮屏 1200ms（详见上方说明） */
+    button_service_set_a_long_press_provider(a_long_press_ms_provider);
     ESP_LOGI(TAG, "key handler ready: "
-                  "screen on [A=vol+, B=vol-, A long=power off, B long=vol-10, both=screen off]; "
-                  "screen off [A=play/pause, B=next, B long=prev, A long=power off, both=screen on]");
+                  "screen on [A=vol+, B=vol-, A long (%d ms)=power off, B long=vol-10, both=screen off]; "
+                  "screen off [A=play/pause, B=next, B long=prev, A long (%d ms)=power off, both=screen on]",
+             KEY_A_LONG_PRESS_ON_MS, KEY_A_LONG_PRESS_OFF_MS);
 }
