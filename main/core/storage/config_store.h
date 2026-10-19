@@ -310,6 +310,55 @@ void config_store_set_volume(uint8_t vol);
 /** @brief 设置亮度并持久化（0~255） */
 void config_store_set_brightness(uint8_t brightness);
 
+/* ---------- 延迟落盘（高频 UI 调节专用，见 NVS_WRITE_BUDGET.md） ----------
+ *
+ * 背景：一次 nvs_commit() 要写一整页 flash（4KB）并关掉两颗核的外部缓存
+ * 5~20ms。亮度/音量竖条拖动时值每帧都在变（亮度约 30 次/秒），若每次 set
+ * 都落盘，LVGL 的 33ms 帧预算会被反复吃光 → 用户可见的剧烈卡顿，且 NVS
+ * 只 6 页、会被“追加写 + 页满 GC/擦除”反复磨损。
+ *
+ * 做法：拖动期间只调 *_deferred 版本（只更新内存 + 置脏标志），落盘统一由
+ * config_store_flush_pending() 在“松手 / 静默 500ms / 息屏 / 伪关机 / 切槽位”
+ * 时做一次。硬件（DAC 音量、屏幕亮度）仍由调用方每帧实时写，不受影响。
+ */
+
+/**
+ * @brief 设置亮度：**只改内存 + 通知，不写 NVS**（高频拖动专用）
+ *
+ * 仅供亮度竖条的 LV_EVENT_PRESSING 使用；需要“立即落盘”的场景（开机的
+ * 无卡亮度拉满等）继续用 config_store_set_brightness()。
+ * 落盘由 config_store_flush_pending() 完成。
+ *
+ * @param brightness 0~255，低于 CONFIG_STORE_BRIGHTNESS_MIN 自动钳位
+ */
+void config_store_set_brightness_deferred(uint8_t brightness);
+
+/**
+ * @brief 设置音量：**只改内存 + 通知，不写 NVS**（高频拖动专用）
+ *
+ * 语义与 config_store_set_volume() 相同（0~30，越界钳位），但把“写槽位
+ * blob”推迟到 config_store_flush_pending()。仅供音量竖条 PRESSING 使用。
+ *
+ * ⚠ 调用方仍须**先** audio_set_volume_level() 再调本函数：变更回调读的是
+ *   audio 的当前值，顺序反了状态栏显示会滞后一档。
+ */
+void config_store_set_volume_deferred(uint8_t vol);
+
+/**
+ * @brief 把“延迟落盘”的字段写入 NVS（亮度和音量）
+ *
+ * - force = false：距最后一次修改已静默 ≥ 500ms 才写（保底，由 ui/app.c 的
+ *   100ms 定时器周期调用）；
+ * - force = true：立刻写（松手 / 息屏 / 伪关机 / 切槽位等必须落盘的时刻）。
+ *
+ * 无脏字段时立即返回，不产生任何 flash 操作。
+ *
+ * ⚠ 发起任务必须**栈在内部 RAM**（写 flash 会关外部缓存）：LVGL 任务、
+ *   deep_worker 可以；power_svc 等 PSRAM 栈任务不行，见
+ *   FLASH_WRITE_VS_PSRAM.md §五。
+ */
+void config_store_flush_pending(bool force);
+
 /** @brief 设置循环模式并持久化（uint8，对应 player_loop_mode_t） */
 void config_store_set_loop_mode(uint8_t mode);
 
@@ -377,6 +426,23 @@ void config_store_set_was_playing(bool playing);
  *            player_controller_sync_config() 会无条件调它，歌曲没变就不该重写
  *            槽位 blob（真正必须落盘的那次由 switch_slot / save_active_slot 做） */
 void config_store_set_last_song(uint32_t global);
+
+/**
+ * @brief 保存上次播放歌曲：**只改内存，不写 NVS**（返回内存值是否变化）
+ *
+ * 用于把“同一逻辑操作里的多次槽位写”合并成一次：调用方在改完所有字段后
+ * 显式调用一次 config_store_save_active_slot() 即可（见 player_controller
+ * 的 player_sync_config / player_persist_position）。
+ * ⚠ 单独调用本函数而不跟 save_active_slot，位置变化只在本次会话内有效。
+ */
+bool config_store_set_last_song_ram(uint32_t global);
+
+/**
+ * @brief 保存随机播放位置：**只改内存，不写 NVS**（返回内存值是否变化）
+ *
+ * 语义同 config_store_set_last_song_ram（合并写用）。
+ */
+bool config_store_set_shuffle_pos_ram(uint64_t pos);
 
 /** @brief 清除"上次播放位置"与"随机播放位置"记录（failsafe 界面"重置歌曲位置"
  *          按钮用）：内存标志置无效并写回 NVS（valid 标志=0），下次开机视为

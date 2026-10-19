@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -120,6 +121,24 @@ static bool     s_was_playing = true;
    设置页第 5 格切换并持久化；控制器轮询到变化后重新应用（见
    player_controller 的开关同步），故通知回调让设置页立即刷新文本 */
 static bool     s_replay_gain = (CONFIG_STORE_REPLAY_GAIN_DEFAULT != 0);
+
+/* ---------- 延迟落盘（NVS 写预算，见 ideas_and_exps/NVS_WRITE_BUDGET.md） ----------
+ *
+ * 背景：一次 nvs_commit() 要写一整页 flash（4KB）并关掉两颗核的外部缓存
+ * 5~20ms。亮度/音量竖条拖动时值每帧都在变（亮度约 30 次/秒），每次落盘都会
+ * 吃掉 LVGL 的 33ms 帧预算 → 用户可见的剧烈卡顿；NVS 又只有 6 页，会被
+ * “追加写 + 页满 GC/擦除”反复磨损。
+ *
+ * 做法：拖动中只调 *_deferred（只更新内存 + 置脏），落盘统一由
+ * config_store_flush_pending() 在松手/静默 500ms/息屏/伪关机/切槽位时做一次。
+ *
+ * ⚠ 脏标志只由 LVGL 任务与少数几个任务读写，单字节 bool 原子的即可；
+ *   时间戳只在置脏（写入方）与 flush（LVGL 任务）里用，值偏差无害。 */
+#define CONFIG_STORE_FLUSH_QUIET_US  (500 * 1000)   /* 静默 500ms 后保底落盘 */
+static volatile bool s_bright_dirty = false;
+static int64_t       s_bright_dirty_us = 0;   /* 最后一次亮度修改时刻（esp_timer） */
+static volatile bool s_volume_dirty = false;
+static int64_t       s_volume_dirty_us = 0;   /* 最后一次音量修改时刻（esp_timer） */
 
 /* ========== 配置槽位状态 ========== */
 
@@ -284,8 +303,10 @@ static bool slot_cache_load(uint32_t idx)
     return true;
 }
 
-/* 把槽位 blob 写入 NVS 并更新缓存 */
-static void slot_cache_store(uint32_t idx, const config_slot_blob_t *b)
+/* 把槽位 blob 写入 NVS 并更新缓存。
+   commit=false 时只改 NVS 的 RAM 页缓存，由调用方随后 cfg_commit() 一次落盘
+   （切槽位时 blob 与 slot_active 一起提交，省一次 4KB 页写）。 */
+static void slot_cache_store(uint32_t idx, const config_slot_blob_t *b, bool commit)
 {
     if (idx >= CONFIG_STORE_SLOT_COUNT || s_nvs == 0) {
         return;
@@ -297,10 +318,12 @@ static void slot_cache_store(uint32_t idx, const config_slot_blob_t *b)
         ESP_LOGE(TAG, "nvs_set_blob(%s) failed: %s", key, esp_err_to_name(err));
         return;
     }
-    err = nvs_commit(s_nvs);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
-        return;
+    if (commit) {
+        err = nvs_commit(s_nvs);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
+            return;
+        }
     }
     s_slot_cache[idx] = *b;
     s_slot_cache_valid[idx] = true;
@@ -310,74 +333,89 @@ static void slot_cache_store(uint32_t idx, const config_slot_blob_t *b)
 /* NVS 读写辅助                                                        */
 /* ------------------------------------------------------------------ */
 
-/* 写入失败不致命：仅打日志，内存值仍有效（本次会话内生效，重启后丢失） */
-static void cfg_write_u8(const char *key, uint8_t value)
+/* ⚠ 写 flash 的代价与“数据多大”无关：NVS 的写单位是页（4KB），每次 commit
+   都会把脏页刷盘并关外部缓存 5~20ms。所以批量场景一律“多次 set、一次
+   commit”——下面的 cfg_set_* 只改 NVS 的 RAM 页缓存，cfg_commit() 才落盘。
+   写入失败不致命：仅打日志，内存值仍有效（本次会话内生效，重启后丢失）。 */
+
+static esp_err_t cfg_set_u8(const char *key, uint8_t value)
 {
     if (s_nvs == 0) {
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     esp_err_t err = nvs_set_u8(s_nvs, key, value);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_set_u8(%s) failed: %s", key, esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t cfg_set_u32(const char *key, uint32_t value)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = nvs_set_u32(s_nvs, key, value);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_u32(%s) failed: %s", key, esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t cfg_set_str(const char *key, const char *value)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = nvs_set_str(s_nvs, key, value);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_str(%s) failed: %s", key, esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t cfg_set_blob(const char *key, const void *data, size_t len)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = nvs_set_blob(s_nvs, key, data, len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob(%s) failed: %s", key, esp_err_to_name(err));
+    }
+    return err;
+}
+
+/* 提交所有脏页（一次 flash 写，与脏了多少键无关） */
+static void cfg_commit(void)
+{
+    if (s_nvs == 0) {
         return;
     }
-    err = nvs_commit(s_nvs);
+    esp_err_t err = nvs_commit(s_nvs);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
+        ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+    }
+}
+
+/* 单键写入 + 立即提交（频次低的场景用；批量场景用 cfg_set_* + cfg_commit） */
+static void cfg_write_u8(const char *key, uint8_t value)
+{
+    if (cfg_set_u8(key, value) == ESP_OK) {
+        cfg_commit();
     }
 }
 
 static void cfg_write_u32(const char *key, uint32_t value)
 {
-    if (s_nvs == 0) {
-        return;
-    }
-    esp_err_t err = nvs_set_u32(s_nvs, key, value);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_set_u32(%s) failed: %s", key, esp_err_to_name(err));
-        return;
-    }
-    err = nvs_commit(s_nvs);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
+    if (cfg_set_u32(key, value) == ESP_OK) {
+        cfg_commit();
     }
 }
 
-/* 字符串/blob 写辅助（EQ 预设选择用）；key 不存在时 erase 返回
-   ESP_ERR_NVS_NOT_FOUND，属正常情况，忽略 */
-static void cfg_write_str(const char *key, const char *value)
-{
-    if (s_nvs == 0) {
-        return;
-    }
-    esp_err_t err = nvs_set_str(s_nvs, key, value);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_set_str(%s) failed: %s", key, esp_err_to_name(err));
-        return;
-    }
-    err = nvs_commit(s_nvs);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
-    }
-}
-
-static void cfg_write_blob(const char *key, const void *data, size_t len)
-{
-    if (s_nvs == 0) {
-        return;
-    }
-    esp_err_t err = nvs_set_blob(s_nvs, key, data, len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_set_blob(%s) failed: %s", key, esp_err_to_name(err));
-        return;
-    }
-    err = nvs_commit(s_nvs);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_commit(%s) failed: %s", key, esp_err_to_name(err));
-    }
-}
-
-static void cfg_erase_key(const char *key)
+/* 删键；key 不存在时返回 ESP_ERR_NVS_NOT_FOUND，属正常情况，忽略。
+   commit=false 时由调用方统一提交（批量场景）。 */
+static void cfg_erase_key_ex(const char *key, bool commit)
 {
     if (s_nvs == 0) {
         return;
@@ -387,7 +425,9 @@ static void cfg_erase_key(const char *key)
         ESP_LOGE(TAG, "nvs_erase_key(%s) failed: %s", key, esp_err_to_name(err));
         return;
     }
-    nvs_commit(s_nvs);
+    if (commit) {
+        cfg_commit();
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -444,33 +484,40 @@ void config_store_save_active_slot(void);
  *   1. 槽位从未保存过（升级上来的机器）→ 额外写一份旧全局键，保持与旧版本
  *      固件/旧 NVS 布局的兼容；
  *   2. 一律把当前配置整块写回当前活跃槽位（同一 blob 覆盖写，NVS 分页复用）。
+ *
+ * ⚠ 兼容层原本是"每个键各 commit 一次"（9 次 4KB 页写！），现改为
+ *   “多次 set + 一次 commit”：NVS 的写单位是页，一次提交能覆盖所有脏键。
  */
 static void slot_persist_live(void)
 {
+    /* 下面的 blob 一定包含当前音量，延迟落盘标记作废 */
+    s_volume_dirty = false;
+
     if (!s_slot_active_saved) {
         /* 兼容层：首次保存槽位之前，把可切换字段同步写进旧全局键 */
-        cfg_write_u8(KEY_VOLUME, s_live.volume);
-        cfg_write_u8(KEY_LOOP_MODE, s_live.loop_mode);
-        cfg_write_u8(KEY_SHUFFLE, s_live.shuffle ? 1u : 0u);
-        cfg_write_u32(KEY_SLEEP_DEFAULT, s_live.sleep_default_min);
-        cfg_write_u32(KEY_LAST_GLOBAL, s_live.last_global);
+        cfg_set_u8(KEY_VOLUME, s_live.volume);
+        cfg_set_u8(KEY_LOOP_MODE, s_live.loop_mode);
+        cfg_set_u8(KEY_SHUFFLE, s_live.shuffle ? 1u : 0u);
+        cfg_set_u32(KEY_SLEEP_DEFAULT, s_live.sleep_default_min);
+        cfg_set_u32(KEY_LAST_GLOBAL, s_live.last_global);
         /* ⚠ 秒数位置不保存（NightPlayer 机制：只记"当前歌曲"，开机从歌
            曲开头开始）——旧键 last_pos 保持不写，其历史值为 0 */
-        cfg_write_u8(KEY_LAST_VALID, s_live.last_valid ? 1u : 0u);
+        cfg_set_u8(KEY_LAST_VALID, s_live.last_valid ? 1u : 0u);
         if (s_live.shuf_pos_valid) {
-            cfg_write_u32(KEY_SHUFFLE_POS_HI, (uint32_t)(s_live.shuf_pos >> 32));
-            cfg_write_u32(KEY_SHUFFLE_POS_LO, (uint32_t)(s_live.shuf_pos & 0xFFFFFFFFu));
-            cfg_write_u8(KEY_SHUFFLE_POS_VAL, 1u);
+            cfg_set_u32(KEY_SHUFFLE_POS_HI, (uint32_t)(s_live.shuf_pos >> 32));
+            cfg_set_u32(KEY_SHUFFLE_POS_LO, (uint32_t)(s_live.shuf_pos & 0xFFFFFFFFu));
+            cfg_set_u8(KEY_SHUFFLE_POS_VAL, 1u);
         } else {
-            cfg_write_u8(KEY_SHUFFLE_POS_VAL, 0u);
+            cfg_set_u8(KEY_SHUFFLE_POS_VAL, 0u);
         }
         if (s_live.eq_valid) {
-            cfg_write_str(KEY_EQ_NAME, s_live.eq_name);
-            cfg_write_blob(KEY_EQ_DATA, &s_live.eq_data, sizeof(s_live.eq_data));
+            cfg_set_str(KEY_EQ_NAME, s_live.eq_name);
+            cfg_set_blob(KEY_EQ_DATA, &s_live.eq_data, sizeof(s_live.eq_data));
         } else {
-            cfg_erase_key(KEY_EQ_NAME);
-            cfg_erase_key(KEY_EQ_DATA);
+            cfg_erase_key_ex(KEY_EQ_NAME, false);
+            cfg_erase_key_ex(KEY_EQ_DATA, false);
         }
+        /* 兼容层全部 set 完，随下面的槽位 blob 一次提交落盘 */
     }
     config_store_save_active_slot();
 }
@@ -817,7 +864,10 @@ void config_store_get_slot_snapshot(uint32_t idx, config_store_slot_snapshot_t *
     }
 }
 
-void config_store_save_active_slot(void)
+/* 把内存配置整块写回活跃槽位。
+   commit=false 时只 set 不落盘，由调用方与其它键合并成一次 commit
+   （切槽位：旧槽位 blob + slot_active 一次提交，省一次 4KB 页写）。 */
+static void slot_save_active(bool commit)
 {
     if (s_nvs == 0 || s_slot_active >= CONFIG_STORE_SLOT_COUNT) {
         return;
@@ -827,7 +877,7 @@ void config_store_save_active_slot(void)
        不再从槽位缓存里取名字，也不受"槽位是否已有数据"影响 */
     config_slot_blob_t b;
     slot_pack(&b);
-    slot_cache_store(s_slot_active, &b);
+    slot_cache_store(s_slot_active, &b, commit);
     s_slot_active_saved = true;
     ESP_LOGI(TAG, "SAVE%u saved to NVS: vol=%u loop=%u shuffle=%d sleep=%u min "
                   "last=%u(%s) list=%s eq=%s",
@@ -837,6 +887,13 @@ void config_store_save_active_slot(void)
              b.last_valid ? "valid" : "none",
              b.last_list_name[0] ? b.last_list_name : "-",
              b.eq_valid ? b.eq_name : "none");
+}
+
+void config_store_save_active_slot(void)
+{
+    /* 写入的 blob 已包含当前音量，延迟落盘标记作废（否则 flush 会再写一遍） */
+    s_volume_dirty = false;
+    slot_save_active(true);
 }
 
 void config_store_set_slot_list_name(const char *name)
@@ -859,11 +916,20 @@ void config_store_switch_slot(uint32_t idx)
     if (idx >= CONFIG_STORE_SLOT_COUNT || idx == s_slot_active) {
         return;
     }
-    /* 1. 先把当前配置存回旧槽位（切换语义：切走前落盘） */
-    config_store_save_active_slot();
-    /* 2. 换活跃下标并记忆到 NVS（直接写，避免 set_active_slot 的重复提交） */
+    /* 0. 延迟落盘的亮度先写进 NVS 的 RAM 页缓存（不提交，稍后与下面两个键
+          合并成一次 flash 写）；音量标记作废——旧槽位 blob 里会写入当前音量。 */
+    if (s_bright_dirty) {
+        s_bright_dirty = false;
+        cfg_set_u8(KEY_BRIGHTNESS, s_brightness);
+    }
+    s_volume_dirty = false;
+
+    /* 1. 先把当前配置存回旧槽位（blob 只 set，不提交） */
+    slot_save_active(false);
+    /* 2. 换活跃下标并记忆到 NVS（与上面的 blob 一次提交，省一次 4KB 页写） */
     s_slot_active = idx;
-    cfg_write_u8(KEY_ACTIVE_SLOT, (uint8_t)idx);
+    cfg_set_u8(KEY_ACTIVE_SLOT, (uint8_t)idx);
+    cfg_commit();
     /* 3. 载入目标槽位内容（空槽位 → 出厂默认 + 无位置记录） */
     slot_load_into_live(idx, true, "switch: load new slot");
     /* 4. 通知 UI（设置页等按新槽位的值刷新） */
@@ -977,26 +1043,99 @@ void config_store_set_volume(uint8_t vol)
     if (vol > CONFIG_STORE_VOLUME_MAX) {
         vol = CONFIG_STORE_VOLUME_MAX;
     }
+    /* 值没变且没有挂着的延迟落盘 → 无事可做；若挂着延迟标记（拖动中刚改过
+       内存），则本次调用正是"立即落盘"的时机，继续往下走。 */
+    if (vol == s_live.volume && !s_volume_dirty) {
+        return;
+    }
+    const bool changed = (vol != s_live.volume);
+    s_live.volume = vol;
+    s_volume_dirty = false;   /* 本函数立即落盘 */
+    slot_persist_live();
+    if (changed) {
+        config_notify();
+    }
+}
+
+/* 延迟版：只改内存 + 置脏（拖动中每帧调用），落盘交给 flush_pending。
+   见 config_store.h 的“延迟落盘”说明与 ideas_and_exps/NVS_WRITE_BUDGET.md */
+void config_store_set_volume_deferred(uint8_t vol)
+{
+    if (vol > CONFIG_STORE_VOLUME_MAX) {
+        vol = CONFIG_STORE_VOLUME_MAX;
+    }
     if (vol == s_live.volume) {
         return;
     }
     s_live.volume = vol;
-    slot_persist_live();
+    s_volume_dirty = true;
+    s_volume_dirty_us = esp_timer_get_time();
     config_notify();
+}
+
+/* 亮度钳位（下限防全黑看不清） */
+static uint8_t brightness_clamp(uint8_t brightness)
+{
+    return (brightness < CONFIG_STORE_BRIGHTNESS_MIN)
+               ? (uint8_t)CONFIG_STORE_BRIGHTNESS_MIN
+               : brightness;
 }
 
 void config_store_set_brightness(uint8_t brightness)
 {
     /* 亮度下限：不允许存到 CONFIG_STORE_BRIGHTNESS_MIN 以下（防全黑看不清） */
-    if (brightness < CONFIG_STORE_BRIGHTNESS_MIN) {
-        brightness = CONFIG_STORE_BRIGHTNESS_MIN;
+    brightness = brightness_clamp(brightness);
+    if (brightness == s_brightness && !s_bright_dirty) {
+        return;
     }
+    const bool changed = (brightness != s_brightness);
+    s_brightness = brightness;
+    s_bright_dirty = false;   /* 本函数立即落盘 */
+    cfg_write_u8(KEY_BRIGHTNESS, brightness);
+    if (changed) {
+        config_notify();
+    }
+}
+
+/* 延迟版：只改内存 + 置脏（亮度条拖动中调用），落盘交给 flush_pending */
+void config_store_set_brightness_deferred(uint8_t brightness)
+{
+    brightness = brightness_clamp(brightness);
     if (brightness == s_brightness) {
         return;
     }
     s_brightness = brightness;
-    cfg_write_u8(KEY_BRIGHTNESS, brightness);
+    s_bright_dirty = true;
+    s_bright_dirty_us = esp_timer_get_time();
     config_notify();
+}
+
+/* 把延迟落盘的字段写入 NVS。
+   每次真正落盘打一行日志（低频：一次拖动只会在松手/静默后打一次），用于
+   从串口确认“拖动期间没有写 flash、只在松手后写了一次”。
+   ⚠ 必须在栈位于内部 RAM 的任务里调用（写 flash 会关外部缓存，PSRAM 栈
+     会命中 IDF 断言），见 FLASH_WRITE_VS_PSRAM.md §五。 */
+void config_store_flush_pending(bool force)
+{
+    const int64_t now = esp_timer_get_time();
+
+    if (s_bright_dirty &&
+        (force || (now - s_bright_dirty_us) >= CONFIG_STORE_FLUSH_QUIET_US)) {
+        /* 先清标志再写：写的过程中若有新的 deferred 调用，会重新置脏，
+           下一轮再写，不会丢 */
+        s_bright_dirty = false;
+        ESP_LOGI(TAG, "flush deferred brightness=%u (%s)",
+                 (unsigned)s_brightness, force ? "force" : "quiet");
+        cfg_write_u8(KEY_BRIGHTNESS, s_brightness);
+    }
+
+    if (s_volume_dirty &&
+        (force || (now - s_volume_dirty_us) >= CONFIG_STORE_FLUSH_QUIET_US)) {
+        s_volume_dirty = false;
+        ESP_LOGI(TAG, "flush deferred volume=%u (%s)",
+                 (unsigned)s_live.volume, force ? "force" : "quiet");
+        slot_persist_live();   /* 整块写回活跃槽位（兼容态下同时写旧全局键） */
+    }
 }
 
 void config_store_set_loop_mode(uint8_t mode)
@@ -1019,19 +1158,27 @@ void config_store_set_shuffle(bool on)
     config_notify();
 }
 
+/* 只改内存的 random 位置 setter（合并写用，见 config_store.h 说明） */
+bool config_store_set_shuffle_pos_ram(uint64_t pos)
+{
+    if (s_live.shuf_pos_valid && s_live.shuf_pos == pos) {
+        return false;
+    }
+    s_live.shuf_pos = pos;
+    s_live.shuf_pos_valid = true;
+    return true;
+}
+
 void config_store_set_shuffle_pos(uint64_t pos)
 {
     /* 值+有效标志都没变就直接返回（2026-11）：本 setter 是**每次切槽位/暂停/
        关机都会调**的高频接口，而每次调用都会整块重写槽位 blob。切槽位时
        player_controller 的 CMD_RESTORE_CONFIG 会连续两次写入同一个随机位置
        （先写快照值、再写 adopt 后的值），没有这条短路就会白写两遍 flash。 */
-    if (s_live.shuf_pos_valid && s_live.shuf_pos == pos) {
-        return;
+    if (config_store_set_shuffle_pos_ram(pos)) {
+        /* 内部状态（随机序列现场），UI 不展示，无需通知回调；随槽位一起落盘 */
+        slot_persist_live();
     }
-    s_live.shuf_pos = pos;
-    s_live.shuf_pos_valid = true;
-    /* 内部状态（随机序列现场），UI 不展示，无需通知回调；随槽位一起落盘 */
-    slot_persist_live();
 }
 
 void config_store_set_sleep_default_min(uint32_t minutes)
@@ -1174,19 +1321,27 @@ void config_store_set_was_playing(bool playing)
     cfg_write_u8(KEY_WAS_PLAYING, playing ? 1 : 0);
 }
 
+/* 只改内存的 last_song setter（合并写用，见 config_store.h 说明） */
+bool config_store_set_last_song_ram(uint32_t global)
+{
+    if (s_live.last_valid && s_live.last_global == global) {
+        return false;
+    }
+    s_live.last_global = global;
+    s_live.last_valid = true;
+    return true;
+}
+
 void config_store_set_last_song(uint32_t global)
 {
     /* 值+有效标志都没变就直接返回（2026-11）：切槽位前/伪关机前的
        player_controller_sync_config() 会无条件调本函数，若歌曲没变就没有
        必要重写整个槽位 blob（真正必须落盘的那次由
        config_store_switch_slot / save_active_slot 自己完成）。 */
-    if (s_live.last_valid && s_live.last_global == global) {
-        return;
+    if (config_store_set_last_song_ram(global)) {
+        /* 位置类记录无 UI 展示，不通知回调；随槽位一起落盘 */
+        slot_persist_live();
     }
-    s_live.last_global = global;
-    s_live.last_valid = true;
-    /* 位置类记录无 UI 展示，不通知回调；随槽位一起落盘 */
-    slot_persist_live();
 }
 
 bool config_store_get_eq(char *name, size_t name_size, eq_preset_t *preset_out)

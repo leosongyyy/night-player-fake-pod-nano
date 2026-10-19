@@ -77,6 +77,10 @@ esp_flash_write()                     spi_flash/esp_flash_api.c:1111
 
 ### 3.1 NVS 写入点（唯一入口 + 调用上下文）
 
+> ⚠ 本节审的是**安全性**（会不会崩）。**写频率/性能**（亮度拖动卡顿、
+> NVS 写预算、延迟落盘机制）见 `NVS_WRITE_BUDGET.md`——同一批写入口，
+> 两种视角。
+
 全项目 `nvs_set_* / nvs_erase_key / nvs_commit` **只出现在 `core/storage/config_store.c`**。
 `pldata` 擦写只出现在 `core/storage/playlist_store.c`（→ `core/hardware/pldata.c`）。
 这是很关键的一条：新增配置项不需要（也不应该）另开 NVS 写入口。

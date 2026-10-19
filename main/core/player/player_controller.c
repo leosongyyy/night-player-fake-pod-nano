@@ -510,6 +510,9 @@ static void player_stopped_cb(mp3_player_stop_reason_t reason)
     player_post_cmd(CMD_FINISHED, (uint32_t)reason);
 }
 
+/* 前向声明：暂停/停止在下面的命令处理里用到（定义见 player_sync_config 之后） */
+static void player_persist_position(void);
+
 static void player_cmd_play(void)
 {
     mp3_player_state_t st = mp3_player_get_state();
@@ -526,37 +529,46 @@ static void player_cmd_pause(void)
         mp3_player_pause();
         /* 暂停时保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置，
            开机从歌曲开头开始）；随机模式下同步保存随机位置，
-           保证断点续播回到同一序列 */
-        config_store_set_last_song(s_cur_global);
-        if (s_shuffle) {
-            config_store_set_shuffle_pos(s_shuffle_pos);
-        }
+           保证断点续播回到同一序列。
+           ⚠ 两个字段合并成一次槽位 blob 写（见 player_persist_position） */
+        player_persist_position();
     }
 }
 
 /* 把"当前播放现场"（当前歌曲 + 随机序列位置 + 所在列表名）同步进
-   config_store 的活跃配置槽位（只写内存 + 槽位 blob，不触发 UI 通知：
-   位置类字段无 UI 展示）。
+   config_store 的活跃配置槽位（**只改内存，不写 NVS**）。
    ⚠ 实现放在控制器内部（直接读 s_cur_global/s_shuffle_pos/s_dir_name），
    不经过 player_controller_get_status——那样要在栈上拷一份 ~1KB 的状态快照。
-   调用者：配置槽位切换前（config_slots_switch）、伪关机保存
-   （player_controller_save_last_position）。
-   ⚠ **不要改成"每次切歌都调一次"**（2026-11 二次收敛）：那会让每次点歌/
-   翻页都写一遍整个槽位 blob（352B + commit，关缓存 5~20ms），而"切走时
-   记住了歌"这件事由切换前的这一次同步完整覆盖（见 CONFIG_SLOTS.md §七）。
-   随机模式下同时同步随机位置（切歌后 position 已推进到新歌）。 */
+   调用者：配置槽位切换前（config_slots_switch，随后 switch_slot 自己落盘）、
+   伪关机保存（player_controller_save_last_position，随后 save_active_slot）。
+   ⚠ 本函数不再自己落盘（2026-11 三次收敛）：两个 setter 各写一次整块槽位
+   blob 纯属浪费，落盘统一交给调用方的那一次 save_active_slot/switch_slot。 */
 static void player_sync_config(void)
 {
     if (!s_ready || s_song_count == 0) {
         return;
     }
-    config_store_set_last_song(s_cur_global);
+    config_store_set_last_song_ram(s_cur_global);
     if (s_shuffle) {
-        config_store_set_shuffle_pos(s_shuffle_pos);
+        config_store_set_shuffle_pos_ram(s_shuffle_pos);
     }
     /* 列表名只是槽位列表的展示字段（"SAVE1 <列表名>"）：就地更新内存快照，
        随下一次槽位保存一起落盘（本调用不写 NVS） */
     config_store_set_slot_list_name(s_dir_name);
+}
+
+/* 把当前播放现场落盘（暂停/停止时用）：
+   合并 last_song + shuffle_pos 两次内存修改，只在真的变了时写 **一次** 槽位
+   blob（原来两个 setter 各写一次，每次都是 352B + 4KB 页写）。 */
+static void player_persist_position(void)
+{
+    bool changed = config_store_set_last_song_ram(s_cur_global);
+    if (s_shuffle) {
+        changed |= config_store_set_shuffle_pos_ram(s_shuffle_pos);
+    }
+    if (changed) {
+        config_store_save_active_slot();
+    }
 }
 
 static void player_cmd_toggle(void)
@@ -772,12 +784,9 @@ static void player_task(void *arg)
         }
         case CMD_STOP:
             /* 停止前保存当前歌曲（NightPlayer 原版机制：不记忆秒数位置）；
-               随机模式下同步保存随机位置 */
+               随机模式下同步保存随机位置。两个字段合并成一次 blob 写。 */
             if (mp3_player_get_state() != MP3_STATE_IDLE) {
-                config_store_set_last_song(s_cur_global);
-                if (s_shuffle) {
-                    config_store_set_shuffle_pos(s_shuffle_pos);
-                }
+                player_persist_position();
             }
             mp3_player_stop();
             break;
@@ -1068,7 +1077,8 @@ void player_controller_save_last_position(void)
     }
     /* ⚠ NightPlayer 原版机制：只记忆当前歌曲，不记忆秒数位置
        （pos 恒为 0，开机从歌曲开头开始）。
-       歌曲 + 随机位置 + 列表名先一起同步（player_sync_config）。 */
+       歌曲 + 随机位置 + 列表名先一起同步进内存（player_sync_config 不再
+       自己落盘），随后由下面的 save_active_slot 一次写完整块槽位 blob。 */
     player_sync_config();
     /* 记录关机前播放状态（NVS）：true=当时在播放（开机自动播放），
        false=已暂停/停止（开机只恢复当前歌曲不自动播放，避免突然出声）。
@@ -1076,7 +1086,9 @@ void player_controller_save_last_position(void)
     config_store_set_was_playing(mp3_player_get_state() == MP3_STATE_PLAYING);
     /* 配置槽位：把当前整套配置存回活跃槽位
        （关机时自动保存到当前配置，见 ideas_and_exps/CONFIG_SLOTS.md）。
-       ⚠ 必须在 player_sync_config 之后调用，否则存下去的是旧歌曲/旧位置 */
+       ⚠ 必须在 player_sync_config 之后调用，否则存下去的是旧歌曲/旧位置。
+       ⚠ 现在全流程只有这一次 blob 写（原来 sync_config 里两个 setter 各写
+         一次 + 这里再写一次 = 3 次，见 NVS_WRITE_BUDGET.md） */
     config_store_save_active_slot();
     ESP_LOGI(TAG, "save last position: song #%u was_playing=%d%s",
              (unsigned)s_cur_global,

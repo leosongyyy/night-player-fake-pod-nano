@@ -272,7 +272,16 @@ void power_service_init(void)
 /* 息屏重活：AMOLED 休眠 → 挂起 LVGL → 固定 80MHz */
 static void power_service_do_screen_off(void *arg)
 {
-    (void)arg;
+    /* 0. 息屏前把"延迟落盘"的亮度/音量写进 NVS：LVGL 任务马上要被挂起，
+          而拖动亮度的落盘正是挂在 LVGL 的定时器上（松手也会 flush，但手势
+          被中断时会漏）。arg != NULL 表示"经 deep_worker（内部 RAM 栈）执行"，
+          只有这个上下文才能写 flash——deep_worker 不可用时调用方会就地兜底
+          （power_svc 的栈在 PSRAM，写 flash 会命中 IDF 的关缓存断言），
+          故兜底路径传 NULL、跳过本步。 */
+    if (arg != NULL) {
+        config_store_flush_pending(true);
+    }
+
     /* 1. AMOLED 休眠（DISPOFF + SLEEP IN）：驱动 IC 停止 DC/DC/振荡器/扫描，
            显示 RAM 保留——这是息屏真正的低功耗态（仅亮度 0 时驱动 IC 仍
            满负荷运行，曾是息屏电流大头）。⚠ 命令与 LVGL 刷屏共用 SPI 总线，
@@ -342,7 +351,8 @@ void power_service_screen_off(void)
        卡死超时）时就地兜底执行，保证屏幕与 LVGL 状态一致。
        ⚠ s_mux 全程持有：息屏动作同步完成后才返回，快速连按由 s_mux
        串行化（见 SCREEN_SLEEP_AMOLED_OPTIMIZATION.md 第 5 节时序）。 */
-    if (!deep_worker_call(power_service_do_screen_off, NULL)) {
+    if (!deep_worker_call(power_service_do_screen_off, (void *)1)) {
+        /* 兜底就地执行，传 NULL：本任务栈在 PSRAM，绝不能在里面写 flash */
         power_service_do_screen_off(NULL);
     }
     xSemaphoreGive(s_mux);

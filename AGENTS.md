@@ -191,6 +191,11 @@ main/
                             #   get_xxx/set_xxx 签名与语义不变（无感），见 ideas_and_exps/CONFIG_SLOTS.md
                             # ⚠ 变更通知是**延迟派发**的：set_xxx 只置标志，回调由 UI 层的 100ms lv_timer
                             #   （config_store_notify_dispatch）在 LVGL 任务里跑——任何任务都能安全 set_xxx
+                            # ⚠ **高频拖动（亮度/音量竖条）必须走 `*_deferred` + `config_store_flush_pending()`**：
+                            #   一次 nvs_commit 要写 4KB 页并停核 5~20ms，拖动中每次落盘会直接卡死 UI。
+                            #   松手 flush(true)、100ms 定时器保底 flush(false)、息屏/伪关机/切槽位强制 flush。
+                            #   ⚠ flush 只能由**内部 RAM 栈**任务调用（LVGL / deep_worker），PSRAM 栈任务写 flash 会断言。
+                            #   见 ideas_and_exps/NVS_WRITE_BUDGET.md
       config_slots.h/.c     # 配置槽位切换的**运行时应用**：切换前先 player_controller_sync_config()
                             #   把播放现场存进旧槽位，再落音量/EQ/睡眠定时，播放部分交给
                             #   player_controller_restore_config（原子恢复循环/随机/歌曲并播放）

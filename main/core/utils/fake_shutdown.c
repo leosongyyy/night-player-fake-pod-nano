@@ -14,6 +14,7 @@
 #include "core/hardware/sd_card.h"
 #include "core/hardware/touch.h"
 #include "core/player/player_controller.h"
+#include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/deep_worker.h"
 
@@ -208,7 +209,12 @@ static void fake_shutdown_common(bool show_hint, bool keep_display)
             lvgl_port_unlock();
         }
     }
+    /* ⚠ 顺序：先 save_last_position（这一次槽位 blob 会把当前音量一起写入，
+       并清掉音量的延迟落盘标记），再 flush_pending 补写尚未落盘的亮度——
+       反过来的话音量会被 flush 先写一遍 blob、随后又写一遍，多一次 4KB 页写。
+       本函数在 deep_worker（内部 RAM 栈）里执行，可以安全写 flash。 */
     player_controller_save_last_position();
+    config_store_flush_pending(true);
 
     /* 1. 停止播放并等待解码任务退出（释放文件句柄与 I2S） */
     if (mp3_player_get_state() != MP3_STATE_IDLE) {

@@ -100,11 +100,15 @@ static void app_config_changed_cb(void *ctx)
 }
 
 /* 配置变更通知派发定时器（LVGL 任务上下文）：把 config_store 里累积的
-   "待通知"标志兑现成一次 UI 刷新（状态栏音量 / 通知栏滑块 / 设置页文字）。 */
+   "待通知"标志兑现成一次 UI 刷新（状态栏音量 / 通知栏滑块 / 设置页文字），
+   并做一次"延迟落盘"保底：亮度/音量拖动期间只改内存，正常由松手事件立即
+   flush；若没收到松手（手势被中断等），这里在静默 500ms 后补写一次。
+   ⚠ 本回调在 LVGL 任务（栈在内部 RAM），可以安全写 flash。 */
 static void config_notify_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     config_store_notify_dispatch();
+    config_store_flush_pending(false);
 }
 
 /* 状态栏周期刷新：电量（电池图标按百分比分级 + 电压 0.01V）+ 音量（实时跟随）。

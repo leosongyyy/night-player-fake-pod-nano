@@ -220,10 +220,12 @@ static void notif_attach_events(lv_obj_t *obj)
 /* 亮度 / 音量应用                                                     */
 /* ------------------------------------------------------------------ */
 
-/* 应用亮度：写配置（持久化 + 通知其它 UI 同步），再写硬件。
+/* 应用亮度：只改内存（不写 NVS），再写硬件。
    ⚠ 事件回调运行在 LVGL 任务上下文（已持锁），display_set_brightness 安全。
-   亮度钳制到 BRIGHT_SLIDE_MIN 下限（防止屏幕完全看不清），
-   未跨过阈值时直接跳过，避免频繁写 NVS / SPI。 */
+   ⚠⚠ 拖动中**绝不落盘**：一次拖动会有上百次值变化，而每次 nvs_commit 都要
+   写一整页 flash（4KB）并把两颗核停住 5~20ms，会直接吃光 LVGL 的 33ms 帧
+   预算 → 用户可见的剧烈卡顿（见 ideas_and_exps/NVS_WRITE_BUDGET.md）。
+   落盘推迟到松手（notif_apply_pending_flush）或静默 500ms（ui/app.c 定时器）。 */
 static void notif_apply_brightness(uint8_t brightness)
 {
     if (brightness < BRIGHT_SLIDE_MIN) {
@@ -232,14 +234,15 @@ static void notif_apply_brightness(uint8_t brightness)
     if (brightness == config_store_get_brightness()) {
         return;
     }
-    config_store_set_brightness(brightness);
+    config_store_set_brightness_deferred(brightness);
     display_set_brightness(brightness);
 }
 
 /* 应用音量：先写硬件（config_store 变更回调会读 audio 值，顺序不能反），
-   再持久化 + 通知 UI 同步。睡眠定时音量渐降期间手动调节 → 用户接管，
-   静默取消渐降（保持新音量不再自动降低）。
-   档位未变时直接跳过（滑动未跨格时避免频繁写 I2C / NVS）。 */
+   再改内存（不写 NVS）。
+   睡眠定时音量渐降期间手动调节 → 用户接管，静默取消渐降（保持新音量不再
+   自动降低）。档位未变时直接跳过（滑动未跨格时避免频繁写 I2C）。
+   ⚠ 落盘策略同亮度：拖动中不写 flash，松手/静默后由 flush 统一写一次。 */
 static void notif_apply_volume(uint8_t level)
 {
     if (level == audio_get_volume_level()) {
@@ -247,9 +250,16 @@ static void notif_apply_volume(uint8_t level)
     }
     sleep_timer_fade_cancel();
     audio_set_volume_level(level);          /* 先写硬件（回调读到的即新值） */
-    config_store_set_volume(level);         /* 后持久化 + 通知回调（持锁安全） */
+    config_store_set_volume_deferred(level);/* 后改内存 + 通知（持锁安全） */
     /* ⚠ 音量调节不触发睡眠定时清醒感知加时（只有切歌/播放控制/点歌等
        算"用户动作"，见 sleep_timer_note_activity 注释） */
+}
+
+/* 松手时把拖动期间累积的亮度/音量一次落盘（force：不等 500ms 静默）。
+   写 flash 的 5~20ms 落在"手指刚抬起"这一刻，是用户可感知最小的位置。 */
+static void notif_apply_pending_flush(void)
+{
+    config_store_flush_pending(true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -438,6 +448,8 @@ static void bright_slide_event_cb(lv_event_t *e)
         break;
     case LV_EVENT_RELEASED:
         bright_dragging = false;
+        /* 松手：把拖动期间累积的亮度（以及同一次手势里调过的音量）一次落盘 */
+        notif_apply_pending_flush();
         break;
     default:
         break;
@@ -483,6 +495,8 @@ static void vol_slide_event_cb(lv_event_t *e)
         break;
     case LV_EVENT_RELEASED:
         vol_dragging = false;
+        /* 松手：把拖动期间累积的音量一次落盘（槽位 blob 写一次，而不是每档一次） */
+        notif_apply_pending_flush();
         break;
     default:
         break;
