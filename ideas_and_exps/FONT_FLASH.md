@@ -1,5 +1,10 @@
 # 手动刷入系统字体（`font` 分区）
 
+> 💡 **先看这里**：本文讲的是**日常 `idfc flash` 之后单独补刷字体**。如果刷的是
+> `dist/` 里的**全量固件**（`tools/make_full_firmware.py` 生成的单文件，烧到 `0x0`），
+> 字体已经在镜像里，**不用再执行本文任何命令**。全量固件的说明见
+> [`FULL_FIRMWARE.md`](FULL_FIRMWARE.md)。
+
 > **一句话**：固件里**不含**系统字体。刷完固件（app）之后，还要用 esptool 单独把
 > `spiffs/system.ttf` 烧进 flash 的 `font` 分区：
 >

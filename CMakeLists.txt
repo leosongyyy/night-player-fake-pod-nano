@@ -7,4 +7,10 @@
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 add_compile_options("-Wno-format")
+
+# 应用版本（写入 esp_app_desc_t，启动日志 / idf.py size / OTA 会读取）。
+# 不设置时 ESP-IDF 用 `git describe --tags`，会得到 "0.9.0.0_alpha_5-25-gb8c87c4-dirty"
+# 这类字符串，与设置页「关于」显示的 CONFIG_FIRMWARE_VERSION_STRING 不一致。
+set(PROJECT_VER "1.0.0.0")
+
 project(FakePodNanoNightPlayer)

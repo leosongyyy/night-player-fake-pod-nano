@@ -209,9 +209,15 @@ idfc build -t release            # 构建发布版（完整字体、调试全关
 idfc flash -p COMx               # 烧录（COMx 换成实际串口号）
 idfc run -t release --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
 idfc help --all                  # 全部命令与参数
+
+# 生成"全量固件"（bootloader + 分区表 + app + 字体，单文件烧 0x0，清 nvs/pldata）
+python tools/make_full_firmware.py -t release
 ```
 
 ### 🔤 刷字体（第一次安装 / 换字体时必做）
+
+> 💡 如果用的是 **全量固件**（`tools/make_full_firmware.py` 生成的单文件，烧到 `0x0`），
+> 字体已经包含在镜像里，**本节可以跳过**；本节只针对日常 `idfc flash`（它不含字体）。
 
 系统字体（Droid Sans Fallback，3.55 MiB，含 5 万+ 汉字）**不在固件里**，而是单独放在 flash 的
 `font` 分区（`partitions.csv`：偏移 `0x800000`，4 MiB）。所以刷完固件之后，**还要用手边的
