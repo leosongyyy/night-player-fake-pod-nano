@@ -1,5 +1,7 @@
 # BUILD_MATRIX —— 配置矩阵的定义、`idfc_buildconfig.json` 格式与 idfc 实现说明
 
+> ⚠ **2026-11 更新（master）**：本文档描述的 overlay 维度（`dac_chip` / `font`）已从本项目的 `idfc_buildconfig.json` 中移除，现在只保留 debug / release 两套构建类型（`releasecandidate` 也已移除），构建目录为 `build/<variant>`。本文档本身仍是 idfc 该功能的定义与实现说明，保留不变；`legacy_s3` 分支仍按旧矩阵构建。
+
 > **状态**：固件侧（本仓库）**已就绪**（配置项 + overlay 配置 + `idfc_buildconfig.json` 均已入库），
 > idfc 侧**尚未实现**（当前已安装的 `idfc.exe` 不读 `idfc_buildconfig.json`，仍然只认 `.idfc/idfc_config.json` + `sdkconfig.defaults.<variant>`）。
 >

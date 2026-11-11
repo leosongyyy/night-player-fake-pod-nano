@@ -32,7 +32,7 @@
 - `patches/`：**构建期补丁文件**（托管组件用，当前两组：`lvgl_fast_mem_decl/`、`esp_lcd_touch_deps/`，见上方 IDF 6.1 条目）
 - `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_sh8601、esp_lcd_touch、cmake_utilities、chmorgan__esp-libhelix-mp3）
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
-- `BUILD_CONFIG.md`（`ideas_and_exps/`）：三套构建配置（debug/releasecandidate/release）的完整说明
+- `BUILD_CONFIG.md`（`ideas_and_exps/`）：构建配置（2026-11 起只剩 debug/release 两套；releasecandidate 已随字体统一移除）的完整说明
 - `BUILD_MATRIX.md`（`ideas_and_exps/`）：**配置矩阵**（`idfc_buildconfig.json`）的定义、配置文件格式规范、给 idfc 仓库的逐文件修改说明，以及 **2026-10-02 的新版 idfc 验收记录**（§7，含实测证据与已知小问题）
 
 **4. idfc 使用说明（重要）**
@@ -82,9 +82,9 @@
 
 **5. 开发命令**
 
-本项目使用多配置构建系统（debug / releasecandidate / release 三套，详见 `ideas_and_exps/BUILD_CONFIG.md`），以下是不同配置的命令速查表：
+本项目使用多配置构建系统（2026-11 起只有 debug / release 两套，详见 `ideas_and_exps/BUILD_CONFIG.md`），以下是不同配置的命令速查表：
 
-** debug（精简字体 + 非极速封面 + 调试全开）** —— 当前项目默认
+** debug（性能监视 + LVGL FPS/日志全开 + 省 Flash 的 2bit 封面）** —— 当前项目默认
 
 ```powershell
 idfc build                      # 增量构建（自动检测配置是否过期）
@@ -94,15 +94,7 @@ idfc flash                      # 烧录（串口取自 .idfc 配置）
 idfc monitor --wait-for "App started"   # 监视并在命中后退出
 ```
 
-** releasecandidate（完整字体 + 极速封面 + 调试全开） **
-
-```powershell
-idfc build -t releasecandidate
-idfc build -t releasecandidate --reconfigure
-idfc flash -t releasecandidate -p COMn
-```
-
-** release（完整字体 + 极速封面 + 调试全关） **
+** release（调试全关 + 极速版封面） **
 
 ```powershell
 idfc build -t release
@@ -115,32 +107,29 @@ idfc flash -t release -p COMn
 ```powershell
 idfc run -t debug --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
 idfc size -t debug                                   # 固件体积分析
-idfc clean -t debug        # 删当前单元格的 sdkconfig 与 config（如 build/cs43131.ttffont.debug/…）
-idfc fullclean -t debug    # 删当前单元格整个目录（如 build/cs43131.ttffont.debug）
+idfc clean -t debug        # 删当前构建目录的 sdkconfig 与 config（如 build/debug/…）
+idfc fullclean -t debug    # 删当前构建目录整个目录（如 build/debug）
 idfc help --all            # 全部命令与参数
 ```
 
 **备注**：
 
-- **过期检测已自动化**：改了 `sdkconfig.defaults*`、任何 overlay 配置（`sdkconfig.<维度>.<类型>`）、`idfc_buildconfig.json` 或 `main/Kconfig.projbuild` 后，`build` 会自动发现并清理+重新配置，**不需要再手工删 `build/<cell>/sdkconfig`**。想强制全量重配用 `build --reconfigure`，想跳过检测走纯增量用 `build --no-reconfigure`，想从最干净状态开始用 `build --fullclean`。
-- ⚠ 原理仍值得知道（历史事故的根因）：**已存在的 `build/<cell>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），所以只跑普通增量构建时新配置**不会生效、也不会报错**。历史上曾因此产出"堆毒化仍开"的固件（内部 RAM 紧张、任务建不起来、SD 读 DMA 失败）。**手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意这一点。**
-- 串口优先级：`-p` > `.idfc` 里 `set-port` 保存的值。构建类型优先级：`-t` > `.idfc` 里 `set-variant` 保存的值（当前 `debug`）；overlay 维度优先级：`-o <维度>=<类型>` > `.idfc` 里 `set-overlay` 保存的 `ActiveOverlays` > 矩阵定义里的 `DefaultType`（当前 `dac_chip=cs43131`、`font=ttffont`）。
+- **过期检测已自动化**：改了 `sdkconfig.defaults*`、`idfc_buildconfig.json` 或 `main/Kconfig.projbuild` 后，`build` 会自动发现并清理+重新配置，**不需要再手工删 `build/<variant>/sdkconfig`**。想强制全量重配用 `build --reconfigure`，想跳过检测走纯增量用 `build --no-reconfigure`，想从最干净状态开始用 `build --fullclean`。
+- ⚠ 原理仍值得知道（历史事故的根因）：**已存在的 `build/<variant>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），所以只跑普通增量构建时新配置**不会生效、也不会报错**。历史上曾因此产出"堆毒化仍开"的固件（内部 RAM 紧张、任务建不起来、SD 读 DMA 失败）。**手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意这一点。**
+- 串口优先级：`-p` > `.idfc` 里 `set-port` 保存的值。构建类型优先级：`-t` > `.idfc` 里 `set-variant` 保存的值（当前 `debug`）。**2026-11 master 起配置矩阵只剩 `variant` 一个维度**（`dac_chip` / `font` 两个 overlay 已删除，DAC 固定 CS43131、字体固定 TTF），构建目录是 `build/<variant>`，不再有 `-o` / `set-overlay` 可用。
 - 默认构建idfc当前默认构建类型，除非用户指定。
 - `idfc -B build/<cfg> build` 之类的旧写法已全部失效（见第 4 节）。
 - 已开放 `C:\esp\` 与 `C:\Espressif\` 的读取权限，可查阅 IDF 源码。
 
 **6. 构建配置**
 
-- `main/Kconfig.projbuild`：应用配置项（menuconfig）。配置项目请阅读该文件获得配置项的详细信息。常用配置组合均已使用三套构建配置切换。
-- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.releasecandidate` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、**LVGL 9：`CONFIG_LV_DEF_REFR_PERIOD=33`（显示刷新与 indev 轮询在 v9 合并为这一个周期）、`CONFIG_LV_USE_CUSTOM_MALLOC=y`（LVGL 对象堆走 `core/ui/lvgl_mem.c` 进 PSRAM，见"关键技术要点"；该文件另有"热点对象窗口"接口，把两个滚动列表页的对象钉回内部 RAM）、`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（blend 留在 IRAM；关掉可再省 83KB 内部 RAM、代价约 2fps）、裁掉 6 种用不到的颜色格式（`XRGB8888` / `ARGB8888_PREMULTIPLIED` / `L8` / `AL88` / `A8` / `I1`，保留 `RGB565`+`ARGB8888`+`RGB565A8`+`RGB888`；LVGL 的 IRAM 占用 82.8→25.3KB）、关 `CONFIG_LV_BUILD_EXAMPLES` / `LV_BUILD_DEMOS`（examples 下 250 个 .c 编了也会被 `--gc-sections` 全丢，纯省全量编译时间）、`CONFIG_LV_USE_CLIB_STRING=y`、`CONFIG_LV_USE_SYSMON=y`+`CONFIG_LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下，SYSMON 默认 n，不显式打开会被 Kconfig 静默丢弃）、字体 12/16/20/24/28/32/48 + 默认 18**、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、**字体由 `font` 维度决定 + 默认 `CONFIG_UI_FONT_TTF=y`：`CONFIG_LV_USE_FREETYPE=y` + `CONFIG_LV_FREETYPE_USE_LVGL_PORT=y` + `CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024`（同时管度量缓存 ×2 与位图缓存 ×1，只吃 PSRAM；2026-10 由 256 上调）—— 这一组就是 `sdkconfig.font.ttffont` 的内容，选 `binfont` 时被 `sdkconfig.font.binfont` 整体覆盖（关 TTF、关 FreeType、开 `UI_SYSTEM_FONT_FULL`），见下方"配置矩阵"。系统字体走 font 分区的 `spiffs/system.ttf`（当前内容 Droid Sans Fallback，**字体文件写死为 `spiffs/system.ttf` 且在固件之外——刷完固件要用 esptool 手动刷入**、没有 Kconfig 选项）**、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384`（TTF 迁移时由 8192 上调，见 `FontSystem.md` §5）等
+- `main/Kconfig.projbuild`：应用配置项（menuconfig）。配置项目请阅读该文件获得配置项的详细信息。常用配置组合均已使用 debug / release 两套构建配置切换。
+- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、**LVGL 9：`CONFIG_LV_DEF_REFR_PERIOD=33`（显示刷新与 indev 轮询在 v9 合并为这一个周期）、`CONFIG_LV_USE_CUSTOM_MALLOC=y`（LVGL 对象堆走 `core/ui/lvgl_mem.c` 进 PSRAM，见"关键技术要点"；该文件另有"热点对象窗口"接口，把两个滚动列表页的对象钉回内部 RAM）、`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（blend 留在 IRAM；关掉可再省 83KB 内部 RAM、代价约 2fps）、裁掉 6 种用不到的颜色格式（`XRGB8888` / `ARGB8888_PREMULTIPLIED` / `L8` / `AL88` / `A8` / `I1`，保留 `RGB565`+`ARGB8888`+`RGB565A8`+`RGB888`；LVGL 的 IRAM 占用 82.8→25.3KB）、关 `CONFIG_LV_BUILD_EXAMPLES` / `LV_BUILD_DEMOS`（examples 下 250 个 .c 编了也会被 `--gc-sections` 全丢，纯省全量编译时间）、`CONFIG_LV_USE_CLIB_STRING=y`、`CONFIG_LV_USE_SYSMON=y`+`CONFIG_LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下，SYSMON 默认 n，不显式打开会被 Kconfig 静默丢弃）、字体 12/16/20/24/28/32/48 + 默认 18**、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、**字体固定走 TTF（无构建期开关）：`CONFIG_LV_USE_FREETYPE=y` + `CONFIG_LV_FREETYPE_USE_LVGL_PORT=y` + `CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024`（同时管度量缓存 ×2 与位图缓存 ×1，只吃 PSRAM；2026-10 由 256 上调）。系统字体走 font 分区的 `spiffs/system.ttf`（当前内容 Droid Sans Fallback，**字体文件写死为 `spiffs/system.ttf` 且在固件之外——刷完固件要用 esptool 手动刷入**、没有 Kconfig 选项）**、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384`（TTF 迁移时由 8192 上调，见 `FontSystem.md` §5）等
   - ⚠ v8 的 `LV_COLOR_16_SWAP` / `LV_COLOR_SCREEN_TRANSP` / `LV_DISP_DEF_REFR_PERIOD` / `LV_INDEV_DEF_READ_PERIOD` / `LV_USE_LARGE_COORD` 在 v9 已删除或改名，逐项对照表见 `ideas_and_exps/LVGL9_MIGRATION.md` §2
-- **版本管理：配置事实源只有 `sdkconfig.defaults*`、`sdkconfig.<维度>.<类型>`（overlay 配置）、`idfc_buildconfig.json` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<cell>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。多配置构建下每个单元格目录持有自己的 sdkconfig（`-D SDKCONFIG=build/<cell>/sdkconfig` 指定）；`fullclean` 只清当前单元格目录。改配置的正确姿势：改 `sdkconfig.defaults*` / overlay 配置 / `idfc_buildconfig.json` / `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
-- **配置矩阵（`idfc_buildconfig.json`）—— 已在新版 idfc 中实现并验收通过（2026-10-02）**：除 debug/releasecandidate/release 三个 variant 外，还有**两个 overlay 维度**：
-  - **`dac_chip`**（`cs43131` 默认 / `pcm5102`）：目前**只影响启动日志**（`main/main.c` 末尾用 `#if` 打印 `DAC chip: CS43131/PCM5102`），配合 `main/Kconfig.projbuild` 的 `AUDIO_DAC_CS43131` / `AUDIO_DAC_PCM5102`（两个独立 bool，必须且只能开一个，同时开/同时关都 `#error`）；公共默认在 `sdkconfig.defaults` 选 `AUDIO_DAC_CS43131=y`。真正的 DAC 切换尚未实现。
-  - **`font`**（`ttffont` 默认 / `binfont`，2026-10-25 新增）：**真切换**。`ttffont` = font 分区里的 `spiffs/system.ttf` + FreeType（`UI_FONT_TTF=y`、`LV_USE_FREETYPE=y`）；`binfont` = 完整版内嵌位图字库整份编进固件（`UI_FONT_TTF` 关、`LV_USE_FREETYPE` 关、`UI_SYSTEM_FONT_FULL=y`），完全不用 FreeType、也不用 font 分区（也就不需要手动刷字体）。实测 debug 固件 **ttffont 1.85 MiB / binfont 3.84 MiB**；⚠ binfont 的字库 `.rodata` 会被 XIP 拷进 PSRAM，可用 PSRAM 由 6.40MB 降到 4.35MB——这是**内嵌字库方案的固有特性**（TTF 迁移前的老方案同样如此，属已知行为），不是引入 font 维度才有的问题。
-  ⚠ **构建目录是 `build/<dac_chip>.<font>.<variant>`**（如 `build/cs43131.ttffont.debug`）：`OutputDir` 必须含**全部**维度占位符，所以 2026-10-25 加 `font` 维度后所有 cell 目录都改了名；旧的 `build/<variant>`、`build/<dac_chip>.<variant>` 目录**不再被复用**（首次会从零全量构建；binfont 因为要编译那份 16MB 的字库源文件，实测 167 秒），可手工删除。常用命令：`-o font=binfont` 临时指定、`idfc set-overlay font binfont`（`--default` 清除）永久保存、`idfc matrix` 查看全部 **12 个单元格**与当前选择、`idfc status` 看当前单元格。overlay 配置命名约定为 `sdkconfig.<维度>.<类型>`（`sdkconfig.dac_chip.*` / `sdkconfig.font.ttffont` / `sdkconfig.font.binfont`），在 BaseConfig 与 variant 之后按 `Overlays[]` 声明顺序叠加。详见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 `ideas_and_exps/BUILD_MATRIX.md`（定义/格式/修改说明 + §1.7 当前矩阵 + §1.8 font 维度 + §7 验收记录）。
+- **版本管理：配置事实源只有 `sdkconfig.defaults*`、`idfc_buildconfig.json` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<variant>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。每套构建类型持有自己的 sdkconfig（`-D SDKCONFIG=build/<variant>/sdkconfig` 指定）；`fullclean` 只清当前构建目录。改配置的正确姿势：改 `sdkconfig.defaults*` / `idfc_buildconfig.json` / `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
+- **配置矩阵（`idfc_buildconfig.json`）—— 2026-11 起只剩 `variant` 一个维度**：`debug` / `release` 两套构建类型。原来的两个 overlay 维度（`dac_chip` cs43131/pcm5102、`font` ttffont/binfont）与 `releasecandidate` 构建类型均已删除——DAC 固定 CS43131、字体固定走 TTF+FreeType（`AUDIO_DAC_*` / `UI_FONT_TTF` / `UI_SYSTEM_FONT_FULL` 与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 均已移除，完整版内嵌字库 `system_global_font.c` 也一并删除，精简版仍作为 TTF 的运行时回退）。构建目录回到 `build/<variant>`（如 `build/debug`），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>`；`idfc matrix` 只显示 2 个单元格，`-o` / `set-overlay` 不再可用。历史说明（overlay 机制的定义与旧用法）见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 `BUILD_MATRIX.md`。
 - `partitions.csv`（**显式静态布局**，偏移写死不随自动分配漂移）：bootloader@0x0 / 分区表@0x8000（两者由 sdkconfig 默认 `BOOTLOADER_OFFSET_IN_FLASH`、`PARTITION_TABLE_OFFSET` 控制，不在 CSV 内）→ `nvs`@0x9000(0x6000) / `phy_init`@0xf000(0x1000) / `factory`(app，**0x7F0000=7.9375M**)@0x10000 / **`font`(data 0x41，4M)@0x800000**（系统字体 `system.ttf`，当前内容 Droid Sans Fallback（AOSP Apache-2.0，50951 字形，3.55MiB），**裸二进制、无文件系统**）/ `pldata`(data 0x40，4M)@**0xC00000**（播放列表数据结构分区，内存映射只读访问，**锚定在分区表最末尾**）。⚠ **三条布局原则**：① **`pldata` 必须待在最后** —— 它是"整体重写 + 头部 commit"的只读 mmap 数据，偏移一变旧播放列表就作废、首次开机必须重扫；锚定尾部后调整 `font`/`factory` 只动它俩之间那条线，`pldata` 再也不动；② `font`/`pldata` 偏移都要按 64KB（`SPI_FLASH_MMU_PAGE_SIZE`）对齐才能整体内存映射；③ `factory` 起始固定 0x10000（app 对齐要求），与 `font` 平分中间那块空间。2026-10 重排过**两次**：第一次（字体 TTF 化，原 factory 6M、pldata@0x610000）字体 7.82MiB 装不进尾部剩余空间，从 factory 割 2MiB 给 font；第二次（字体换成 3.55MiB 的 Droid 后）font 8M→4M、factory 3.9375M→7.9375M，并把 pldata 从 0x400000 挪到尾部 0xC00000 锚定（**font 起点仍是 0x800000 → 字体数据不受影响、不用重烧**）。⚠ **两次都改过 pldata 偏移 → 旧播放列表数据作废、首次开机要走一次"重新扫描"**（nvs 未动，配置不丢）。选型与实测见 `ideas_and_exps/FontSystem.md` §2。
-- **字体与构建类型（debug/release*）解耦了**：字体由 `font` 维度决定（见上"配置矩阵"），调试版与发布版用的是同一份字体，不再有"调试版字体不全"的说法。换字体 = 用新字体文件**改名覆盖** `spiffs/system.ttf` → `idfc build` + **手动重刷字体分区**（`esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf`，详见 `ideas_and_exps/FONT_FLASH.md`）；同时记得更新内嵌位图回退字库的字形清单（`ideas_and_exps/FontSymbols.md`）。发版/首次安装可用 `python tools/make_full_firmware.py -t release` 生成**全量固件**：单文件烧 0x0 即含 bootloader/分区表/app/字体，并清空 nvs/pldata（见 `ideas_and_exps/FULL_FIRMWARE.md`）。
+- **字体与构建类型（debug/release*）无关**：两套构建类型用的是同一份 TTF 字体，不再有"调试版字体不全"的说法。换字体 = 用新字体文件**改名覆盖** `spiffs/system.ttf` → `idfc build` + **手动重刷字体分区**（`esptool.exe --chip esp32s3 -p COMx write_flash 0x800000 spiffs/system.ttf`，详见 `ideas_and_exps/FONT_FLASH.md`）；同时记得更新内嵌位图回退字库的字形清单（`ideas_and_exps/FontSymbols.md`）。发版/首次安装可用 `python tools/make_full_firmware.py -t release` 生成**全量固件**：单文件烧 0x0 即含 bootloader/分区表/app/字体，并清空 nvs/pldata（见 `ideas_and_exps/FULL_FIRMWARE.md`）。
 
 ### 项目内容
 
@@ -210,9 +199,8 @@ main/
       default_cover.h/.c    # 默认封面（2bit 索引色，省 Flash）
       default_cover_flash.c # 默认封面（RGB565 极速版，423KB，CONFIG_UI_COVER_FLASH）
     fonts/
-      system_font.h         # 系统字体统一引用 UI_SYSTEM_FONT（随 CONFIG_UI_SYSTEM_FONT_FULL 切换）
-      system_global_font.h/.c    # 完整版中文字库（约 2.4MB）
-      system_global_font_lite.h/.c # 精简版（仅系统 UI 用字 + ASCII）
+      system_font.h         # 系统字体统一引用（UI_SYSTEM_FONT / UI_SMALL_FONT：TTF 主路径 + 内嵌位图回退）
+      system_global_font_lite.h/.c # 精简版回退字库（仅系统 UI 用字 + ASCII）
       system_smaller_font.h/.c   # 状态栏小字体
     ui/                     # 通用 UI 基础设施（与应用无关）
       lvgl_port.h/.c        # LVGL 移植层：显示驱动、tick、任务(Core0)、互斥锁、触摸 indev、触摸事件订阅

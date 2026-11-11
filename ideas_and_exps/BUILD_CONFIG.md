@@ -1,6 +1,8 @@
 # BUILD_CONFIG —— 多配置构建与烧录指南
 
-本文档说明 FakePodNanoNightPlayer 的 **debug / releasecandidate / release 三套构建配置**体系：配置文件、构建/烧录/监视命令、配置差异与工作原理。另见 §8：**配置矩阵**（在构建类型之外新增 DAC 芯片维度，`idfc_buildconfig.json` 描述，idfc 侧功能尚未实现）。
+> ⚠ **2026-11 更新（master）**：本项目的构建配置已简化为 **debug / release 两套**——`releasecandidate` 已删除（字体统一为 TTF 后它原本的"低内存 + 调试全开"手段已失去意义），`dac_chip` / `font` 两个 overlay 维度也已移除。下文 §1~§7 保留的是当时三套配置的完整记录（`legacy_s3` 分支仍按三套构建），§8 末尾附了移除说明。
+
+本文档说明 FakePodNanoNightPlayer 的**多套构建配置**体系：配置文件、构建/烧录/监视命令、配置差异与工作原理。另见 §8：**配置矩阵**（在构建类型之外新增 DAC 芯片维度，`idfc_buildconfig.json` 描述；该机制在 master 上已移除，见 §8 开头说明）。
 
 ## 1. 概述
 
@@ -159,6 +161,8 @@ idfc monitor --grep "MEM:"                # 只显示匹配行
 - **`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` 与 performance_monitor 的关系**：release 关闭 performance_monitor 时也一并关闭了 runtime stats（`ulTaskGetIdleRunTimeCounter` 仅 performance_monitor 使用），二者必须同开同关。
 
 ## 8. 配置矩阵（`idfc_buildconfig.json`）
+
+> ⚠ **2026-11 起（master 分支）本节描述的 overlay 维度已被移除**：`idfc_buildconfig.json` 只剩 debug / release 两套构建类型（`releasecandidate` 也已随字体统一移除），DAC 固定 CS43131、字体固定 TTF（`AUDIO_DAC_*` / `UI_FONT_TTF` / `UI_SYSTEM_FONT_FULL` 等 Kconfig 项与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 已删除），构建目录回到 `build/<variant>`。以下内容保留为历史记录（`legacy_s3` 分支仍按旧矩阵构建）。
 
 > 📄 **矩阵的定义、`idfc_buildconfig.json` 的完整格式规范、给 idfc 仓库的逐文件修改说明，以及新版 idfc 的验收记录，见 `ideas_and_exps/BUILD_MATRIX.md`。** 本节只讲**本项目固件侧**的约定与用法。
 

@@ -48,9 +48,12 @@ python tools/make_full_firmware.py -t release          # 生成 dist/<项目名>
 
 ```powershell
 python tools/make_full_firmware.py -t release -o dist\full_20261105.bin   # 指定输出名
-python tools/make_full_firmware.py -t releasecandidate                    # 其它构建类型
-python tools/make_full_firmware.py -t release --dac-chip pcm5102 --font binfont
+python tools/make_full_firmware.py -t debug                               # 另一种构建类型（debug）
+python tools/make_full_firmware.py -t debug --build-dir build\debug       # 指定构建目录
 ```
+
+> ⚠ 2026-11 起构建矩阵只剩 `variant` 一个维度（`--dac-chip` / `--font` 参数已随
+> `dac_chip` / `font` 维度一起移除），构建目录就是 `build/<variant>`。
 
 脚本不写死偏移：bootloader/分区表/app 的偏移来自构建目录的 `flasher_args.json`，
 `font` / `pldata` / `factory` 的位置和大小来自仓库根目录的 `partitions.csv`，
