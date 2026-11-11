@@ -1,5 +1,14 @@
 ## FakePodNanoNightPlayer 项目概览
 
+### 分支说明（2026-11 起）
+
+本仓库有两个长期分支，用途固定，改代码前先确认自己在哪条线上：
+
+- **`master`（本分支）**：面向**最新硬件（ESP32-S31 / FakePodNano Pro，见 `ideas_and_exps/reference_docs/hardware_v1.md`）**的固件开发主线。新功能、平台迁移（驱动、分区、硬件层）都在这里做；S3 时代的构建矩阵（`dac_chip` / `font` 维度）与 `releasecandidate` 构建类型已在本分支移除，只剩 debug / release，DAC 固定 CS43131、字体固定 TTF。
+- **`legacy_s3`**：FakePodNano **S3（ESP32-S3）已出货硬件**的维护分支，只接受 bug 修复与稳定性改进，**不添加新功能、不做硬件平台迁移**。基线是 S3 最后一个稳定版 v1.0.0.0，S3 用户继续跟这条线的修复版本。
+
+⚠ 两条线都需要的修复：先在 `legacy_s3` 改好并验证，再 `git cherry-pick` 到 `master`；**不要 `merge` 两条线**（sdkconfig、分区表、硬件层会大幅分叉）。
+
 ### 环境说明
 
 **1. 硬件**
