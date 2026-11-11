@@ -181,3 +181,66 @@
    要动绘制缓冲与单/双缓冲权衡）、让列表区只剩一次整块填充、
    用 `lv_obj_scroll_by_raw()` 绕开 `lv_obj_add_state/remove_state(SCROLLED)` 的样式比对。
 
+## 48. 拖动类控件被 100ms 延迟派发限速（legacy_s3 已修，master 待同步）
+
+> 来源：2026-11-11 在 `legacy_s3` 上排查"下拉控制中心拖亮度条一顿一顿"时定位。
+> **修法已在 `legacy_s3` 落地并真机验证**（commit `修复：亮度/音量竖条拖动只有 10Hz 刷新`），
+> master 尚未改；两条线的 `ui/notification_panel.c` 这段代码目前几乎相同，可以直接照搬。
+
+### 现象与误判
+
+拖亮度/音量竖条时"画面一顿一顿（掉帧感）"，看起来像性能不够。实测（临时探针）却显示：
+
+| 指标 | 实测 | 结论 |
+|---|---|---|
+| LVGL 触摸事件间隔 | 32~35 ms（≈30Hz），>60ms 的次数为 0 | 输入没被卡住 |
+| "应用亮度"耗时（写内存 + QSPI 0x51 亮度命令） | 50~230 µs | 硬件命令不慢 |
+| 单块刷屏传输 | 1.3~2.4 ms | QSPI 不是瓶颈 |
+| LVGL 对象位置 | `scr` 在内部 RAM | 与"对象进 PSRAM"无关 |
+
+**真正的根因**：`config_store` 的变更通知是**100ms 延迟派发**的（`CONFIG_SLOTS.md` §七 bug B 的
+修法：`set_xxx` 只置标志，由 `ui/app.c` 的 `lv_timer` 在 LVGL 任务里统一派发）。
+而 `notif_apply_brightness()` / `notif_apply_volume()` 只"写内存 + 写硬件"，
+**竖条本身由 100ms 后的 `notif_config_changed_cb` 才更新** → 手指 30Hz 移动、进度条 10Hz 跳格。
+v0.9 时代 `set_xxx` 同步回调，所以没有这个问题；v1.0.0.0 引入延迟派发后出现，
+**与 LVGL 8.4/9.4、IDF 5.5/6.1 的版本组合无关**（所以"回退版本"修不好它）。
+
+### 修法（master 可直接照搬）
+
+`ui/notification_panel.c`：在改完内存与硬件后，**立即刷新本模块自己的控件**——
+
+```c
+config_store_set_brightness_deferred(brightness);
+display_set_brightness(brightness);
+notif_refresh_brightness_ui(brightness);   /* ← 新增：拖动即时反馈 */
+```
+
+音量同理：`audio_set_volume_level()` → `config_store_set_volume_deferred()` →
+`notif_refresh_volume_ui(level)`。事件回调本来就在 LVGL 任务上下文、已持锁，直接改本地控件安全；
+100ms 派发那一路照旧保留（值未变则不产生重绘，幂等）。
+
+### 为什么不是"把延迟派发改回同步"
+
+会复现 §七 bug B：`player_ctrl` 任务调 `set_xxx` → 回调里 `lv_label_set_text` 在非 LVGL
+任务里改对象树 → 卡死 `lv_inv_area` + task_wdt。**延迟派发必须留着，只是不能让它管
+"拖动时的本地反馈"。**
+
+### 通用规则（写新控件时照着办）
+
+1. **拖动/连续调节的控件**（竖条、滑块、进度条的手指反馈）**不能**依赖延迟派发，
+   必须在事件回调里就地刷新自己；
+2. 延迟派发只负责**其它模块**的显示同步（状态栏音量、设置页文字等），100ms 够用；
+3. 判断"是不是被限速了"：比对**事件间隔**（≈33ms 正常）与**画面实际更新次数**——
+   对不上就是刷新被合并了，不是性能不够。
+
+### master 侧还要检查的地方
+
+- `ui/now_playing.c` 的进度条 seek 走的是 `lv_slider` 自身拖动，不经过 config_store 回调，
+  应该没有这个问题，但**建议同样用探针确认一次**；
+- 任何新加的"拖一下就能看到反馈"的控件（未来的音量条/亮度条改造、歌词页拖动等）
+  都要套用上面的规则；
+- 若以后真的需要 <100ms 的全局通知（例如多个模块都要跟手），可以另开一条**专门给 UI
+  的快速通道**（LVGL 定时器 16~33ms + 只通知"拖动中的临时值"），但**不要**把
+  `config_store` 的持久化通知提到那个频率（NVS 写入见 `NVS_WRITE_BUDGET.md`）。
+
+
