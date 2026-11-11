@@ -356,7 +356,7 @@ patches/
 - 遵循当前项目已建立的分层与命名习惯（`core/` 底层 vs `core/player`、`core/storage` 等数据层 vs `ui/` 应用、snake_case、模块前缀），新增文件需同时更新 `main/CMakeLists.txt`。
 - 代码注释均使用中文，逻辑清晰，关键常量/魔法数字要有注释说明。
 - UI 功能按模块实现、逐个测试验证，不要一次性堆砌所有功能。
-- 使用 Kconfig（`main/Kconfig.projbuild`）控制可裁剪功能。但通常三套构建配置已经覆盖大部分开启或者关闭的场景。（例如调试版和发布版的差异）
+- 使用 Kconfig（`main/Kconfig.projbuild`）控制可裁剪功能。但通常 debug / release 两套构建配置已经覆盖大部分开启或者关闭的场景。（例如调试版和发布版的差异）
 - 所有的过程文档、组件文档会放在根目录下的 ideas_and_exps 文件夹中，新模块建议同步更新 ideas_and_exps/ 对应设计文档。
 
 ### 回复/行动说明
