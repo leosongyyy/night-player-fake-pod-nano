@@ -65,7 +65,7 @@ static const char *TAG = "font_ttf";
 /* ==========================================================================
  * 内嵌位图回退字体
  * --------------------------------------------------------------------------
- * TTF 不可用时（分区空/文件损坏/编译期关闭）界面仍要有字，所以：
+ * TTF 不可用时（分区空/文件损坏）界面仍要有字，所以：
  *   · system_global_font_lite（24px，系统 UI 用字 + ASCII）**始终编译**；
  *   · system_smaller_font（20px）也在固件里。
  * 两者的字形数远少于 TTF，用户数据里的生僻字会显示不出来——这是"回退态"，
@@ -77,35 +77,12 @@ static const lv_font_t *fallback_font_for_px(uint16_t px)
     return (px <= UI_FONT_PX_SMALL) ? &system_smaller_font : &system_global_font_lite;
 }
 
-/* 本模块的开关：Kconfig 的应用侧开关 + LVGL 侧引擎开关，两个都要有。
-   （只开 CONFIG_UI_FONT_TTF 而没开 CONFIG_LV_USE_FREETYPE 会在链接期找不到
-    lv_freetype_font_create，这里提前给出明确的编译错误。） */
-#if CONFIG_UI_FONT_TTF && !LV_USE_FREETYPE
-#error "CONFIG_UI_FONT_TTF=y 需要 CONFIG_LV_USE_FREETYPE=y（FreeType 引擎，见 sdkconfig.defaults）"
+/* 本模块依赖 LVGL 侧的 FreeType 引擎开关（应用侧没有开关：系统字体固定走 TTF）。
+   只开应用侧而没开 CONFIG_LV_USE_FREETYPE 会在链接期找不到
+   lv_freetype_font_create，这里提前给出明确的编译错误。 */
+#if !LV_USE_FREETYPE
+#error "系统字体走 TTF，需要 CONFIG_LV_USE_FREETYPE=y（FreeType 引擎，见 sdkconfig.defaults）"
 #endif
-
-#if !(CONFIG_UI_FONT_TTF && LV_USE_FREETYPE)
-
-/* 编译期关闭 TTF：整个模块退化为"永远返回回退字体" */
-esp_err_t font_ttf_init(void)
-{
-    ESP_LOGW(TAG, "CONFIG_UI_FONT_TTF=n：界面使用内嵌位图字体(%dpx/%dpx)，"
-                  "font 分区与 FreeType 引擎不参与",
-             UI_FONT_PX_MAIN, UI_FONT_PX_SMALL);
-    return ESP_ERR_NOT_SUPPORTED;
-}
-
-const lv_font_t *font_ttf_get(uint16_t px)
-{
-    return fallback_font_for_px(px);
-}
-
-bool font_ttf_is_ready(void)
-{
-    return false;
-}
-
-#else /* CONFIG_UI_FONT_TTF && LV_USE_FREETYPE */
 
 /* ---------------- 裸分区 lv_fs 驱动 ---------------- */
 typedef struct {
@@ -464,5 +441,3 @@ bool font_ttf_is_ready(void)
 {
     return s_ready;
 }
-
-#endif /* CONFIG_UI_FONT_TTF */

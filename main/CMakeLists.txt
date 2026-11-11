@@ -66,15 +66,10 @@ if(CONFIG_MEM_TRACE)
     list(APPEND MAIN_SRCS "core/utils/mem_trace.c")
 endif()
 
-# 完整版系统字体体积很大（固件约 4.1MB、烧录慢），仅当 CONFIG_UI_SYSTEM_FONT_FULL
-# 开启时才编译；关闭时改用精简版 system_global_font_lite，便于调试快速烧录。
-# ⚠ 2026-10 起界面字体默认走 TTF + FreeType（CONFIG_UI_FONT_TTF=y），此时本项被
-#    Kconfig 的 depends on !UI_FONT_TTF 屏蔽，完整版字库根本不参与构建；
-#    system_global_font_lite 则**始终编译**——它是 TTF 打不开时的回退字体。
-# ⚠ 曾尝试 SPIFFS 运行时加载（font_store），实测解析 ~8 秒开机太慢已回退。
-if(CONFIG_UI_SYSTEM_FONT_FULL)
-    list(APPEND MAIN_SRCS "core/fonts/system_global_font.c")
-endif()
+# 系统字体固定走 TTF + FreeType（font 分区 + spiffs/system.ttf），不再有构建期开关。
+# 内嵌的**精简版**位图字库 system_global_font_lite（行高 26）始终编译，它是
+# TTF 打不开（分区为空/损坏）时的运行时回退字体；完整版字库（2.4MB）已随
+# "font 维度"一起移除。
 
 # 极速版默认封面（RGB565 真彩色，423KB）仅当 CONFIG_UI_COVER_FLASH 开启时编译；
 # 关闭时用 2bit 索引色版 default_cover.c（52KB，省空间、渲染略慢）。
@@ -323,13 +318,11 @@ endif()
 # lv_fs 驱动按绝对偏移读 `F:/system.ttf`（字体文件的路径与名字都没变）。
 # ⚠ 换分区表后若 font 分区的**起始偏移**变了，必须重刷一次字体；只是变小则不用
 #    （数据仍按原偏移读得到，见 FONT_FLASH.md §3）。
-# ⚠ binfont 维度下 font 分区闲置，本段不产生任何构建动作（只剩下面那行提示）。
+# ⚠ font 分区的内容不由构建系统烧录，本段只做提示。
 # ============================================================================
-if(CONFIG_UI_FONT_TTF)
-    # 只提示一次：字体不在固件里，"重刷分区表 / 换新机器 / 换字体"都要手动刷字体分区，
-    # 否则界面会静默回退内嵌位图字体（能开机，但生僻字、日文会缺字变方框）。
-    message(STATUS "提示：font 分区（0x800000）的内容需手动刷入 —— esptool write_flash 0x800000 spiffs/system.ttf（见 ideas_and_exps/FONT_FLASH.md）")
-endif()
+# 只提示一次：字体不在固件里，"重刷分区表 / 换新机器 / 换字体"都要手动刷字体分区，
+# 否则界面会静默回退内嵌位图字体（能开机，但生僻字、日文会缺字变方框）。
+message(STATUS "提示：font 分区（0x800000）的内容需手动刷入 —— esptool write_flash 0x800000 spiffs/system.ttf（见 ideas_and_exps/FONT_FLASH.md）")
 
 set_source_files_properties(
     ${LV_DEMOS_SOURCES}

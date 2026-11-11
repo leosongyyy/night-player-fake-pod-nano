@@ -3,9 +3,9 @@
  * 系统全局字体精简版（MiSans-Normal 24px，bpp 2，仅含系统 UI 所需中文 + ASCII）。
  * 由 lv_font_conv 生成在 system_global_font_lite.c，此处仅导出字体描述符声明。
  *
- * 用途：作为完整版 system_global_font 的轻量替代（体积小、烧录快），
- *       用于调试阶段。通过 Kconfig CONFIG_UI_SYSTEM_FONT_FULL 切换
- *       字体引用 UI_SYSTEM_FONT 指向完整版还是精简版。
+ * 用途：内嵌位图**回退字体**——TTF（font 分区 + FreeType）打不开时顶替，
+ *       保证界面仍有字。完整版字库已随旧的"font 维度"移除，本文件现在
+ *       始终参与编译（见 core/fonts/font_ttf.c 的 fallback_font_for_px）。
  *
  * 注意：本字体不包含 LVGL 内置的 PUA 区图标字形（LV_SYMBOL_*，U+F001~F8FF）。
  ******************************************************************************/

@@ -337,9 +337,9 @@ static void boot_enter_normal(void)
        界面不会没字。⚠ 必须在 app_ui_create() 之前，UI 创建时就要按 TTF 的行高
        算列表行高。⚠ 本函数在 boot_flow_run 内被调用，已持 LVGL 锁（init 要求）。 */
     esp_err_t ferr = font_ttf_init();
-    /* ESP_ERR_NOT_SUPPORTED = 这套构建根本没开 TTF（font 维度 = binfont），不是
-       错误、无需告警：UI_SYSTEM_FONT 本来就取内嵌位图字体。 */
-    if (ferr != ESP_OK && ferr != ESP_ERR_NOT_SUPPORTED) {
+    /* 失败（font 分区缺失 / 字体文件损坏 / 字形创建失败）时继续用内嵌位图字体，
+       界面不会没字——这是"能开机"的兜底，不是正常状态，故打 W 级日志。 */
+    if (ferr != ESP_OK) {
         ESP_LOGW(TAG, "TTF init failed (%s), UI keeps built-in bitmap font",
                  esp_err_to_name(ferr));
     }

@@ -29,48 +29,14 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ release 构建关闭（正式版不需要这些诊断日志）。
             关闭时所有调用点编译为空语句，不产生任何代码与日志。
 
-    # ⚠ 字体文件**写死**为 ../spiffs/system.ttf，而且**不在固件里**：刷完固件还要用 esptool
-    #   手动把它刷进 font 分区（见 ideas_and_exps/FONT_FLASH.md）。换字体 = 用新字体文件
-    #   **改名覆盖** spiffs/system.ttf，然后 idfc build + 重刷字体分区（§6.2）。
+    # 系统字体固定走 TTF：font 分区里的 spiffs/system.ttf + FreeType 按需光栅化
+    # （见 core/fonts/font_ttf.c 与 ideas_and_exps/FontSystem.md），**没有构建期
+    # 开关**；TTF 打不开（分区为空/损坏）时运行时自动回退内嵌位图字体。
+    # ⚠ 字体文件**写死**为 ../spiffs/system.ttf，而且**不在固件里**：刷完固件还要用
+    #   esptool 手动把它刷进 font 分区（见 ideas_and_exps/FONT_FLASH.md）。换字体 =
+    #   用新字体文件**改名覆盖** spiffs/system.ttf，然后 idfc build + 重刷字体分区。
     #   当前内容是 Droid Sans Fallback（AOSP/Apache-2.0，50951 字形，3.55MiB，
     #   24px 行高 31 / 20px 行高 26）；许可文本入库在 spiffs/DroidSansFallback-LICENSE.txt。
-    #   2026-10 实测它同一手势下滚动帧率明显高于此前的 MiSans（单字形轮廓数据只有
-    #   约 1/4，光栅化更便宜 + flash 局部性更好），故固定使用。
-
-    config UI_FONT_TTF
-        bool "系统字体改用 TTF（FreeType，字体在 font 分区）"
-        default y
-        help
-            开启（推荐，2026-10 起默认）：界面字体由 font 分区里的 Droid Sans
-                  Fallback TTF 经 FreeType 按需光栅化（见 core/fonts/font_ttf.c 与
-                  ideas_and_exps/FontSystem.md）。字形按需读取、任意字号复用同一
-                  文件、汉字覆盖全（50951 字形），固件里不再需要内嵌大字库。
-                  用 CONFIG_LV_USE_FREETYPE 编译引擎，字体文件由 partitions.csv 的
-                  font 分区承载（裸二进制，4MiB，见该文件注释）。
-                  ⚠ **字体不在固件里**：刷完固件要用 esptool 手动刷一遍字体分区，
-                    否则界面静默回退内嵌位图字体（能开机，但生僻字/日文缺字变方框）
-                    —— 命令与校验方法见 ideas_and_exps/FONT_FLASH.md。
-            关闭：回到内嵌位图字体（由下面的 UI_SYSTEM_FONT_FULL 决定用完整版
-                  还是精简版），此时 font 分区与 FreeType 都不参与，界面与
-                  迁移前完全一致——留作字体文件损坏时的对照/兜底方案。
-            ⚠ 无论开关如何，精简版 system_global_font_lite 都会编进固件作为
-              **回退字体**（TTF 打不开时 UI 仍有字），所以下方选项只影响
-              "TTF 不可用时用哪套位图字体"。
-
-    config UI_SYSTEM_FONT_FULL
-        bool "回退字体使用完整版（编译进固件，体积大）"
-        default y
-        depends on !UI_FONT_TTF
-        help
-            开启：把完整版 system_global_font 编译进固件
-                  （字体数据约 2.4MB，含全量中文/日文/阿拉伯文/藏文等，
-                   固件约 4.1MB、烧录慢），启动时经 SPIRAM_RODATA 复制进
-                   PSRAM 约 2.6MB。
-            关闭：回退字体用精简版 system_global_font_lite
-                  （仅含系统 UI 所需文字 + ASCII，固件小、烧录快；
-                   注意音乐文件名等用户数据的汉字不在精简字体内）。
-            ⚠ UI_FONT_TTF=y 时本项被依赖屏蔽（TTF 覆盖全部汉字，无需 2.4MB
-              内嵌字库），sdkconfig 里写 y 会被 Kconfig 静默忽略。
 
     config UI_COVER_FLASH
         bool "默认封面使用极速版（RGB565 真彩色，体积大）"
@@ -106,64 +72,11 @@ menu "FakePodNanoNightPlayer 应用配置"
             0 = 关闭该功能。⚠ 本固件暂无充电检测：充电器接入时电压被抬高
             （高于 3.45V）不会触发；若后续接入充电状态检测，应排除充电态。
 
-    menu "音频 DAC 芯片选择（构建期二选一）"
-
-        # ⚠ 下面两项是**相互独立**的 bool 开关，但必须且只能开启一个：
-        #   · 同时开启 → 编译报错
-        #   · 同时关闭 → 编译报错
-        #   检查就写在 main/main.c 的 app_main 结尾（#if/#error）。
-        #
-        # ⚠ **目前尚未实现真正的 DAC 切换**：无论选中哪一项，音频链路都完全
-        #   按原样初始化（I2S 主机 + CS43131 的 I2C 控制），两项都不改变任何
-        #   驱动或初始化行为；选中结果**只在 app_main 结尾打印一行日志**。
-        #   这两项当前的用途是验证 idfc 的配置矩阵
-        #   （idfc_buildconfig.json 的 dac_chip 维度）是否按预期生效：
-        #   构建日志里出现 "DAC chip: CS43131" / "DAC chip: PCM5102" 即说明
-        #   配置矩阵选中的 sdkconfig.dac_chip.<类型> 被正确合并。
-        #   真正的切换（PCM5102 无 I2C 控制 / I2S 配置差异 / 时钟策略等）待实现。
-
-        config AUDIO_DAC_CS43131
-            bool "音频 DAC 使用 CS43131（I2C 控制 + I2S）"
-            default n
-            help
-                ⚠ 本项目前**不会真的切换 DAC**，只在 app_main 结尾打印
-                "DAC chip: CS43131"，用于确认配置矩阵选中的是 cs43131 类型。
-
-                语义（待真正实现后的预期行为）：使用板载 CS43131——I2C 控制
-                端口 0x30 + I2S 从机接收音频（见 core/hardware/audio/cs43131.c）。
-                这是本项目当前真实硬件（FakePodNano 成品机）。
-
-                与 AUDIO_DAC_PCM5102 必须且只能开启一个：两者都开或都关都会
-                在编译期报错（#error）。公共默认（sdkconfig.defaults）已选中
-                本项；配置矩阵构建时由 sdkconfig.dac_chip.<类型> 覆盖。
-
-        config AUDIO_DAC_PCM5102
-            bool "音频 DAC 使用 PCM5102（仅 I2S，无 I2C 控制）"
-            default n
-            help
-                ⚠ 本项目前**不会真的切换 DAC**，只在 app_main 结尾打印
-                "DAC chip: PCM5102"，用于确认配置矩阵选中的是 pcm5102 类型。
-
-                语义（待真正实现后的预期行为）：使用 PCM5102 版本芯片——该
-                芯片没有 I2C 控制端口，音量/静音等只能靠 I2S 数据侧处理，
-                因此切换后需要跳过 CS43131 的 I2C 初始化与控制路径。
-
-                ⚠ 作者目前只有 CS43131 版本的设备，**PCM5102 版本无法实机
-                验证**；本项在真正实现前只做日志打印。
-
-                与 AUDIO_DAC_CS43131 必须且只能开启一个：两者都开或都关都会
-                在编译期报错（#error）。配置矩阵构建时由
-                sdkconfig.dac_chip.pcm5102 选中本项。
-
-    endmenu
-
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
         default "1.0.0.0"
         help
             用户可见的固件版本标识，仅用于"关于"页展示，不影响功能。
-            发版时在此修改版本号即可。
-            ⚠ 改本项后需删掉对应 build/<cfg>/sdkconfig 再带 -D reconfigure，
-            否则旧的版本号会从已有 sdkconfig 里沿用（详见 AGENTS.md 第 6 节）。
+            发版时修改此值即可（idfc 的过期检测会自动重新配置构建）。
 
 endmenu

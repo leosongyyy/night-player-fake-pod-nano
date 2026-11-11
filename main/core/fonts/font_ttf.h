@@ -12,7 +12,7 @@
  *   · main.c 在 lvgl_port_init() 之后调一次 font_ttf_init()；
  *   · UI 代码用 UI_SYSTEM_FONT / UI_SMALL_FONT（见 core/fonts/system_font.h），
  *     或直接调 font_ttf_get(px)；
- *   · TTF 不可用（分区为空/文件损坏/CONFIG_UI_FONT_TTF=n）时 font_ttf_get()
+ *   · TTF 不可用（分区为空/文件损坏）时 font_ttf_get()
  *     自动返回对应的**内嵌位图回退字体**，UI 不会因为字体问题变空白。
  ******************************************************************************/
 #ifndef FONT_TTF_H
@@ -48,8 +48,7 @@ extern "C" {
  *   该函数是幂等的：已加载时直接返回 ESP_OK。
  *   失败时返回错误码并打印原因，界面仍可用（自动回退内嵌位图字体）。
  *
- * @return ESP_OK 成功；ESP_ERR_NOT_SUPPORTED 表示编译期没开 UI_FONT_TTF；
- *         其它为分区查找/校验失败（此时已回退位图字体）
+ * @return ESP_OK 成功；其它为分区查找/校验失败（此时已回退位图字体）
  */
 esp_err_t font_ttf_init(void);
 
