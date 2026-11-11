@@ -142,14 +142,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="把 bootloader / 分区表 / 应用 / 系统字体合并成单个全量固件（烧到 0x0）"
     )
-    parser.add_argument("-t", "--variant", default="release", help="构建类型（debug/releasecandidate/release，默认 release）")
-    parser.add_argument("--dac-chip", default="cs43131", help="dac_chip overlay（默认 cs43131）")
-    parser.add_argument("--font", default="ttffont", help="font overlay（默认 ttffont）")
-    parser.add_argument("--build-dir", type=Path, default=None, help="构建目录，默认 build/<dac>.<font>.<variant>")
+    parser.add_argument("-t", "--variant", default="release", help="构建类型（debug/release，默认 release）")
+    parser.add_argument("--build-dir", type=Path, default=None, help="构建目录，默认 build/<variant>")
     parser.add_argument("-o", "--output", type=Path, default=None, help="输出文件，默认 dist/<项目名>_<variant>_full.bin")
     args = parser.parse_args()
 
-    build_dir = args.build_dir or ROOT / "build" / f"{args.dac_chip}.{args.font}.{args.variant}"
+    build_dir = args.build_dir or ROOT / "build" / args.variant
     flasher_path = build_dir / "flasher_args.json"
     if not flasher_path.is_file():
         print(f"错误：找不到 {flasher_path}\n请先执行：idfc build -t {args.variant}", file=sys.stderr)
