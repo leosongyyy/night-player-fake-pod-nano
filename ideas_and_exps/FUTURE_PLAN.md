@@ -243,4 +243,80 @@ notif_refresh_brightness_ui(brightness);   /* ← 新增：拖动即时反馈 */
   的快速通道**（LVGL 定时器 16~33ms + 只通知"拖动中的临时值"），但**不要**把
   `config_store` 的持久化通知提到那个频率（NVS 写入见 `NVS_WRITE_BUDGET.md`）。
 
+## 49. 睡眠定时器自动开启 bug + 睡眠定时与配置槽位解耦（legacy_s3 已修，master 待同步）
+
+> 来源：2026-11-11 用户反馈"设置里已经关闭『开机默认开启睡眠定时器』，但每次开机睡眠
+> 定时器仍会自动开启，可能是多配置切换的地方给开的"。
+> **已在 `legacy_s3` 修复并真机验证**（commit `4eb04c6`，文档记录见该分支
+> `CONFIG_SLOTS.md` §九）。**master 当前代码与修复前完全一致**：
+> `main/main.c` 开机的 else 分支、`config_slots.c` 第 6 步、`config_store.c` 里
+> `sleep_default_min` 属于 `s_live` 与槽位 blob —— 可以直接照搬同一套改法。
+
+### 现象
+
+1. 设置 →「开机默认开启睡眠定时器」**关**，重启后睡眠定时器照样在倒计时
+   （下拉控制中心睡眠开关亮、设置页睡眠格子显示时长），到点会伪关机；
+2. 切一次配置槽位 SAVE1~SAVE4，也会把定时按该槽位记的时长重新开起来。
+
+### 根因
+
+睡眠定时的**时长** `sleep_default_min` 被放进"配置槽位字段"（`s_live` + 槽位 blob），
+于是"记忆的时长"在两条自动路径上被当成了"恢复定时的指令"：
+
+- `main.c`：`sleep_timer_boot_autostart_min()` 返回 0（开关关闭）时，else 分支仍
+  `sleep_timer_set(config_store_get_sleep_default_min())`；
+- `config_slots_switch()`：无条件 `sleep_timer_set(槽位时长)`。
+
+语义上它是**全局档位**——"下次开启时用多久"，而不是"这套配置下定时必须开着"。
+
+### 修法（三处，缺一不可）
+
+1. **`main/main.c`**：删掉 else 分支，只保留
+   `sleep_timer_boot_autostart_min() > 0 → sleep_timer_set(...)`；开关关闭时打一条
+   `boot: sleep timer off (开机默认开启已关闭)` 即可。
+2. **`core/storage/config_slots.c`**：删掉第 6 步的 `sleep_timer_set(...)`——切槽位
+   **完全不碰**睡眠定时（不 set、也不 cancel），只留一条日志：
+   `sleep timer untouched by slot switch (def_on=…, %u min, active=…)`；
+   同时把 `switched to SAVE%u: … sleep=%u min …` 日志里的 `sleep=` 去掉。
+3. **`core/storage/config_store.c/.h`**：把 `sleep_default_min` 从可切换字段挪到全局：
+   - `config_live_t` 删掉该成员（含初始化器），新增
+     `static uint32_t s_sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;`；
+   - `config_store_set_sleep_default_min()` 改 `cfg_write_u32(KEY_SLEEP_DEFAULT, minutes)`
+     （全局键 `sleepdef`），**不再** `slot_persist_live()`；
+   - `slot_pack` / `slot_unpack` / `slot_apply_defaults` / `slot_load_into_live` 的日志、
+     `config_store_slot_snapshot_t` 的字段、`config_store_init` 的读取处全部改用全局变量；
+   - **槽位 blob 里原字段改名 `reserved_sleep` 占位**（仍是 4 字节）：布局/大小/
+     `SLOT_BLOB_VERSION` 不变 → 老槽位 blob 照常读出、该值被忽略，**升级不丢槽位配置**；
+     不要为此 bump 版本号（会把用户 4 个槽位全清空）。
+   - `slot_persist_live()` 兼容分支里的 `cfg_set_u32(KEY_SLEEP_DEFAULT, …)` 一并删掉
+     （setter 已直接写全局键）。
+
+### 改完后的语义
+
+- 睡眠定时只由三处改变：设置页睡眠格子、通知栏睡眠开关、开机默认开启；
+- 切换 SAVE1~SAVE4 既不改变时长/开关，也不重新开表——正在跑的定时剩余时间不变，
+  没开的定时不会被切配置打开；
+- 开机只在 `sleep_def_on = 1` 时按全局记忆的时长启动。
+
+### 顺带确认（不需要改，但别踩）
+
+息屏超时 `screen_off_s` **本来就是全局键**（`screenoff`，`s_screen_off`，不在槽位 blob 里），
+切槽位不会改变它。master 同样如此；以后"整理槽位字段"时不要把它误加进槽位。
+
+### 验证方式（legacy_s3 实测，master 照此复测）
+
+- 空 NVS：`config loaded: … sleep_def=45 min def_on=0 …` → `boot: sleep timer off`；
+- 切槽位：`sleep timer untouched by slot switch (def_on=0, 45 min, active=0)`；
+- 槽位保存日志 `SAVE N saved to NVS: …` 里不再出现 `sleep=`；
+- 老槽位兼容：升级后开机仍是 `slot=N(saved)`，槽位弹窗里列表名/歌曲都在；
+- 开关打开 + 时长 45 → 开机 `boot: sleep timer auto started (45 min)`。
+
+### master 侧注意
+
+- master 的 `config_store.c` 结构（`config_live_t` / `dict blob`）与 legacy_s3 基本一致，
+  按上面第 3 条等价替换即可；只动 sleep 相关行，别动其它字段顺序。
+- 改完同步文档：`CONFIG_SLOTS.md`（数据模型 / 运行时应用 / 验证 / §九）、
+  `config_store.h` 配置项说明、`config_slots.h` 注释、`CHANGELOG`。
+
+
 
