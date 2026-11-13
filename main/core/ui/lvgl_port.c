@@ -2,6 +2,7 @@
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 #include "core/ui/touch_test.h"
+#include "core/ui/lvgl_ppa_accel.h"
 
 #include <assert.h>
 
@@ -66,6 +67,15 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
 #define EXAMPLE_LVGL_TASK_STACK_SIZE   (20 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
+/* 刷屏耗时统计（诊断用，见 lvgl_port_task 里的 2s 汇总）：
+   draw_bitmap 是异步提交（面板 IO 传输完成回调里才 flush_ready），所以这里量的是
+   "提交 → 传输完成"的时长，即 QSPI 实际占用时间，用来区分"QSPI 带宽瓶颈"与
+   "CPU 渲染瓶颈"。 */
+static volatile int64_t  s_flush_start_us = 0;
+static volatile uint32_t s_flush_total_us = 0;
+static volatile uint32_t s_flush_cnt = 0;
+static int64_t s_last_report_us = 0;
+
 /* ESP-IDF 面板 IO 的"传输完成"回调（中断上下文）：
    通知 LVGL 这一块绘制缓冲已经送完，可以复用。
    v8 时代这里拿的是 lv_disp_drv_t*（disp_drv 是静态对象，display_init 早于
@@ -76,6 +86,11 @@ bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_pa
 {
     lv_display_t **disp = (lv_display_t **)user_ctx;
     if (disp != NULL && *disp != NULL) {
+        int64_t delta = esp_timer_get_time() - s_flush_start_us;
+        if (delta > 0 && delta < 200000) {
+            s_flush_total_us += (uint32_t)delta;
+            s_flush_cnt++;
+        }
         lv_display_flush_ready(*disp);
     }
     return false;
@@ -135,6 +150,7 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 #endif
 
     // copy a buffer's content to a specific area of the display
+    s_flush_start_us = esp_timer_get_time();
     const esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1,
                                                     offsetx2 + 1, offsety2 + 1, px_map);
     if (err != ESP_OK) {
@@ -241,6 +257,22 @@ static void lvgl_port_task(void *arg)
         } else if (task_delay_ms < EXAMPLE_LVGL_TASK_MIN_DELAY_MS) {
             task_delay_ms = EXAMPLE_LVGL_TASK_MIN_DELAY_MS;
         }
+
+        /* 每 2 秒汇总一次刷屏占用：平均每次 QSPI 传输时长 + 占空比。
+           占空比高（>70%）说明已经撞 QSPI 带宽天花板，优化绘制代码没用；
+           占空比低而帧率上不去，才是 CPU（渲染/布局）瓶颈。 */
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - s_last_report_us >= 2000000) {
+            uint32_t cnt = s_flush_cnt;
+            uint32_t tot = s_flush_total_us;
+            s_flush_cnt = 0;
+            s_flush_total_us = 0;
+            s_last_report_us = now_us;
+            ESP_LOGI(TAG, "flush 2s: %u 次, 平均 %u us, 合计 %u ms, 占空 %u%%",
+                     (unsigned)cnt, (unsigned)(cnt ? tot / cnt : 0),
+                     (unsigned)(tot / 1000), (unsigned)(tot / 20000));
+        }
+
         vTaskDelay(pdMS_TO_TICKS(task_delay_ms));
     }
 }
@@ -402,8 +434,12 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
        `sizeof(lv_color_t)`：v9 的 lv_color_t 恒为 RGB888（3 字节，与
        LV_COLOR_DEPTH 无关），照抄会多要 50% 的 DMA —— 实测直接导致第二块
        缓冲分配失败（assert s_draw_buf2 挂在启动阶段）。 */
-    const size_t draw_buf_bytes = (size_t)EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT
-                                  * LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565);
+    /* ⚠ 缓冲字节数向上取整到 64B：PPA（CONFIG_UI_PPA_ACCEL）要求 out.buffer 与
+       out.buffer_size 都按 cache line 对齐，否则驱动内部 msync 会越过缓冲尾部。
+       多出来的 <64 字节不会被 LVGL 当成一行（h = buf_size / stride 向下取整）。 */
+    const size_t draw_buf_bytes =
+        ((size_t)EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT
+         * LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) + 63u) & ~(size_t)63u;
     s_draw_buf1 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, draw_buf_bytes, MALLOC_CAP_DMA);
     assert(s_draw_buf1);
     s_draw_buf2 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, draw_buf_bytes, MALLOC_CAP_DMA);
@@ -419,6 +455,13 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     lv_display_set_user_data(s_disp, panel_handle);
     /* 重绘区域对齐：v8 的 disp_drv.rounder_cb 在 v9 里改为显示事件 */
     lv_display_add_event_cb(s_disp, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+
+    /* PPA 混合加速（CONFIG_UI_PPA_ACCEL）：注册自定义 SW blend handler。
+       必须在显示对象与绘制缓冲就绪之后、LVGL 任务开始渲染之前调用。
+       只接管"向 RGB565 图层做图像混合"的操作，其余仍走 CPU。 */
+    lvgl_ppa_accel_init(s_disp);
+    /* 性能自测（仅 CONFIG_UI_PPA_BENCH 开启时有效，正式固件是空函数） */
+    lvgl_ppa_accel_benchmark();
 
     // 设置旋转角度
     // lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90); // 旋转90度

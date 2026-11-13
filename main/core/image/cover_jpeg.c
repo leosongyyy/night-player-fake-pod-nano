@@ -10,16 +10,24 @@
 
 static const char *TAG = "cover_jpeg";
 
-/* 像素缓冲分配：优先 PSRAM（8MB 充足，避免挤占内部 RAM），内部 RAM 兜底 */
+/* 像素缓冲分配：优先 PSRAM（8MB 充足，避免挤占内部 RAM），内部 RAM 兜底。
+   ⚠⚠ 必须按 64B 对齐（与 LV_DRAW_BUF_ALIGN / LV_ATTRIBUTE_MEM_ALIGN_SIZE 一致）：
+   封面会被 LVGL 当作 img->data 包成 draw_buf（lv_draw_buf_from_image），
+   未对齐时 lv_draw_buf_init 每次都刷 "Data is not aligned, ignored" ——
+   实测切歌后（真实封面出现在正在播放页）滑动时刷屏级日志，115200 波特下
+   一条 ~5ms，直接把 UI 卡死。这里对齐后警告消失。 */
+#define COVER_PIXEL_ALIGN  64
+
 static uint8_t *cover_alloc(size_t size)
 {
-    uint8_t *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *buf = heap_caps_aligned_alloc(COVER_PIXEL_ALIGN, size,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (buf == NULL) {
         /* ⚠ 内存诊断（FUTURE_PLAN 第 34 点）：460x460 RGB565 = 423KB 绝不能落
            内部 RAM（内部 DRAM 总容量都不够），PSRAM 失败时回退几乎必然失败 */
         ESP_LOGW(TAG, "PSRAM alloc %u B failed, fallback to default heap",
                  (unsigned)size);
-        buf = malloc(size);
+        buf = heap_caps_aligned_alloc(COVER_PIXEL_ALIGN, size, MALLOC_CAP_8BIT);
     }
     /* 打印落点（CONFIG_MEM_TRACE）：460x460 RGB565 = 423KB 绝不能落内部 RAM */
     mem_trace_ptr(TAG, "pixel", size, buf);

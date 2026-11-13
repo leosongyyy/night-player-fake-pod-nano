@@ -33,6 +33,12 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # LVGL FPS 计数（屏幕角落显示刷新帧率/耗时）
 CONFIG_LV_USE_PERF_MONITOR=y
 
+# PPA 混合加速：统计默认**关**。
+# ⚠ 每 500 次混合打一条日志，滑动时约 15 条/秒，而 115200 波特的 UART 打一条
+#   ~10ms（ESP_LOG 是同步阻塞写），等于白扔 15% CPU —— 实测开统计会让滑动明显
+#   变卡，**不要**在测性能时打开。要看数据时临时打开，看完立刻关。
+# CONFIG_UI_PPA_STATS is not set
+
 # 堆毒化：**默认关闭**（2026-09 实测开关对比结论，见 PSRAM_TASK_STACK.md）
 # Comprehensive 模式给每个分配加带调用栈的元数据头、且禁止空闲块合并，
 # 实测多占约 26KB 内部 RAM 并把最大连续块从 31.7KB 压到 14.8KB——这是

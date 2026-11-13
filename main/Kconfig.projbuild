@@ -52,6 +52,56 @@ menu "FakePodNanoNightPlayer 应用配置"
     # "低电压自动伪关机"：真正的关机由 AXP2101 负责（尚未适配），低电策略
     # 也要等 AXP2101 的电压/充电状态接入后再恢复。相关配置项一并移除。
 
+    config UI_PPA_ACCEL
+        bool "PPA 混合加速（ESP32-S31 硬件 alpha blend）"
+        default y
+        help
+            启用后用 lv_draw_sw_register_blend_handler() 注册自定义混合回调，
+            把"向 RGB565 图层做图像混合"的操作交给 PPA 硬件（阻塞模式），
+            其余（A8 文字、mask、小面积、纯色填充）仍走 CPU。
+
+            与 CONFIG_LV_USE_PPA 的区别：那是 LVGL 9.4 自带的 PPA 绘制单元，
+            在 PARTIAL 渲染下有黑线与完成时序问题，本项目**不用**它；
+            这条路径对应官方固件 "PPA: register lvgl blend handle ok" 的做法。
+            实现见 core/ui/lvgl_ppa_accel.c，实验数据见 ideas_and_exps/PPA_ACCEL.md。
+
+    config UI_PPA_BLEND_MIN_PX
+        int "PPA 混合最小面积（像素）"
+        depends on UI_PPA_ACCEL
+        default 1500
+        help
+            小于该面积的图像混合直接走 CPU：PPA 每次操作有固定开销
+            （DMA2D 调度 + 中断 + 驱动校验），小块混合交给 PPA 反而更慢。
+            本项目 PARTIAL 渲染下单块最大 460x46 = 21160 px；
+            实测数据见 ideas_and_exps/PPA_ACCEL.md，按实测结果调整。
+
+    config UI_PPA_FILL_MIN_PX
+        int "PPA 纯色填充最小面积（像素，0=不用 PPA 填充）"
+        depends on UI_PPA_ACCEL
+        default 0
+        help
+            0 表示纯色填充全部走 CPU。实测 S31 的 PPA FILL 吞吐约
+            50M px/s，比 320MHz CPU 的软件填充慢一个数量级，因此默认关闭。
+            只有在大面积（接近整屏、单次几十万像素）时才可能划算，
+            需要时再按实测数据打开。
+
+    config UI_PPA_STATS
+        bool "打印 PPA 混合命中统计（每 200 次一次，调试用）"
+        depends on UI_PPA_ACCEL
+        default n
+        help
+            启用后每 200 次混合打印一次"PPA 命中数 + 平均耗时"，
+            用于确认当前面积门槛下真正走了多少硬件路径、每次多少微秒。
+
+    config UI_PPA_BENCH
+        bool "启动时跑 PPA/CPU 混合性能自测（调试用）"
+        depends on UI_PPA_ACCEL
+        default n
+        help
+            在 LVGL 初始化完成后，对同一块 460x46 的内部 RAM 缓冲做
+            CPU 填充 / PPA 填充 / CPU 混合（不透明、半透明）/ PPA 混合的
+            计时对比并打印。仅用于确定 UI_PPA_BLEND_MIN_PX，正式固件关闭。
+
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
         default "2.0.0.0"

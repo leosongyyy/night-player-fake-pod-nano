@@ -47,6 +47,7 @@
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：构建配置（2026-11 起只剩 debug/release 两套；releasecandidate 已随字体统一移除）的完整说明
 - `BUILD_MATRIX.md`（`ideas_and_exps/`）：**配置矩阵**（`idfc_buildconfig.json`）的定义、配置文件格式规范、给 idfc 仓库的逐文件修改说明，以及 **2026-10-02 的新版 idfc 验收记录**（§7，含实测证据与已知小问题）
+- `reference_docs/`（`ideas_and_exps/`）：**硬件原厂资料的整理版**（不是抄手册，是"写驱动该看什么"）。索引见 `reference_docs/README.md`；已整理 **`pmu_axp2101.md`**（AXP2101 寄存器/电量百分比/电源键与长按阈值/软关机/600mAh 充电整定/接入方案，含"芯片没有电流读数"的结论与替代方案）与 **`rtc_pcf85063a.md`**（PCF85063A 寄存器/BCD/闹钟/CLKOUT/驱动与参考代码）。AXP/RTC 目前**代码尚未适配**（`battery.c` 仍是占位实现）
 
 **4. idfc 使用说明（重要）**
 
@@ -335,6 +336,9 @@ patches/
 
 - ⚠⚠ **LVGL 的 tick 由 `lv_tick_set_cb()` 直接读硬件时间（`esp_timer_get_time()`），绝不要再用 `esp_timer` 周期回调喂 `lv_tick_inc()`**（2026-11 真实事故，详见 `ideas_and_exps/DISPLAY_FREEZE_TRIAGE.md`）：IDF 6.1 把 esp_timer 拆成"任务派发/中断派发"两条 systimer alarm 通道，混用时其收尾逻辑会丢掉任务派发通道的闹钟，该通道上的定时器**从此永不到期**。而本项目 `performance_monitor.c` 正有一个 `ESP_TIMER_ISR`（中断派发）的采样定时器 —— 触发条件齐备。曾表现为**整屏定格、日志无异常、按键音频正常、息屏再亮屏才"恢复"**（因为 tick 停了 ⇒ LVGL 所有 timer 一起停）。两个必须记住的点：① `lv_tick_set_cb()` **必须在 `lv_init()` 之后调用**（`lv_init()` 会 `lv_memzero` 整个 `lv_global_t`，写在前面会被清掉 → `lv_tick_get()` 恒为 0 → 只在 `lv_refr_now` 时刷一帧）；② 若真的需要周期性回调，**不要依赖 esp_timer 任务派发**，用 `vTaskDelay` 任务或（只做极短操作的）`ESP_TIMER_ISR` + `IRAM_ATTR` 回调。
 - **⚠ partial 刷屏的两个绘制层事实（2026-11 实测，改 UI 层级时必看）**：① **每一层不透明整块背景 = 每个绘制块多填一遍 2 万像素**。现在 `scr` / `tabview` / tab 页全部透明，黑底**只由** `main_ui` 的 tabview 内容容器（`cont`）提供；新建页面（`ui_page_style`）不要再铺底色，新建**全屏覆盖层**（设置菜单/开机流程/伪关机，不挂 tabview）则必须自己铺不透明底色，否则会露出绘制缓冲里的旧帧残影。② 卡片背景是"圆角帽（高 `2*corner`）+ 直角主体（从 `y+corner` 到底）"两段，视觉等价于整卡圆角，但列表区因此走 `radius==0` 的纯色快速填充路径、不再每帧走圆角掩码（`lv_draw_sw_fill.c` 只有 `radius==0 && grad==NONE` 才走快速路径）。改圆角半径/卡片高度时两段要一起核对。
+- **图像像素缓冲必须 64B 对齐**（`LV_DRAW_BUF_ALIGN=64` / `LV_ATTRIBUTE_MEM_ALIGN_SIZE=64`）：LVGL 9 会把 `lv_image_dsc_t.data` 包成 draw_buf（`lv_draw_buf_from_image`），指针不是 64 的倍数时**每次**都刷
+  `W lv_draw_buf_init: Data is not aligned, ignored`。实测切歌后（真实封面出现在正在播放页）滑动一次就刷一大片，115200 波特下一条 ~5ms，直接把 UI 卡死——现象就是"切歌之后变卡、只有带图片的页面卡"。封面已在 `core/image/cover_jpeg.c` 用 `heap_caps_aligned_alloc(64, …)`；**新增任何动态图像/图层缓冲都要照此办理**，别用裸 `heap_caps_malloc`。
+- **⚠ 不要用高频 ESP_LOG 做性能统计**：UART 115200 下一条 ~10ms 且是同步阻塞，15 条/秒就白扔 15% CPU 并卡住 LVGL 任务。测帧率时先把统计日志关掉（`CONFIG_UI_PPA_STATS` 等）。
 - **QSPI 像素时钟 `AMOLED_QSPI_MAX_PCLK` 保持 40 MHz**（`display.h`；2026-11 曾上调到 80 MHz 做实验，**已回退**）。
   - 40 MHz ≈ 16 MB/s，而一帧全屏 423 KB，列表滚动每帧要重发整个视口（约 340 KB）→ 光传输就 21 ms 以上，这是本机帧率的**带宽天花板**，不要指望靠优化绘制代码突破。
   - ⚠⚠ **80 MHz 在本机会留下"偶发 1px 纯黑竖线"残留**（实测），**不要再调回去**：症状是被局部重绘的区域**左边缘多出一条贯穿该区域高度的 1px 黑线**，且随对象的**宽度变化**累积（变宽时被一起清掉）；连 LVGL 自带的 FPS 监视器、进度条时长标签都有，说明是**QSPI 传输时序边际**而不是绘制逻辑。判定依据：同一份固件只把时钟退回 40 MHz，全部黑线立刻消失。

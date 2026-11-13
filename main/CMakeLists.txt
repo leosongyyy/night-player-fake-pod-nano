@@ -20,6 +20,7 @@ set(MAIN_SRCS
     "core/player/shuffle_player.c"
     "core/ui/lvgl_port.c"
     "core/ui/lvgl_mem.c"
+    "core/ui/lvgl_ppa_accel.c"
     "core/ui/touch_test.c"
     "core/ui/virtual_list.c"
     "core/ui/click_wheel.c"
