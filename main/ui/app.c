@@ -1,4 +1,5 @@
 #include "ui/app.h"
+#include "ui/battery_indicator.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/notification_panel.h"
@@ -11,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
 #include "lvgl.h"
@@ -40,6 +42,7 @@ static const char *const PAGE_NAMES[] = {
 static lv_obj_t *s_status_bar     = NULL;  /* 状态栏容器（透明隐藏时保留事件） */
 static lv_obj_t *page_title_label = NULL;   /* 状态栏中央：当前页面名称 */
 static lv_obj_t *vol_label        = NULL;   /* 状态栏左侧：音量图标+数值（单 label） */
+static lv_obj_t *batt_label       = NULL;   /* 状态栏右侧：电池图标+百分比 */
 
 /* 状态栏图标与数值字体：统一用 LVGL 内置 Montserrat 20。
    - 图标：LVGL 内置字体含 LV_SYMBOL 图标字形（系统精简字体不含 PUA 区图标）；
@@ -99,7 +102,27 @@ static void config_notify_timer_cb(lv_timer_t *timer)
     config_store_flush_pending(false);
 }
 
-/* 状态栏周期刷新：音量兜底刷新（S31 无电池电压显示）。
+/* 独立刷新状态栏电池百分比：图标随电量/充电状态变化，≤20% 黄、≤10% 红；
+   PMU 不可用时显示灰色 "▁ --%"。
+   ⚠ 会做 I²C 读取（约 1ms），只在 5 秒周期 timer 与创建时调用。
+   ⚠ 调用方必须持有 LVGL 锁。 */
+static void status_refresh_battery(void)
+{
+    if (batt_label == NULL) {
+        return;
+    }
+    char buf[24];
+    lv_color_t color = lv_color_white();
+    battery_indicator_text(buf, sizeof(buf), &color);
+    /* 只在文本变化时 set_text：内容相同也 set 会重建文本缓存/动画（跑马灯踩过） */
+    const char *cur = lv_label_get_text(batt_label);
+    if (cur == NULL || strcmp(cur, buf) != 0) {
+        lv_label_set_text(batt_label, buf);
+    }
+    lv_obj_set_style_text_color(batt_label, color, 0);
+}
+
+/* 状态栏周期刷新：音量兜底 + 电池百分比（5 秒一次，PMU 电量变化很慢）。
    图标与数值拼接为单个 label（图标 + 空格 + 文本）。
    创建后立即手动调用一次填充初始值。 */
 static void status_refresh_timer_cb(lv_timer_t *timer)
@@ -107,11 +130,11 @@ static void status_refresh_timer_cb(lv_timer_t *timer)
     (void)timer;
 
     status_refresh_volume();
+    status_refresh_battery();
 }
 
-/* 独立顶部状态栏：左=音量（图标+等级）、中=当前页面名称。
-   右侧暂留白（S31 的电池电压显示等 AXP2101 适配后再加）。
-   返回状态栏句柄供通知栏挂载拖拽事件。 */
+/* 独立顶部状态栏：左=音量（图标+等级）、中=当前页面名称、右=电池百分比。
+    返回状态栏句柄供通知栏挂载拖拽事件。 */
 static lv_obj_t *create_status_bar(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -143,10 +166,14 @@ static lv_obj_t *create_status_bar(void)
     lv_obj_set_style_text_color(page_title_label, lv_color_white(), 0);
     lv_obj_align(page_title_label, LV_ALIGN_CENTER, 0, 0);
 
-    /* 右侧：S31 暂无电池电压显示（AXP2101 适配后恢复）。
-       状态栏保留右侧留白，页面标题仍居中。 */
+    /* 右侧：电池百分比（图标 + 百分数，充电时显示闪电） */
+    batt_label = lv_label_create(status);
+    lv_label_set_text(batt_label, LV_SYMBOL_BATTERY_EMPTY " --%");
+    lv_obj_set_style_text_font(batt_label, STATUS_SMALL_FONT, 0);
+    lv_obj_set_style_text_color(batt_label, lv_color_white(), 0);
+    lv_obj_align(batt_label, LV_ALIGN_RIGHT_MID, -12, 0);
 
-    /* 周期刷新（每 5 秒音量兜底）+ 立即填充一次初始值 */
+    /* 周期刷新（每 5 秒：音量兜底 + 电池百分比）+ 立即填充一次初始值 */
     lv_timer_create(status_refresh_timer_cb, STATUS_VOLUME_REFRESH_MS, NULL);
     status_refresh_timer_cb(NULL);
 
@@ -221,6 +248,9 @@ void app_status_set_ui_visible(bool visible)
         lv_obj_set_style_bg_opa(s_status_bar, (lv_opa_t)191, 0);
         lv_obj_clear_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
+        if (batt_label != NULL) {
+            lv_obj_clear_flag(batt_label, LV_OBJ_FLAG_HIDDEN);
+        }
     } else {
         /* 隐藏：背景完全透明 + 内容 label 隐藏。
            ⚠ 不删除状态栏对象、不清 CLICKABLE：通知栏下拉事件挂载在
@@ -228,6 +258,9 @@ void app_status_set_ui_visible(bool visible)
         lv_obj_set_style_bg_opa(s_status_bar, LV_OPA_TRANSP, 0);
         lv_obj_add_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
+        if (batt_label != NULL) {
+            lv_obj_add_flag(batt_label, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 

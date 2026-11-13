@@ -180,3 +180,27 @@
 4. **仍未做的下一步**（按性价比，都在分支基础上继续）：减少绘制块数量（8 → 4 块，
    要动绘制缓冲与单/双缓冲权衡）、让列表区只剩一次整块填充、
    用 `lv_obj_scroll_by_raw()` 绕开 `lv_obj_add_state/remove_state(SCROLLED)` 的样式比对。
+
+---
+
+## 48. 移除硬件自检/调试代码（等硬件调试完成后）
+
+**背景**：2026-11 接入 AXP2101 / PCF85063A 时为上板调试加了**硬件自检**
+（`CONFIG_HW_SELFTEST`，开机后台跑纯逻辑 + 真机只读/无损测试并打印寄存器转储）
+与**破坏性 RTC 首次校时验证**（`CONFIG_RTC_SELFTEST_AUTO_INIT`，默认关）。
+目前硬件还没有完全调试完成（电量计曲线、充电、断电/开机恢复、TS/NTC 等都还要观察），
+**先保留，以后再移除**。
+
+**以后移除的内容**：
+
+- `main/core/hardware/hw_selftest.c` / `hw_selftest.h`（自检任务与全部测试项）；
+- `main/CMakeLists.txt` 里 `if(CONFIG_HW_SELFTEST)` 的条件编译条目；
+- `main/main.c` 里的 `hw_selftest_run()` 调用与 `16-hw_selftest` 内存快照；
+- `main/Kconfig.projbuild` 里的 `CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT`；
+- `sdkconfig.defaults.release` 里的 `# CONFIG_HW_SELFTEST is not set` 注释行。
+
+**保留（属于正常运行期功能，不要一起删）**：`axp2101.c` / `rtc.c` / `battery.c` 驱动本身、
+`CONFIG_PMU_KEY_IRQ`、`CONFIG_PMU_CHARGE_CONFIG`、`CONFIG_RTC_AUTO_INIT_PROJECT_EPOCH`。
+
+**触发条件**：硬件调试完成、不再需要每次开机跑 `[PASS]/[FAIL]` 自检与 PMU/RTC 寄存器转储时。
+移除后 release 构建本来就不含自检，行为不变；debug 构建开机日志会少掉 `HWST summary` 一段。

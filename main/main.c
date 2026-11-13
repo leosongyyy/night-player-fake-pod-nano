@@ -14,13 +14,14 @@
 #include "core/hardware/battery.h"
 #include "core/hardware/button_service.h"
 #include "core/hardware/display.h"
+#include "core/hardware/hw_selftest.h"
 #include "core/hardware/pldata.h"
+#include "core/hardware/rtc.h"
 #include "core/hardware/sd_card.h"
 #include "core/hardware/touch.h"
 #include "core/fonts/system_font.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
-#include "core/utils/battery_logger.h"
 #include "core/utils/deep_worker.h"
 #include "core/utils/mem_trace.h"
 #include "core/utils/performance_monitor.h"
@@ -128,9 +129,18 @@ void app_main(void)
     touch_register_ready_cb(on_touch_ready, NULL);
     mem_trace_log("06-touch");
 
-    ESP_LOGI(TAG, "Initialize battery (S31 placeholder, AXP2101 TBD)");
+    ESP_LOGI(TAG, "Initialize AXP2101 PMU (battery voltage / SOC / charge status)");
     battery_init();
     mem_trace_log("07-battery");
+
+    /* PCF85063A 实时时钟：必须在 touch_init() 之后（复用触摸建立的 I²C0 总线）。
+       ⚠ 只在时间无效（OS=1/出厂默认/字段非法）时用"项目诞生日"校时，
+         有效时不覆盖备用电源保住的走时。失败不致命（时间显示降级为 --:--）。 */
+    ESP_LOGI(TAG, "Initialize PCF85063A RTC");
+    if (rtc_init() != ESP_OK) {
+        ESP_LOGW(TAG, "RTC unavailable (time display disabled)");
+    }
+    mem_trace_log("07b-rtc");
 
     ESP_LOGI(TAG, "Initialize audio (I2S + CS43131)");
     audio_init();
@@ -194,7 +204,7 @@ void app_main(void)
     // 深路径执行器已在 app_main 早期初始化（见上：内部 RAM 碎片化前创建）
 
     // 睡眠定时器（默认关闭，由播放设置页开启；到点暂停播放 + 息屏，
-    // S31 的真正关机由 AXP2101 负责、尚未适配）
+    // 真正的关机由 AXP2101 负责（驱动已接入，关机流程待接）)
     sleep_timer_init();
     mem_trace_log("13-sleep_timer");
 
@@ -227,9 +237,13 @@ void app_main(void)
     power_service_init();
     mem_trace_log("15-power_service");
 
-    // 电池电压采样日志（S31 占位：AXP2101 尚未适配，函数只打印说明不建任务）
-    battery_logger_init();
-    mem_trace_log("16-batt_logger");
+#ifdef CONFIG_HW_SELFTEST
+    /* AXP2101 / PCF85063A 驱动自检（后台任务，串口打印 [PASS]/[FAIL]/[SKIP]
+       与 HWST summary）。⚠ 不测试断电功能：不调用 axp2101_power_off()、
+       不写 0x10、不碰 DCDC/LDO 电源轨。 */
+    hw_selftest_run();
+    mem_trace_log("16-hw_selftest");
+#endif
 
     // 启动性能监视（内存 + 双核 CPU 使用率），Kconfig CONFIG_PERFORMANCE_MONITOR 控制
 #ifdef CONFIG_PERFORMANCE_MONITOR

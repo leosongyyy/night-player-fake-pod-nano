@@ -3,6 +3,8 @@ set(MAIN_SRCS
     "main.c"
     "core/hardware/display.c"
     "core/hardware/touch.c"
+    "core/hardware/axp2101.c"
+    "core/hardware/rtc.c"
     "core/hardware/battery.c"
     "core/hardware/button_service.c"
     "core/hardware/sd_card.c"
@@ -29,7 +31,6 @@ set(MAIN_SRCS
     "core/utils/deep_worker.c"
     "core/utils/task_psram.c"
     "core/utils/power_service.c"
-    "core/utils/battery_logger.c"
     "core/utils/sleep_timer.c"
     "core/fonts/system_smaller_font.c"
     "core/fonts/system_global_font_lite.c"
@@ -39,6 +40,7 @@ set(MAIN_SRCS
     "core/image/cover_jpeg.c"
     "core/music/song_meta.c"
     "ui/app.c"
+    "ui/battery_indicator.c"
     "ui/boot_flow.c"
     "ui/dir_list.c"
     "ui/key_handler.c"
@@ -66,6 +68,13 @@ endif()
 # 关闭时不编译本文件，且 mem_trace.h 会把所有调用点退化为空语句。
 if(CONFIG_MEM_TRACE)
     list(APPEND MAIN_SRCS "core/utils/mem_trace.c")
+endif()
+
+# 硬件自检（AXP2101 / PCF85063A 驱动）：纯逻辑 + 真机只读/无损测试，
+# 串口打印 [PASS]/[FAIL]/[SKIP] 与 HWST summary。**不测试断电功能**。
+# release 构建默认关闭（见 sdkconfig.defaults.release）。
+if(CONFIG_HW_SELFTEST)
+    list(APPEND MAIN_SRCS "core/hardware/hw_selftest.c")
 endif()
 
 # 系统字体：NPF1 全字库在 font 分区里（运行时 mmap，见 core/fonts/font_npf.c），

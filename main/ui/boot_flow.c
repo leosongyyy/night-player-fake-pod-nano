@@ -35,8 +35,9 @@ static void start_scan_btn_cb(lv_event_t *e);
 static void clear_scan_data_btn_cb(lv_event_t *e);
 static void reset_position_btn_cb(lv_event_t *e);
 
-/* S31 平台：电池电压由 AXP2101 提供（尚未适配），S3 时代的"低电拒启"分支
-   已移除；开机流程只剩 SD 卡/播放列表数据检查。 */
+/* S31 平台：电池信息已由 AXP2101 提供（电压/电量/充电状态，见 battery.c），
+   但 S3 时代的"低电拒启"策略尚未接回；开机流程目前只剩 SD 卡/播放列表数据
+   检查。接回时只需在 boot_flow_run 开头按 battery_read_info 判电压/电量。 */
 
 /* 扫描进度界面刷新周期（ms） */
 #define BOOT_PROGRESS_TIMER_MS 300u

@@ -117,6 +117,66 @@ menu "FakePodNanoNightPlayer 应用配置"
             CPU 填充 / PPA 填充 / CPU 混合（不透明、半透明）/ PPA 混合的
             计时对比并打印。仅用于确定 UI_PPA_BLEND_MIN_PX，正式固件关闭。
 
+    config HW_SELFTEST
+        bool "硬件自检（AXP2101 / PCF85063A 驱动，串口打印 PASS/FAIL）"
+        default y
+        help
+            开机后启动一个后台自检任务（栈放 PSRAM），对两颗新芯片做：
+              · 纯逻辑测试：BCD/星期/时间合法性、ICC 电流编码、电压→SOC
+                插值、状态位解析、按键阈值编码、电量融合规则；
+              · 真机只读/无损测试：I²C 通信、电池电压/电量/充放电状态、
+                TS 电压、长按阈值、开机原因、中断状态读+清；RTC 读时间/
+                有效性、CLKOUT、RAM_byte 写读回（恢复原值）、走时 1 秒校验。
+            结果以 [PASS]/[FAIL]/[SKIP] + 一行 HWST summary 打印。
+            ⚠ **不测试断电功能**（不调用 pmu_power_off、不写 0x10、不碰电源轨）。
+            自检失败只打日志，不影响开机。release 构建默认关闭。
+
+    config PMU_KEY_IRQ
+        bool "AXP2101 电源键中断（GPIO49 短按/长按/按下/抬起）"
+        default y
+        help
+            使能 AXP2101 的电源键中断：GPIO49 下降沿 ISR 只投递事件，
+            由 PSRAM 栈任务读 0x49 并写 1 清。除短按/长按外还使能
+            **按下/抬起边沿**（0x41=0x0F），用于维护"电源键当前是否按住"，
+            供 button_service 判定双键同时按下。
+            ⚠ 本板 INT 为开漏低有效（外部 4.7k 上拉）；中断里绝不做 I²C。
+            ⚠ 只使能电源键相关中断（0x40/0x42 清零）：若把默认全开的中断源
+              都打开，电量计 SOC 更新等事件会让 IRQ 线持续拉低，变成中断风暴。
+            关闭后电源键仍由 PMU 硬件处理开关机，只是固件收不到按键事件。
+
+    config PMU_CHARGE_CONFIG
+        bool "启动时下发 600mAh 电池充电参数（ICC 300mA / ITERM 50mA / CV 4.2V）"
+        default n
+        help
+            开启后在 AXP2101 初始化时写充电寄存器：恒流 300mA（0.5C）、
+            截止电流 50mA（出厂 125mA 会在 80~90% 就判充满）、恒压 4.2V。
+            ⚠ 只改充电相关寄存器（0x62/0x63/0x64），不动 DCDC/LDO 电源轨。
+            ⚠ 默认**关闭**：首次上板应先只读确认电压/充电状态，确认电池规格
+              与本板 600mAh 电芯一致后再打开；每块板子的 EFUSE 默认值可能不同。
+
+    config RTC_AUTO_INIT_PROJECT_EPOCH
+        bool "RTC 未初始化时用项目诞生日校时"
+        default y
+        help
+            PCF85063A 的时间无效时（OS=1 振荡停止 / 读回出厂默认 / 字段非法），
+            写入**项目诞生日**——git 仓库首个提交的时间 2026-08-30 13:45:41
+            (+0800)——作为首次校时，避免界面显示 2000-01-01 或停走的时间。
+            ⚠ 只在无效时写，绝不覆盖备用电源保住的走时；也绝不发软件复位。
+            ⚠ 这不是固件编译时间（编译时间会随每次构建变化）。
+
+    config RTC_SELFTEST_AUTO_INIT
+        bool "RTC 首次校时自检（破坏性：会把 RTC 改写成项目诞生日）"
+        depends on HW_SELFTEST && RTC_AUTO_INIT_PROJECT_EPOCH
+        default n
+        help
+            仅在验证"首次校时"路径时临时打开：自检会先把 RTC 的 OS 位置 1
+            （模拟从未校时/振荡停止），确认 rtc_is_valid() 变 false，再调用
+            rtc_init_time_if_invalid()，校验时间被写成 2026-08-30 13:45:41
+            且 OS 已清除。
+            ⚠ **破坏性**：会把设备 RTC 时间真的改成项目诞生日（当前没有校时
+              UI，只能靠重新烧录/后续加校时入口恢复），所以默认关闭。
+            验证完请改回 n，避免每次开机都重置时间。
+
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
         default "2.0.0.0-alpha-1"

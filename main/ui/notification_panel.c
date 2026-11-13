@@ -1,4 +1,5 @@
 #include "ui/notification_panel.h"
+#include "ui/battery_indicator.h"
 #include "ui/list_common.h"
 #include "ui/settings_menu.h"
 
@@ -10,6 +11,7 @@
 #include "core/utils/sleep_timer.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
 #include "lvgl.h"
@@ -75,8 +77,9 @@ static const char *TAG = "notification_panel";
 
 static lv_obj_t *notif_bar = NULL;
 
-/* 顶部状态信息区（左音量 / 右电量，与主状态栏数据同步） */
+/* 顶部状态信息区（左音量 / 右电量百分比，与主状态栏数据同步） */
 static lv_obj_t *header_vol_label = NULL;
+static lv_obj_t *header_batt_label = NULL;
 
 /* 亮度竖条 */
 static lv_obj_t *bright_fill = NULL;
@@ -311,7 +314,32 @@ static void notif_config_changed_cb(void *ctx)
     notif_refresh_brightness_ui(config_store_get_brightness());
 }
 
-/* S31：电池电压显示暂缺（AXP2101 适配后再加），顶部状态区只保留音量。 */
+/* 刷新顶部状态区右侧的电池百分比（与主状态栏同一套图标/配色规则）。
+   ⚠ 会做 I²C 读取，由 5 秒 timer 驱动，不在每帧路径调用。 */
+static void notif_refresh_battery_ui(void)
+{
+    if (header_batt_label == NULL) {
+        return;
+    }
+    char buf[24];
+    lv_color_t color = lv_color_white();
+    battery_indicator_text(buf, sizeof(buf), &color);
+    const char *cur = lv_label_get_text(header_batt_label);
+    if (cur == NULL || strcmp(cur, buf) != 0) {
+        lv_label_set_text(header_batt_label, buf);
+    }
+    lv_obj_set_style_text_color(header_batt_label, color, 0);
+}
+
+/* 电池百分比周期刷新（5 秒）：下拉面板收起时也在跑，但 I²C 开销可忽略；
+   只为保证展开瞬间显示的是最新值。 */
+static void notif_battery_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    notif_refresh_battery_ui();
+}
+
+/* S31：顶部状态区左=音量、右=电池百分比（AXP2101 电量计 + 电压兜底）。 */
 
 /* ------------------------------------------------------------------ */
 /* 竖条滑动交互（亮度 / 音量，iOS 控制中心风格）                        */
@@ -623,7 +651,12 @@ static void header_create(void)
     lv_obj_set_style_text_color(header_vol_label, lv_color_white(), 0);
     lv_obj_align(header_vol_label, LV_ALIGN_TOP_LEFT, 46, 23);
 
-    /* 右：S31 暂无电池电压显示（AXP2101 适配后恢复） */
+    /* 右：电池百分比（图标 + 百分数，充电时显示闪电），与音量同为 28px */
+    header_batt_label = lv_label_create(header);
+    lv_label_set_text(header_batt_label, LV_SYMBOL_BATTERY_EMPTY " --%");
+    lv_obj_set_style_text_font(header_batt_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(header_batt_label, lv_color_white(), 0);
+    lv_obj_align(header_batt_label, LV_ALIGN_TOP_RIGHT, -46, 23);
 }
 
 /* 中间内容区：左中右三列（flex row，等宽均分）。
@@ -737,11 +770,15 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
-    /* 初始填充：顶部状态区音量与亮度/音量竖条 */
+    /* 初始填充：顶部状态区音量/电池与亮度/音量竖条 */
     notif_refresh_volume_ui(config_store_get_volume());
+    notif_refresh_battery_ui();
     notif_refresh_brightness_ui(config_store_get_brightness());
     notif_refresh_sleep_btn();
     s_sleep_btn_on = sleep_timer_is_active();
+
+    /* 电池百分比周期刷新（5 秒）：电量变化慢，没必要跟随 1s 睡眠按钮定时器 */
+    lv_timer_create(notif_battery_timer_cb, 5000, NULL);
 
     /* 订阅配置变更：按键调音量、设置页改亮度等修改后同步本面板显示 */
     config_store_register_cb(notif_config_changed_cb, NULL);

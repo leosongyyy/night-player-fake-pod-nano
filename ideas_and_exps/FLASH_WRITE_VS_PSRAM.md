@@ -98,12 +98,11 @@ esp_flash_write()                     spi_flash/esp_flash_api.c:1111
 加栈上大对象**（`player_sync_config` 已刻意不走 `player_controller_get_status()`
 那种 ~1KB 结构体拷贝）。
 
-### 3.2 栈在 PSRAM 的任务（6 个）：会不会自己撞进关缓存段？
+### 3.2 栈在 PSRAM 的任务（5 个）：会不会自己撞进关缓存段？
 
 | 任务 | 直接写 flash？ | 结论 |
 | --- | --- | --- |
 | `mem_monitor` / `cpu_coll0` / `cpu_coll1` | 否（只读 heap/CPU 计数器） | ✓ |
-| `batt_log` | 否（写 **SD 卡**，走 SDMMC 主机，不关 flash 缓存） | ✓ |
 | `cover_load` | 否（读 SD + 解码，改 LVGL 时持锁） | ✓ |
 | `power_svc` | 否——息屏/亮屏/伪关机全部 `deep_worker_call()` | ✓ |
 | `rescan` | 否——`playlist_deinit` / 擦列表头委托 `deep_worker`（`settings_menu.c` 的 `rescan_do_deinit`）；**deep_worker 不可用时**才就地执行并已在注释里标风险 | ✓（有兜底，可接受） |

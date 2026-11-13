@@ -58,7 +58,7 @@ config_store（core/storage/config_store.c）
 │     ↑ 全部通过原有 get_xxx / set_xxx 访问
 ├── 不可切换字段（全局共用一份）
 │     brightness / sleep_default_min / sleep_def_on / sleep_awake /
-│     screen_off / click_wheel(×3) / batt_log(×2) / touch_test /
+│     screen_off / click_wheel(×3) / touch_test /
 │     replay_gain / was_playing
 │     ⚠ 睡眠定时（时长 + 开机默认开启）2026-11 起**与槽位互相独立**：
 │       全局键 sleepdef / sleepdefon，切槽位不改也不重新开表

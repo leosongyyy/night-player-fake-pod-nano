@@ -19,10 +19,10 @@
 - 存储：**16MB Flash + 16MB Octal PSRAM（200MHz）**
 - 屏幕：**CO5300** AMOLED，**460x460**，QSPI（`esp_lcd_qspi_amoled` 通用驱动），窗口 X 偏移 10；**VCI_EN=GPIO44** 必须提前拉高
 - 触摸：**CST820**，I²C0（SDA48/SCL47/INT45/RST46）
-- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——AXP/RTC 尚未适配
+- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——**AXP2101 / PCF85063 驱动已接入**（电压/电量/充电状态/电源键 IRQ、RTC 读时间/首次校时、**PMU 软关机（真关机）**；低电策略与 IMU 未接，见 `ideas_and_exps/PMU_RTC_DRIVERS.md`）
 - 耳放芯片：CS43131，**I²C1**（SDA55/SCL54，0x30），I²S1（BCK52/WS51/DIN50，RST53），24.576MHz 板载晶振
 - SD：SDMMC 4-bit，CLK24/CMD25/D0 20/D1 21/D2 22/D3 23
-- 按键：**下方独立按键 GPIO61**（低有效、内部上拉）；**上方电源键接 AXP2101**（无主控 GPIO，需 PMU 驱动）
+- 按键：**上键 = AXP2101 PWRON 电源键**（无主控 GPIO，经 GPIO49 中断维护按下/抬起状态）+ **下键 = GPIO61 独立按键**——`button_service` 统一生成"上/下键短按、长按、双键同时按下"五类事件，`key_handler` 恢复 S3 映射：亮屏上/下=音量±1、下键长按=音量-10、上键长按=关机、双键=息屏；息屏上键短按=播放/暂停、下键短按=下一曲、下键长按=上一曲、上键长按=关机、双键=亮屏
 
 详细外设/引脚见 `ideas_and_exps/reference_docs/hardware_v1.md`。
 
@@ -48,7 +48,7 @@
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：构建配置（2026-11 起只剩 debug/release 两套；releasecandidate 已随字体统一移除）的完整说明
 - `BUILD_MATRIX.md`（`ideas_and_exps/`）：**配置矩阵**（`idfc_buildconfig.json`）的定义、配置文件格式规范、给 idfc 仓库的逐文件修改说明，以及 **2026-10-02 的新版 idfc 验收记录**（§7，含实测证据与已知小问题）
-- `reference_docs/`（`ideas_and_exps/`）：**硬件原厂资料的整理版**（不是抄手册，是"写驱动该看什么"）。索引见 `reference_docs/README.md`；已整理 **`pmu_axp2101.md`**（AXP2101 寄存器/电量百分比/电源键与长按阈值/软关机/600mAh 充电整定/接入方案，含"芯片没有电流读数"的结论与替代方案）与 **`rtc_pcf85063a.md`**（PCF85063A 寄存器/BCD/闹钟/CLKOUT/驱动与参考代码）。AXP/RTC 目前**代码尚未适配**（`battery.c` 仍是占位实现）
+- `reference_docs/`（`ideas_and_exps/`）：**硬件原厂资料的整理版**（不是抄手册，是"写驱动该看什么"）。索引见 `reference_docs/README.md`；已整理 **`pmu_axp2101.md`**（AXP2101 寄存器/电量百分比/电源键与长按阈值/软关机/600mAh 充电整定/接入方案，含"芯片没有电流读数"的结论与替代方案）与 **`rtc_pcf85063a.md`**（PCF85063A 寄存器/BCD/闹钟/CLKOUT/驱动与参考代码）。**AXP2101 / PCF85063 驱动已接入**（`core/hardware/axp2101.c`、`rtc.c`、`battery.c`，实现与实测记录见 `ideas_and_exps/PMU_RTC_DRIVERS.md`）；**PMU 软关机已接入 `fake_shutdown`（名字保留，实际真关机），等待真机实测**
 - `COVER_JPEG_HW.md`（`ideas_and_exps/`）：**封面硬件 JPEG 解码**的接线方式、三个必踩坑（MCU 对齐尺寸 / `jpeg_alloc_decoder_mem` 的对齐要求 / **PPA 不看 stride 必须压实行**）、实测数据与回退方法
 
 **4. idfc 使用说明（重要）**
@@ -153,18 +153,18 @@ idfc help --all            # 全部命令与参数
 
 > 本项目目标：为成品开源播放器 **FakePodNano**（ESP32-S3 + AMOLED + CS43131 + 触摸）开发**更好用、专注于音乐播放**的第三方固件，替代/改进原厂固件的使用体验。
 
-**项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、自动关机保护均已实现。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
+**项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、电池百分比显示、**双键按键映射与 PMU 软关机**均已实现（低电自动关机策略待接）。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
 
 > 关于 `FUTURE_PLAN.md` 和 `DONE_PLAN.md`: 这两个文件主要存储较大型的需求和修复内容，以及其完成情况。日常小需求和调整无需记录在内。只有在 FUTURE_PLAN.md 中出现过的内容才可以移动到 DONE_PLAN.md 中。若在进行小需求时踩到了坑导致变成了大型研究，建议单开一个文件进行记录（例如 IRAM_DMA_AUDIT.md）
 
 **当前实现状态：**
 - 播放核心：本地 MP3 播放（Helix 解码，实测 5000+ 首大曲库），按**文件夹**组织、支持 **`.pl` 文本歌单**；**循环模式**（全部/列表/单曲）+ **顺序/随机**；**无限确定性随机播放**（分块 + 确定性洗牌，断点续播）；回放增益；**EQ 均衡器**（10 段浮点 PeakEQ + 预增益，NightPlayer 兼容 `.eq` 文件）；**封面/歌曲信息**（`.npd` 元数据 + JPEG 封面解码）
-- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池电压 ADC、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
+- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池（**AXP2101**：真实电压 + E-Gauge 电量计 + 充放电状态，融合后显示百分比；S3 的分压 ADC 与电池日志已删除）、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
 - LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
-- 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 低电拒启（<3.45V 停充电警告屏）→ 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）
-- UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=音量档位、中=当前页面名、右=电池电压）、下拉控制中心（电池/亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
-- 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：电池电压日志开关/采样间隔、触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效）、全局 Toast 提示
+- 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）。⚠ S3 时代的"低电拒启（<3.45V）"分支已随平台迁移删除；AXP2101 的电压/电量数据已就绪，策略待接回。
+- UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=音量档位、中=当前页面名、右=电池百分比，≤20% 黄/≤10% 红/充电闪电图标）、下拉控制中心（电量百分比/亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
+- 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：仅触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效；S3 的电池电压日志已删除）、**硬件自检**（`CONFIG_HW_SELFTEST`：开机后台跑 AXP2101/PCF85063A 驱动自检，串口打印 PASS/FAIL/SKIP）、全局 Toast 提示
 
 ### 代码结构
 
@@ -172,13 +172,16 @@ idfc help --all            # 全部命令与参数
 main/
   main.c                    # app_main：config_store → display → LVGL 移植层 + 开机封面（提前点亮）→ 其余硬件 → boot_flow → 深链/睡眠/按键/电源/日志/性能监视
   CMakeLists.txt
-  Kconfig.projbuild         # 构建级应用配置项（Kconfig；触摸测试/电池日志已移至运行时开关）
+  Kconfig.projbuild         # 构建级应用配置项（Kconfig；触摸测试已移至运行时开关；硬件自检/PMU 按键/充电配置/RTC 首次校时在此）
   core/
     hardware/               # 与应用无关的底层硬件驱动
       display.h/.c          # AMOLED LCD（QSPI 总线/面板）+ 屏幕尺寸配置 + 亮度控制
       touch.h/.c            # 触摸控制器（I2C + CST816/820/CHSC6417 按需选择，异步初始化）
-      battery.h/.c          # 电池电压 ADC（分压换算 + 校准；BATTERY_CRITICAL_LOW_MV=3450）
-      button_service.h/.c   # A/B 双键服务（GPIO48/GPIO0，去抖 + 单击/双按/长按事件）
+      axp2101.h/.c          # AXP2101 PMU 驱动（电压/电量计/充电状态/开机原因/电源键 IRQ/软关机 API）
+      rtc.h/.c              # PCF85063A RTC 驱动（burst 读写时间/BCD/有效性/OS/首次校时）
+      battery.h/.c          # 电池应用层（AXP2101 电压 + 电量计融合 → 百分比/充电状态）
+      hw_selftest.h/.c      # AXP2101/PCF85063A 驱动自检（CONFIG_HW_SELFTEST，**不测断电**）
+      button_service.h/.c   # 双键服务（上=PMU PWRON 按住状态 + 下=GPIO61 轮询；去抖、短/长按、双键同时按下）
       sd_card.h/.c          # SD 卡驱动（SDMMC 4-bit + FAT/exFAT 挂载 /sdcard）
       pldata.h/.c           # 播放列表数据结构分区（4MB）驱动：esp_partition_mmap 内存映射只读
       audio/
@@ -232,23 +235,23 @@ main/
       global_style.h/.c     # 全局 UI 风格/动画统一样式（跑马灯：起始延迟 + 滚动 N 轮 + 轮间停顿，参数在头文件宏里，**不进 Kconfig**；v9 的 lv_label 已原生认动画模板里的轮数，只需维护模板 + lv_obj_set_style_anim；⚠ 改跑马灯文本必须用 global_style_marquee_set_text()——裸 lv_label_set_text 即使内容相同也会重建动画，会表现为"重绑列表时跑马灯全被打回起点"，见 MARQUEE_STYLE.md 与 DONE_PLANS #40；另有**label 登记表**：滚动期间统一暂停跑马灯（停手 250 ms 恢复），且"被滚动暂停(marquee_off)"与"被抑制(no_marquee，非当前页)"是两个正交状态——上层主动切 CLIP 时必须调 set_suppressed()，登记项靠 LV_EVENT_DELETE 摘除、**绝不用 lv_obj_is_valid()**，见 MARQUEE_STYLE.md §9）
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
-      fake_shutdown.h/.c        # 伪关机（睡眠定时器到点；A 键长按"等待断电"，深链委托 deep_worker）
+      fake_shutdown.h/.c        # 关机（名字保留；实际走 AXP2101 软关机真断电：显示「正在关机...」→存数据→PMU 0x10[0]=1）
       sleep_timer.h/.c          # 睡眠定时器（到点音量渐降后触发普通伪关机；清醒感知加时）
-      power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏 + 自动关机策略
-      battery_logger.h/.c       # 电池电压采样日志（续航测量用；开发者选项运行时控制）
+      power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏
       deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/伪关机深调用链唯一执行者
       task_psram.h/.c           # PSRAM 栈任务创建助手（task_create_psram_stack，失败自动回退内部 RAM）
   ui/                       # 应用 UI
-    app.h/.c                # UI 组装入口 + 顶部状态栏（左音量/中页面名/右电池电压）
-    boot_flow.h/.c          # 开机流程控制器（低电拒启/无卡/扫描/进主界面）
+    app.h/.c                # UI 组装入口 + 顶部状态栏（左音量/中页面名/右电池百分比）
+    battery_indicator.h/.c  # 状态栏/控制中心共用的电池图标+百分比文本（充电/低电配色）
+    boot_flow.h/.c          # 开机流程控制器（未插卡/扫描/进主界面；低电拒启策略待接 AXP2101）
     main_ui.h/.c            # 主界面（四页滑动 tab：目录/歌曲/正在播放/播放设置）
     dir_list.h/.c           # 目录/歌单列表页（virtual_list，/sdcard 头部 + 行图标）
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
     now_playing.h/.c        # 正在播放页（全屏封面 + 标题栏 + 控制栏/进度条，点击封面隐藏呼出）
     settings_page.h/.c      # 播放设置页（九宫格：1循环/2随机/3睡眠定时/4 EQ/5回放增益/9配置切换，6~8 预留）
     settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/按键帮助/关于+开发者选项/重新扫描）；**分级懒加载**：外壳+根页面首次打开时建（44ms），子页首次进入才建，不占开机路径（见 DONE_PLANS #44）
-    notification_panel.h/.c # 下拉控制中心（电池/亮度/音量竖条/睡眠开关/设置入口，LVGL 事件驱动）
-    key_handler.h/.c        # 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）
+    notification_panel.h/.c # 下拉控制中心（电量百分比/亮度/音量竖条/睡眠开关/设置入口，LVGL 事件驱动）
+    key_handler.h/.c        # 按键分发（S3 映射：亮屏 UP/DOWN=音量±1、DOWN 长按=-10、UP 长按=关机、双键=息屏；息屏 UP=播放暂停、DOWN=下一曲、DOWN 长按=上一曲、双键=亮屏）
     player_ticker.h/.c      # 播放器状态轮询刷新 + 坏曲事件 toast 拉取
     eq_popup.h/.c           # EQ 预设选择弹窗（列出 .musicfx 下 .eq 文件）
     config_slot_popup.h/.c  # 配置槽位选择弹窗（SAVE1~SAVE4，活跃槽位高亮，见 CONFIG_SLOTS.md）
@@ -290,7 +293,7 @@ patches/
 | 46 | 触摸 RST | CST820 复位，低有效 |
 | 47 | I²C0 SCL | 触摸 / AXP2101 / PCF85063 / QMI8658 共用 |
 | 48 | I²C0 SDA | 同上 |
-| 49 | AXP2101 INT | PMU 中断（当前未使用，AXP 待适配） |
+| 49 | AXP2101 INT | PMU 中断，开漏低有效；电源键短按/长按事件（`axp2101.c`，`CONFIG_PMU_KEY_IRQ`） |
 | 50 | I²S1 DIN | CS43131 音频数据输出（`audio.c`） |
 | 51 | I²S1 WS | CS43131 LRCK/WS |
 | 52 | I²S1 BCK | CS43131 位时钟 |
@@ -299,7 +302,7 @@ patches/
 | 55 | I²C1 SDA | CS43131 专用 I²C1 |
 | 61 | 下方独立按键 | 低电平按下，内部上拉；当前唯一主控按键（`button_service.c`） |
 
-**AXP2101 电源键**：上方电源键接 AXP2101，不占主控 GPIO；短按/长按事件需读 PMU 中断（待适配）。
+**AXP2101 电源键（上键）**：接 AXP2101，不占主控 GPIO；PMU 的按下/抬起/短按/长按中断经 GPIO49 维护"按住状态"，`button_service` 统一生成短按/长按/双键事件，`key_handler` 做应用分发（上键长按=关机，亮屏短按=音量+1，息屏短按=播放/暂停）。
 **历史 S3 引脚已作废**（GPIO0/1/2~5/7~18/21/38~41/48），不要再用。
 
 **已确认的 I²C 设备（S31 开机扫描）：** I²C0：0x15（CST820）、0x34（AXP2101）、0x51（PCF85063）、0x6b（QMI8658）；I²C1：0x30（CS43131）。
@@ -311,18 +314,18 @@ patches/
 
 **1. 分层架构**
 - `core/` 放与应用无关的底层：`core/hardware/`（显示/触摸/电池驱动）、`core/ui/`（LVGL 移植层 + LVGL 分配器 lvgl_mem + 触摸测试 + 虚拟列表 + ClickWheel 速滑按钮 + 全局跑马灯节奏 global_style）、`core/utils/`（性能监视/电源/深链）；`core/player`、`core/storage`、`core/music`、`core/image`、`core/fonts` 放播放引擎与数据层；`ui/` 放应用 UI（app、main_ui、boot_flow、notification_panel、settings_menu 等）
-- `main.c` 只做初始化装配：`config_store_init → deep_worker_init → display_init → lvgl_port_init → system_font_init(挂载 NPF1 全字库/回退) → boot_splash_show(持锁首帧+点亮默认封面) → touch_init → battery_init → audio_init → audio_set_volume_level → EQ 恢复 → pldata_init → button_service_init → sd_card_init → boot_flow_run(持锁切屏+复核亮度) → sleep_timer_init → key_handler_init → power_service_init → battery_logger_init → startPerformanceMonitor()`
+- `main.c` 只做初始化装配：`config_store_init → deep_worker_init → display_init → lvgl_port_init → system_font_init(挂载 NPF1 全字库/回退) → boot_splash_show(持锁首帧+点亮默认封面) → touch_init → battery_init(AXP2101) → rtc_init(PCF85063A，无效则项目诞生日首次校时) → audio_init → audio_set_volume_level → EQ 恢复 → pldata_init → button_service_init → sd_card_init → boot_flow_run(持锁切屏+复核亮度) → sleep_timer_init → key_handler_init → power_service_init → hw_selftest_run(仅 CONFIG_HW_SELFTEST) → startPerformanceMonitor()`
   - ⚠ **LVGL 故意提前到 display 之后立刻启动**（唯一硬依赖是面板句柄 + config_store，触摸句柄可传 NULL 由异步回调补上）：这样能马上画一张默认封面并点亮，把 touch/audio/pldata/SD 与 `app_ui_create`（实测约 700ms）的耗时藏在封面背后——实测首次点亮从约 1.9s 提前到约 0.7s，进主界面的时刻不变。开机封面由 `boot_splash_show()`（`ui/boot_flow.c`）创建，随后 `boot_flow_run()` 的任一分支都会删除它并替换为对应界面；防白屏顺序（亮度 0 时先写满整屏 → 再置亮度）与亮度必须与刷屏同锁的约定均未变。
 
 **2. 任务核心布局（UI Core0 / 音频 Core1）**
 - 动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL）固定在 Core0**、**播放解码/封面解码固定在 Core1**，二者分核互不抢占。
 - **深链执行器 deep_worker**（`core/utils/deep_worker.h/.c`：常驻任务，栈 **12KB**（2026-10 TTF 迁移由 8KB 上调：息屏唤醒的 `lv_refr_now` 全屏重刷会光栅化字形，见 `FontSystem.md` §5）、prio 6、Core0，信号量驱动）：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）、伪关机（停外设 + 提示渲染 + deepsleep）、以及**需要内部栈的关缓存段**（如"重新扫描"的 playlist munmap/擦头）统一委托它串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递；勿回到"在小任务里直接跑深链"（历史爆栈记录）。⚠ **栈 12KB 且必须在 `app_main` 早期初始化**（config_store 之后、硬件初始化之前）：内部 RAM 开机末期碎片化（最大连续块约 8.6KB），放到 boot_flow 之后再创建会失败；历史上曾因把这种大栈任务挪到开机末期 + 未检查 `xTaskCreatePinnedToCore` 返回值而**静默失败** → 任务不存在 → 每次深调用等满 5s 超时（按键息屏/亮屏延迟 5 秒）。现已检查返回值并加 `s_exec_task == NULL` 快速失败（就地兜底执行）+ 超时时 dump 全部任务状态。⚠ **该"早期创建"约束也正是 12KB 能分配成功的前提**（早期内部 RAM 还有 ~200KB 空闲/118KB 连续；实测创建成功、HWM 余 11.5KB）。
 - Core0：`LVGL`（lvgl_port_task）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0` 及系统 esp_timer 任务/ISR（sdkconfig 固定 CPU0）与全部驱动中断（app_main 于 Core0 初始化）。
-- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`batt_log`（电池电压日志，仅开发者选项开启时建）、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）。
-- 不固定：`touch_init`（开机一次性自删）、`mem_monitor`（性能监视，CONFIG_PERFORMANCE_MONITOR 控制）。
+- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）。
+- 不固定：`touch_init`（开机一次性自删）、`mem_monitor`（性能监视，CONFIG_PERFORMANCE_MONITOR 控制）、`pmu_irq`（PMU 电源键事件，PSRAM 栈，仅 CONFIG_PMU_KEY_IRQ）、`hw_selftest`（驱动自检，PSRAM 栈，跑完自删，仅 CONFIG_HW_SELFTEST）。
 - 任务栈大小已在各创建处按 mem_monitor 高水位实测收紧（LVGL **20KB**（LVGL 9 迁移 6→12KB，TTF 迁移再 12→20KB，见下）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、deep_worker **12KB**（TTF 迁移由 8KB 上调）、cover_load 6KB、rescan 4KB、mp3_play 8K/out 4K、player_ctrl 4KB；另有主任务 **16KB**（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`，TTF 迁移由 8KB 上调，只在 app_main 期间占用、返回后释放））。⚠ 调栈前先看 HWM 且**必须覆盖目标路径实测**（如自动息屏/亮屏后才打印的读数），勿只信亮屏态读数。
 - ⚠ **LVGL 任务栈必须留在内部 RAM，当前 20KB**：v9 的绘制管线（draw task / layer / 各混合函数层层下探）比 8.4 深得多，**6KB 会在"首次渲染设置页"这种重页面时溢出** —— 实测现象是从主界面滑到第 4 页（播放设置）必定 `A stack overflow in task LVGL has been detected` 并 panic 重启；改 12KB 后位图字体时代实测高水位 5532B。**2026-10 TTF 迁移时**因为 FreeType 光栅化器把渲染池放栈上，12KB 实测只剩 172 字节，才上调到 20KB（实测余 ~8.3KB）；**2026-11 改回位图（NPF1）后不再光栅化**，20KB 继续保留（余量约 8KB，未重新收紧——位图 bpp2→A8 展开与绘制管线仍吃栈，且内部 RAM 目前够用）。若将来内部 RAM 吃紧，可按 `mem_monitor` 的 stk 行实测后回落到 12KB。凡是**可能同步渲染 LVGL** 的任务都按 ≥12KB 栈预算：目前是主任务 / LVGL / deep_worker 三个。
-- **⚠ 内部 RAM 紧张：非实时任务栈一律走 PSRAM**（`core/utils/task_psram.h` 的 `task_create_psram_stack`，失败自动回退内部 RAM）。实测开机末期内部 RAM 仅剩约 4~5KB、DMA 约 2KB、最大连续块约 8KB，内部栈会创建失败——历史症状：`create power service task failed`（自动息屏/低电关机全失效）、重新扫描提示"无法分配栈内存"、performance_monitor 的 mem_monitor/cpu_coll 起不来。已迁到 PSRAM 的任务：`mem_monitor`/`cpu_coll0`/`cpu_coll1`、`batt_log`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`（常驻净省约 12KB）。**保持内部 RAM 的任务**：`LVGL`（每帧刷屏）、`mp3_play`/`mp3_out`（实时解码输出）、`button_svc`（按键中断触发，要求低延迟）、`player_ctrl`/`deep_worker`/`sleep_timer`（交互与深链主路径）、`boot_scan`（扫描要擦写播放列表分区）。新建任务时默认用 `task_create_psram_stack`。
+- **⚠ 内部 RAM 紧张：非实时任务栈一律走 PSRAM**（`core/utils/task_psram.h` 的 `task_create_psram_stack`，失败自动回退内部 RAM）。实测开机末期内部 RAM 仅剩约 4~5KB、DMA 约 2KB、最大连续块约 8KB，内部栈会创建失败——历史症状：`create power service task failed`（自动息屏/低电关机全失效）、重新扫描提示"无法分配栈内存"、performance_monitor 的 mem_monitor/cpu_coll 起不来。已迁到 PSRAM 的任务：`mem_monitor`/`cpu_coll0`/`cpu_coll1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`、`hw_selftest`（常驻净省约 12KB）。**保持内部 RAM 的任务**：`LVGL`（每帧刷屏）、`mp3_play`/`mp3_out`（实时解码输出）、`button_svc`（按键中断触发，要求低延迟）、`player_ctrl`/`deep_worker`/`sleep_timer`（交互与深链主路径）、`boot_scan`（扫描要擦写播放列表分区）。新建任务时默认用 `task_create_psram_stack`。
 - **⚠ 内部 RAM 最大的单项消耗曾是 debug 的堆毒化（现已默认关闭）**：实测 `CONFIG_HEAP_POISONING_COMPREHENSIVE=y` 多占约 **26KB** 内部 RAM，并把最大连续块从 31.7KB 压到 14.8KB（该模式给每个分配加带调用栈的元数据头且禁止空闲块合并，LVGL 的小对象把它放大成碎片）——这正是"release 从未出现、debug 才出现"内部 RAM 问题的原因，不是版本差异而是配置差异。**2026-09 debug 已改为 `CONFIG_HEAP_POISONING_DISABLED=y`；2026-09-10 又把唯一仍开着它的 releasecandidate 一并改为 `DISABLED`**——实测 RC 开毒化时比 debug 少 18~28KB 内部 RAM、最大连续块被压到 2.8KB（DMA 仅剩 955B/连续 80B），这正是"只有 releasecandidate 才出现"内部 RAM 问题的原因。⚠ **不要重新打开**；需要抓堆破坏/悬垂对象崩溃时，按该文件内注释临时改回 Comprehensive 再构建。实测数据、失败链条与修复验证见 `ideas_and_exps/IRAM_DMA_AUDIT.md`。
 - **⚠ LVGL 绘制缓冲是最大的 DMA 内存消费者**：`EXAMPLE_LVGL_BUF_HEIGHT = V_RES/10`（460/10=46 行 → 每块 460×46×2B ≈ 41KB，双缓冲 ≈ 83KB **DMA**；2026-09-10 起已回到此值，前提是 RC 堆毒化关闭——实测 DMA 稳态 **19.4KB / 最大连续块 17.4KB**，SD 读无失败）。实测 DMA 池分布（V_RES/20 那次测量）：启动 263KB → display 后 246KB → audio 后 233KB → SD 后 227KB → **LVGL 后 171KB（绘制缓冲吃掉约 55KB）** → 开机完成 45KB（**这 126KB 的真凶是 `app_ui_create()` 的 LVGL 控件对象约 105KB/+1795 个分配块，不是封面**——封面链路的 .npd/JPEG/像素缓冲全在 PSRAM，见 `IRAM_DMA_AUDIT.md`）。⚠ 原为 V_RES/10（双缓冲 ≈ 83KB DMA），会把 DMA 池压到不足 3KB，导致 SD 卡每次读的 `sdmmc_cmd: allocate_dma_buf: not enough mem`（512B 都分配不到）→ 切歌被误判"坏曲"并自动跳过；该问题在 releasecandidate 上尤其严重（其堆毒化再吃掉 18~28KB）；2026-09-10 关闭毒化后 `V_RES/10` 已稳定运行（DMA 稳态 19.4KB、内部最大连续块 17.4KB、SD 读无失败、睡眠定时器正常）。**调这个值前同时看三项：帧率 + DMA 余量 + 内部 RAM 最大连续块（后者须 ≥4KB：SD 读要 512B、内部任务栈要 4KB）**。（调大→帧率高但 SD 可能失败，调小→SD 安全但滚动掉帧，实测 V_RES/20 约 20fps、V_RES/12 接近原 30fps）。⚠ 缓冲**必须** `MALLOC_CAP_DMA`：非 DMA 缓冲会触发 SPI 驱动的 bounce 缓冲分配（`setup_dma_priv_buffer`），同样从 DMA 池取内存，失败则刷屏阻塞 → 任务看门狗复位。详见 `ideas_and_exps/PSRAM_TASK_STACK.md` 第 4 节。
 - 🆕 **LVGL 9 迁移后 DMA/内部 RAM 的格局已改变**：`app_ui_create()` 那批控件对象**不再占内部 RAM**（v9 的 `LV_USE_CUSTOM_MALLOC` + `core/ui/lvgl_mem.c` 把 LVGL 对象堆整体搬到 PSRAM）。因此上面这段"对象吃 105KB 内部 RAM"的历史描述**只适用于 LVGL 8.4 时代**。
@@ -333,7 +336,7 @@ patches/
   - 详见 `ideas_and_exps/IRAM_AUDIT_LVGL9.md`：§10 四配置对照表、§11 两次失败实验（把对象全部搬回内部 RAM 会直接见底）、§13 路径B 的最终方案与注意点。
 - **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。**「写 flash 与 PSRAM 的关系」已做完整审计，见 `ideas_and_exps/FLASH_WRITE_VS_PSRAM.md`**——要点：① 写 flash 期间两颗核都被停住、只屏蔽"非 IRAM"中断，所以**不会**与 LVGL 渲染并发，被冻结的核恢复后数据完好；② 真正的两条硬约束是"PSRAM 栈任务不许直接写 flash"（有断言）与"IRAM ISR 不许碰任何 PSRAM 数据 / `lv_*` / 播放列表与字体 mmap"（**无断言，靠纪律**；LVGL 对象搬进 PSRAM 后这条从"不规范"升级为"必崩"）；③ 全项目 NVS 写入口唯一（`config_store.c`）、调用栈全在内部 RAM；PSRAM 栈任务的关缓存段全部委托 deep_worker；④ PSRAM 缓冲写 flash 由 `esp_flash_write` 的 32B 栈弹跳兜住（能用，但慢）。
 - 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 240MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
-- **自动关机策略（power_service 守护任务，1s tick，触发即走既有伪关机链 `fake_shutdown_enter`）**：① 息屏且暂停超时（`CONFIG_PAUSE_AUTO_SHUTDOWN_MIN`，默认 10 分钟）；② 电池电压**持续**低于 **3.45V**（`CONFIG_LOW_BATTERY_SHUTDOWN_SEC`，默认 60 秒，0=关闭；阈值 `BATTERY_CRITICAL_LOW_MV` 与开机拒启共用，见 battery.h）。⚠ 暂无充电检测，充电态电压被抬高不会误触发。
+- **自动关机策略：S31 迁移时已移除**（S3 时代的"息屏暂停超时 / 低电压持续 60s → 伪关机"依赖分压 ADC，代码已随平台迁移删除）。当前 `power_service` 只做"无操作自动息屏"；低电策略的**数据已就绪**（`battery_read_info()` 给电压/电量/充电状态），但**尚未接回** `power_service`/`boot_flow`，接回时优先用"电量 + 电压 AND"判据（见 `PMU_RTC_DRIVERS.md` §7）。
 - 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep 或走既有伪关机。
 
 ### 关键技术要点与踩坑记录（务必遵守）

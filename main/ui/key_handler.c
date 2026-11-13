@@ -5,6 +5,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/fake_shutdown.h"
 #include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
 
@@ -16,15 +17,27 @@
 static const char *TAG = "key_handler";
 
 /* 开机/唤醒后的按键保护窗口（ms）：AXP2101 开机瞬间可能带着按键残留，
-   同时避免 deep sleep 时代"唤醒时按键仍被按住 → 立即再次关机"的循环。
-   当前 S31 不做固件伪关机，但保留该保护以过滤开机抖动。 */
+   同时避免"刚开机就触发长按关机"的循环。 */
 #define DEEP_SLEEP_IGNORE_MS  1200
 
 /* 音量按键步进（单位：档，音量范围 0~30）：
-   - 短按 -1（0=静音，1~30 线性映射 20%~80%，每档约 2 个百分点）；
-   - 长按一次性 -10 档。 */
-#define VOL_STEP_SHORT   1
-#define VOL_STEP_LONG    10
+   - 短按 ±1（0=静音，1~30 线性映射 20%~80%，每档约 2 个百分点）；
+   - 下键长按一次性 -10 档（下键可安全长按）。 */
+#define VOL_STEP_SHORT      1
+#define VOL_STEP_LONG_DOWN  10
+
+/* 上键（电源键）长按阈值（ms）：与 S3 一致，息屏 900 / 亮屏 1200。
+   ⚠ 必须明显小于 PMU 硬件 OFFLEVEL（实测 4s）与固件保存耗时之和，
+     否则可能来不及保存就被硬件断电。 */
+#define KEY_UP_LONG_PRESS_ON_MS   1200
+#define KEY_UP_LONG_PRESS_OFF_MS  900
+
+/* 上键长按阈值随屏幕状态变化：由 button_service 在按下沿调用一次取定 */
+static uint32_t up_long_press_ms_provider(void)
+{
+    return power_service_is_screen_off() ? KEY_UP_LONG_PRESS_OFF_MS
+                                         : KEY_UP_LONG_PRESS_ON_MS;
+}
 
 /* 调节音量：config_store（持久化 + 通知 UI 回调）+ audio（写 CS43131 硬件）。
    ⚠ 顺序必须是【先 audio_set_volume_level 再 config_store_set_volume】：
@@ -52,12 +65,12 @@ static void key_adjust_volume(int8_t delta)
 }
 
 /* 按键事件回调（button_service 任务上下文）：
-   S31 只有一个独立按键，按屏幕状态分发两套映射（见 key_handler.h）。 */
+   恢复 S3 时代的两套映射（上键=PMU 电源键，下键=GPIO61，见 key_handler.h）。 */
 static void on_button_event(button_event_t event, void *ctx)
 {
     (void)ctx;
 
-    /* 防抖/防残留：刚开机/唤醒 1.2 秒内忽略按键事件 */
+    /* 防残留：刚开机 1.2 秒内忽略按键事件（长按开机后未及时松手） */
     if (esp_timer_get_time() < (int64_t)DEEP_SLEEP_IGNORE_MS * 1000) {
         ESP_LOGI(TAG, "button event %d ignored within %d ms after boot",
                  (int)event, DEEP_SLEEP_IGNORE_MS);
@@ -69,28 +82,45 @@ static void on_button_event(button_event_t event, void *ctx)
 
     const bool sleeping = power_service_is_screen_off();
     switch (event) {
-    case BUTTON_EVENT_SHORT:
+    case BUTTON_EVENT_UP_SHORT:
         if (sleeping) {
-            /* 息屏：先亮屏，再下一曲（单键唯一能兼顾"唤醒 + 盲操作"的方案） */
-            power_service_screen_on();
+            /* 息屏：播放/暂停（黑屏盲操作，不亮屏） */
+            player_controller_toggle();
+            sleep_timer_note_activity();
+        } else {
+            /* 亮屏：音量 +1 */
+            key_adjust_volume(VOL_STEP_SHORT);
+        }
+        break;
+    case BUTTON_EVENT_DOWN_SHORT:
+        if (sleeping) {
+            /* 息屏：下一曲 */
             player_controller_next();
-            /* 息屏切歌属于"用户动作"：清醒感知加时 */
             sleep_timer_note_activity();
         } else {
             /* 亮屏：音量 -1 */
             key_adjust_volume(-VOL_STEP_SHORT);
         }
         break;
-    case BUTTON_EVENT_LONG:
+    case BUTTON_EVENT_UP_LONG:
+        /* 上键长按：关机（不论亮屏/息屏；fake_shutdown 在息屏时会先亮屏
+           显示「正在关机...」，再保存数据并让 PMU 断电） */
+        ESP_LOGW(TAG, "UP key long press: shutdown");
+        fake_shutdown_wait_power_off();
+        break;
+    case BUTTON_EVENT_DOWN_LONG:
         if (sleeping) {
-            /* 息屏：先亮屏，再上一曲 */
-            power_service_screen_on();
+            /* 息屏：上一曲 */
             player_controller_prev();
             sleep_timer_note_activity();
         } else {
             /* 亮屏：音量一次性 -10 */
-            key_adjust_volume(-VOL_STEP_LONG);
+            key_adjust_volume(-VOL_STEP_LONG_DOWN);
         }
+        break;
+    case BUTTON_EVENT_BOTH:
+        /* 双键同时按下：息屏/亮屏切换 */
+        power_service_screen_toggle();
         break;
     default:
         break;
@@ -100,7 +130,11 @@ static void on_button_event(button_event_t event, void *ctx)
 void key_handler_init(void)
 {
     button_service_register_cb(on_button_event, NULL);
-    ESP_LOGI(TAG, "key handler ready (single key): "
-                  "screen on [short=vol-1, long=vol-10]; "
-                  "screen off [short=wake+next, long=wake+prev]");
+    /* 上键长按阈值随屏幕状态变化：息屏 900ms / 亮屏 1200ms */
+    button_service_set_up_long_press_provider(up_long_press_ms_provider);
+    ESP_LOGI(TAG, "key handler ready: "
+                  "screen on [UP=vol+1, DOWN=vol-1, DOWN long=vol-10, "
+                  "UP long=shutdown, both=screen off]; "
+                  "screen off [UP=play/pause, DOWN=next, DOWN long=prev, "
+                  "UP long=shutdown, both=screen on]");
 }

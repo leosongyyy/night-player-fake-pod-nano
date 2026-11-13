@@ -12,7 +12,6 @@
 | 自动息屏、低电关机、暂停关机全部失效 | `E power_service: create power service task failed` |
 | 设置菜单"重新扫描"点了没反应 | 任务创建失败（用户描述"提示无法分配栈内存"） |
 | 串口不再打印 `MEM:` 内存/CPU 行 | `mem_monitor`（4KB）、`cpu_coll0/1`（1KB）创建失败 |
-| 电池电压日志（开发者选项）不生成 | `batt_log`（4KB）创建失败 |
 
 实测（debug 配置、内部堆 + DMA 堆统计）：
 
@@ -81,7 +80,8 @@ BaseType_t task_create_psram_stack(TaskFunction_t fn, const char *name,
 |---|---|---|
 | `mem_monitor` | 4KB | 每 2s 采样打印 |
 | `cpu_coll0` / `cpu_coll1` | 各 1KB | 每 1s 读空闲计数器 |
-| `batt_log` | 4KB | 采样周期醒来写 SD（默认关） |
+| `pmu_irq` | 3KB | PMU 电源键事件（GPIO49 中断投递后读状态） |
+| `hw_selftest` | 4KB | 开机一次性驱动自检（跑完自删，不写 flash） |
 | `rescan` | 4KB | 设置菜单重新扫描（一次性；关缓存段委托 deep_worker，见 2.4） |
 | `dev_restart` | 2KB | 开发者选项"立即重启"（一次性） |
 | `cover_load` | 6KB | 封面读 .npd + JPEG 解码（后台、低优先级） |

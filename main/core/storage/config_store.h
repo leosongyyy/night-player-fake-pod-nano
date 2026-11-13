@@ -50,8 +50,6 @@ extern "C" {
  *                       设置菜单里点击循环切换
  *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关，
  *     开机读取决定是否启动相关任务/创建调试对象，修改需重启生效）：
- *     - 电池电压采样日志 battery_log（bool，默认关）+ 采样间隔
- *       batt_log_min（分钟，默认 5，可调 1/2/3/5/10，见 core/utils/battery_logger）
  *     - 触摸测试白点 touch_test（bool，默认关，见 core/ui/touch_test）
  *   - 回放增益总开关 replay_gain（bool，默认**开**）：关=所有歌曲按 0dB
  *     播放（.npd 元数据里的增益值不再应用），开=按元数据增益应用。播放设置页
@@ -139,9 +137,6 @@ typedef enum {
     CONFIG_STORE_CW_SPEED_TURBO  = 2,  /* 极速：圈数 × 0.50 */
     CONFIG_STORE_CW_SPEED_COUNT  = 3,
 } config_store_cw_speed_t;
-#define CONFIG_STORE_BATT_LOG_DEFAULT     0u  /* 电池电压日志默认关（开发者选项开启） */
-#define CONFIG_STORE_BATT_LOG_MIN_DEFAULT 5u  /* 日志采样间隔默认 5 分钟 */
-#define CONFIG_STORE_BATT_LOG_MIN_MAX     120u /* 日志间隔上限（分钟，防越界） */
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
 
@@ -257,12 +252,6 @@ bool config_store_get_click_wheel_reverse(void);
 
 /** @brief 虚拟 ClickWheel 速度档位（取值见 config_store_cw_speed_t，默认普通） */
 uint8_t config_store_get_click_wheel_speed(void);
-
-/** @brief 电池电压采样日志开关（true=开机创建 batt_log 任务；默认关） */
-bool config_store_get_battery_log(void);
-
-/** @brief 电池电压采样间隔（分钟，默认 5，可调 1/2/3/5/10） */
-uint8_t config_store_get_battery_log_min(void);
 
 /** @brief 触摸测试白点开关（true=开机创建跟随手指的白色圆点；默认关） */
 bool config_store_get_touch_test(void);
@@ -410,14 +399,6 @@ void config_store_set_click_wheel_reverse(bool reverse);
  *          越界钳到"普通"）。立即生效：调用方随后
  *          click_wheel_set_speed()；同时通知变更回调 */
 void config_store_set_click_wheel_speed(uint8_t speed);
-
-/** @brief 设置电池电压日志开关并持久化（开发者选项；开机检查，重启生效，
- *          仅持久化不通知回调——无 UI 需要实时同步） */
-void config_store_set_battery_log(bool on);
-
-/** @brief 设置电池电压采样间隔并持久化（分钟，自动收敛到 1~120；
- *          与 battery_log 同属开发者选项，重启生效） */
-void config_store_set_battery_log_min(uint8_t minutes);
 
 /** @brief 设置触摸测试白点开关并持久化（开发者选项；开机检查，重启生效，
  *          仅持久化不通知回调） */

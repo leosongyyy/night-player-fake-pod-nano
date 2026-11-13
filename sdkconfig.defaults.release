@@ -17,5 +17,6 @@ CONFIG_UI_COVER_FLASH=y
 # 见设置→关于→开发者选项；此处仅剩编译级调试项）
 # CONFIG_PERFORMANCE_MONITOR is not set
 # CONFIG_MEM_TRACE is not set
+# CONFIG_HW_SELFTEST is not set
 # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not set
 # CONFIG_LV_USE_PERF_MONITOR is not set
