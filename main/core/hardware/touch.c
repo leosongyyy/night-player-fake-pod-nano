@@ -92,8 +92,16 @@ static void i2c_scan(void)
 {
     ESP_LOGI(TAG, "Scanning I2C bus...");
     /* 新驱动自带探测：i2c_master_probe() 内部完成“发地址 + 看 ACK”，
-       等价于旧版手搓 i2c_cmd_link + start/write_byte/stop/cmd_begin 那一套。 */
-    for (uint8_t addr = 1; addr < 127; addr++) {
+       等价于旧版手搓 i2c_cmd_link + start/write_byte/stop/cmd_begin 那一套。
+
+       ⚠ 只扫 0x01~0x77：0x78~0x7F 是 I2C 规范**保留**的地址段
+       （1111_0xx 为 10-bit 地址前缀，1111_1xx 保留给未来协议，0x7E 还是 I3C 广播地址），
+       合法从设备不允许占用。本板实测每次开机都会在 0x7E 打出一个 ACK ——
+       那不是第 6 颗芯片，而是总线上某颗已有芯片（最可能是 QMI8658 IMU）对保留地址的
+       假应答：只有地址字节被 ACK，数据阶段连写一个寄存器地址都被 NACK / 读会直接把
+       硬件 I2C 外设卡到超时（需清总线才能恢复）。调查过程与实测数据见
+       ideas_and_exps/I2C_0X7E_INVESTIGATION.md。把它扫进日志只会误导"多了一颗设备"。 */
+    for (uint8_t addr = 1; addr < 0x78; addr++) {
         if (i2c_master_probe(s_i2c_bus, addr, 50) == ESP_OK) {
             ESP_LOGI(TAG, "Found I2C device at address 0x%02x", addr);
         }
