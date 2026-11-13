@@ -124,18 +124,6 @@ void lvgl_port_suspend(void);
  */
 void lvgl_port_resume(void);
 
-/**
- * @brief 取"刷屏提交失败"的累计次数（0 = 全部成功）
- *
- * `esp_lcd_panel_draw_bitmap()` 的返回值不再被忽略：失败时计一次数并按
- * 前 3 次 / 每 256 次打一条 `ESP_LOGE`。排查屏类问题（QSPI/DMA/面板状态）
- * 时这是第一个该看的数字——失败通常成串出现，日志本身不能拖垮帧率。
- */
-uint32_t lvgl_port_flush_error_count(void);
-
-/** @brief 清空刷屏失败计数（开始一次观察前调用） */
-void lvgl_port_flush_stats_reset(void);
-
 #ifdef __cplusplus
 }
 #endif

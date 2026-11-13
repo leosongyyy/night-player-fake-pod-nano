@@ -69,30 +69,20 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
 #define EXAMPLE_LVGL_TASK_STACK_SIZE   (20 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
-/* 刷屏耗时统计（诊断用，见 lvgl_port_task 里的 2s 汇总）：
-   draw_bitmap 是异步提交（面板 IO 传输完成回调里才 flush_ready），所以这里量的是
-   "提交 → 传输完成"的时长，即 QSPI 实际占用时间，用来区分"QSPI 带宽瓶颈"与
-   "CPU 渲染瓶颈"。 */
-static volatile int64_t  s_flush_start_us = 0;
-static volatile uint32_t s_flush_total_us = 0;
-static volatile uint32_t s_flush_cnt = 0;
-static int64_t s_last_report_us = 0;
-
 /* ESP-IDF 面板 IO 的"传输完成"回调（中断上下文）：
    通知 LVGL 这一块绘制缓冲已经送完，可以复用。
    v8 时代这里拿的是 lv_disp_drv_t*（disp_drv 是静态对象，display_init 早于
    lvgl_port_init 也能取地址）；v9 的 lv_display_t 是运行时创建的，因此改为
    由 display_init 传入 &s_disp（见 lvgl_port_get_flush_ctx 的说明），
-   这样即使回调早于创建触发也能安全判空。 */
+   这样即使回调早于创建触发也能安全判空。
+   ⚠ 这里曾经还统计"提交→传输完成的耗时"并在 lvgl_port_task 里每 2s 打印一次
+     占空比（`flush 2s: … 占空 N%`）。那套统计已删除（2026-11 用户确认不再使用）：
+     结论早就拿到了——40MHz QSPI ≈ 16MB/s，全屏 423KB 单帧传输就 20ms 以上，
+     占空比必然贴着 100%，带宽天花板是已知常量，不需要常驻计数器。 */
 bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
     lv_display_t **disp = (lv_display_t **)user_ctx;
     if (disp != NULL && *disp != NULL) {
-        int64_t delta = esp_timer_get_time() - s_flush_start_us;
-        if (delta > 0 && delta < 200000) {
-            s_flush_total_us += (uint32_t)delta;
-            s_flush_cnt++;
-        }
         lv_display_flush_ready(*disp);
     }
     return false;
@@ -102,20 +92,10 @@ bool lvgl_port_notify_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_pa
    静默吞掉（原实现完全忽略返回值）—— 屏类问题（QSPI/DMA/面板状态）的第一个
    可信信号就是它，否则只能看到"画面不动"却查不出是谁拒绝了传输。
    ⚠ 刷屏是热路径（滚动时约 500 次/秒），失败通常成串出现，所以只在
-   前 3 次与每 256 次打一条日志，避免日志本身把帧率压垮。 */
+   前 3 次与每 256 次打一条日志，避免日志本身把帧率压垮。
+   （曾经还有一对 lvgl_port_flush_error_count / _stats_reset 供上层取数，
+     全项目零调用，2026-11 随刷屏耗时统计一起删除。） */
 static volatile uint32_t s_flush_err_cnt = 0;   /* 累计失败次数 */
-
-/* 清空刷屏失败计数（供上层在"开始一次观察"前重置） */
-void lvgl_port_flush_stats_reset(void)
-{
-    s_flush_err_cnt = 0;
-}
-
-/* 取累计的刷屏失败次数（0 = 全部成功） */
-uint32_t lvgl_port_flush_error_count(void)
-{
-    return s_flush_err_cnt;
-}
 
 /* v9 的 flush 回调签名：像素数据是 uint8_t*（不再有 lv_color_t*），
    显示对象由参数传入（v8 时靠 drv->user_data 取面板句柄）。 */
@@ -152,7 +132,6 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
 #endif
 
     // copy a buffer's content to a specific area of the display
-    s_flush_start_us = esp_timer_get_time();
     const esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1,
                                                     offsetx2 + 1, offsety2 + 1, px_map);
     if (err != ESP_OK) {
@@ -259,24 +238,6 @@ static void lvgl_port_task(void *arg)
         } else if (task_delay_ms < EXAMPLE_LVGL_TASK_MIN_DELAY_MS) {
             task_delay_ms = EXAMPLE_LVGL_TASK_MIN_DELAY_MS;
         }
-
-        /* 每 2 秒汇总一次刷屏占用：平均每次 QSPI 传输时长 + 占空比。
-           占空比高（>70%）说明已经撞 QSPI 带宽天花板，优化绘制代码没用；
-           占空比低而帧率上不去，才是 CPU（渲染/布局）瓶颈。
-           只在 debug（PERFORMANCE_MONITOR）下打印，正式版不需要这条日志。 */
-#if CONFIG_PERFORMANCE_MONITOR
-        int64_t now_us = esp_timer_get_time();
-        if (now_us - s_last_report_us >= 2000000) {
-            uint32_t cnt = s_flush_cnt;
-            uint32_t tot = s_flush_total_us;
-            s_flush_cnt = 0;
-            s_flush_total_us = 0;
-            s_last_report_us = now_us;
-            ESP_LOGI(TAG, "flush 2s: %u 次, 平均 %u us, 合计 %u ms, 占空 %u%%",
-                     (unsigned)cnt, (unsigned)(cnt ? tot / cnt : 0),
-                     (unsigned)(tot / 1000), (unsigned)(tot / 20000));
-        }
-#endif
 
         vTaskDelay(pdMS_TO_TICKS(task_delay_ms));
     }

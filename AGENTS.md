@@ -44,7 +44,7 @@
 
 - `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动）。~~i2c_bsp~~ 已于 2026-11 迁移 IDF 6.1 时删除（全工程零引用的死代码）
 - `patches/`：**构建期补丁文件**（托管组件用，当前两组：`lvgl_fast_mem_decl/`、`esp_lcd_touch_deps/`，见上方 IDF 6.1 条目）
-- `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_sh8601、esp_lcd_touch、cmake_utilities、chmorgan__esp-libhelix-mp3）
+- `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_touch、esp_jpeg、cmake_utilities、chmorgan__esp-libhelix-mp3）。⚠ `esp_lcd_sh8601` 已于 2026-11 从 `main/idf_component.yml` 删除（本项目显示驱动是本地组件 `esp_lcd_qspi_amoled`，零代码引用它）
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：构建配置（2026-11 起只剩 debug/release 两套；releasecandidate 已随字体统一移除）的完整说明
 - `BUILD_MATRIX.md`（`ideas_and_exps/`）：**配置矩阵**（`idfc_buildconfig.json`）的定义、配置文件格式规范、给 idfc 仓库的逐文件修改说明，以及 **2026-10-02 的新版 idfc 验收记录**（§7，含实测证据与已知小问题）

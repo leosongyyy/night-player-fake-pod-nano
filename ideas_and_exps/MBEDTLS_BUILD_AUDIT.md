@@ -317,7 +317,9 @@ esp_rom / esp_common / esp_system / esp_stdio / cxx / esp_libc` 是 IDF 的
 - **新增任何组件依赖，忘了写进 `COMPONENTS` 就会编译报错**（报"找不到头文件"），
   按提示补一行即可；这是这份白名单位一的长期成本。
 - 那个 `espressif/esp_lcd_sh8601` 依赖已经**没有代码引用**（本项目显示驱动是本地组件
-  `esp_lcd_qspi_amoled`），但仍在 `main/idf_component.yml` 里、占 1 个编译单元。
-  本次**未清理**（超出本条范围）；要清就删那条 `dependencies` 项 + 让组件管理器
-  重新生成 `dependencies.lock`，并确认 `esp_lcd` 仍由其它路径提供。
+  `esp_lcd_qspi_amoled`），它只是历史遗留的 public 依赖，白占 1 个编译单元。
+  ✅ **2026-11-14 已清理**：从 `main/idf_component.yml` 删掉该依赖，组件管理器随之
+  重写 `dependencies.lock`、不再拉取 `managed_components/espressif__esp_lcd_sh8601`。
+  组件数走势：剪裁后 89 → 加封面硬解的 `esp_driver_jpeg`（连带 `esp_hal_jpeg`）91
+  → 删 sh8601 后 **90 个组件 / 1238 个编译单元**。
 

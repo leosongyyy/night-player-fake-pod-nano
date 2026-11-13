@@ -222,7 +222,9 @@ PPA 帮不上的地方（与 `IRAM_AUDIT_LVGL9.md` 的结论一致）。
 - `CONFIG_LV_USE_PPA` **仍关闭**（内置 draw unit 的 partial 支持问题见 §3.2）。
 - `sdkconfig.defaults` 的 64B 对齐两项保留（PPA 与 LVGL 都要求）。
 - `main/core/ui/lvgl_port.c`：绘制缓冲字节数向上取整到 64B（PPA 的
-  `buffer_size` 必须对齐），并保留 flush 计时/占空比日志。
+  `buffer_size` 必须对齐）。
+  ~~并保留 flush 计时/占空比日志~~ —— **2026-11 已删除那套统计**（§6.4 的结论
+  早就在这里了，常驻计数器与每 2s 的 `flush 2s: …` 日志不再需要；用户确认不用）。
 - `main/core/image/cover_jpeg.c`：封面像素缓冲 64B 对齐（§6.3）。
 - 托管组件里的 `lv_draw_ppa*.c` 实验改动**没有**转成 `patches/`；既然
   `CONFIG_LV_USE_PPA` 不再启用，这些改动可以不管（重拉组件即还原）。
