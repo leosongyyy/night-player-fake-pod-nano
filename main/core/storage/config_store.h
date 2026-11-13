@@ -23,15 +23,21 @@ extern "C" {
  *     随机算法已接入播放引擎，见 core/player/shuffle_player）
  *   - 随机播放位置 shuffle_pos（uint64，无限确定性随机序列的逻辑位置），
  *     由 player_controller 在切歌/暂停/关机时保存，开机恢复随机序列现场
- *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）
- *   - 开机默认开启睡眠定时 sleep_def_on（bool，默认关）：开机自动用默认时长
- *     开启睡眠定时器（在 main.c 的 sleep_timer_init 之后应用）；开启时进入
- *     主界面会弹 Toast 提醒"定时已开启"（boot_flow，见 FUTURE_PLAN 第 27 点）
+ *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）：**只是"开启时用的
+ *     档位"**，本身不代表定时已开启
+ *   - 开机默认开启睡眠定时 sleep_def_on（bool，默认关）：睡眠定时的总开关——
+ *     为开时开机自动用默认时长开启睡眠定时器（在 main.c 的 sleep_timer_init
+ *     之后应用）；为关时开机不启动定时。开启时进入主界面会弹 Toast 提醒
+ *     "定时已开启"（boot_flow，见 FUTURE_PLAN 第 27 点）。
+ *     ⚠ 睡眠定时的**时长与开关都与配置槽位互相独立**（2026-11 调整）：两者都是
+ *     全局键，切换 SAVE1~SAVE4 既不改变也不重新开表（定时只在用户主动操作时
+ *     才变：设置页/通知栏开关、开机自动开启）。
  *   - 睡眠定时清醒感知 sleep_awake（bool，默认开）：睡眠定时开启期间，切歌/
  *     播放控制/点歌等用户动作按 NightPlayer 算法折算加时（见 core/utils/
  *     sleep_timer；音量调节不再加时）
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
- *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调
+ *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调。
+ *     ⚠ 全局键（screenoff），**不进配置槽位**：切换 SAVE1~SAVE4 不会改变它。
  *   - 虚拟 ClickWheel click_wheel（bool，默认**开**）：长列表右下角速滑按钮
  *     是否启用（见 core/ui/click_wheel）。设置菜单 →「虚拟 ClickWheel」子页
  *     切换，三项均立即生效（无需重启）：
@@ -65,9 +71,10 @@ extern "C" {
  * 开机从歌曲开头开始（避免恢复播放位置带来的复杂度/体验差异）。
  *
  * ---------- 配置槽位（2026-11，NightPlayer「配置插槽」功能） ----------
- * 「不同场景用不同配置」：音量 / 循环模式 / 随机开关 + 随机位置 / 睡眠定时
- * 时长 / EQ 预设 / 当前列表与歌曲 这 7 类字段**整体**属于"当前配置"，共 4 个
- * 槽位（见 config_store_slot_count）各自独立保存，另有"当前活跃槽位"记忆。
+ * 「不同场景用不同配置」：音量 / 循环模式 / 随机开关 + 随机位置 / EQ 预设 /
+ * 当前列表与歌曲 这 6 类字段**整体**属于"当前配置"，共 4 个槽位
+ * （见 config_store_slot_count）各自独立保存，另有"当前活跃槽位"记忆。
+ * ⚠ **睡眠定时（时长 + 开关）不属于槽位**，全局只有一份（见上方说明）。
  *
  * ⚠ **应用侧完全无感**：上面那些 get_xxx / set_xxx 签名与语义一字不变，只是
  * 内部改成"读/写当前活跃槽位的值"。切换槽位（config_store_switch_slot）会把
@@ -84,11 +91,12 @@ extern "C" {
  *      不会无限增长；这样"改完直接长按关机/断电"也不会丢）；
  *   3. 伪关机：player_controller 记完最后播放位置后存回当前槽位。
  * 非切换字段（亮度 / 息屏超时 / ClickWheel / 开发者选项 / 回放增益 / 睡眠
- * 清醒感知与开机自动开启）**不进槽位**，全局共用一份。
+ * 定时时长与开关 / 睡眠清醒感知）**不进槽位**，全局共用一份。
  *
  * 兼容性：槽位机制**不删除**旧全局键。活跃槽位从未保存过时，音量/循环/随机/
- * 睡眠默认值/最后播放位置仍走旧键（首次升级上来的机器读到的就是既有配置）；
+ * 最后播放位置仍走旧键（首次升级上来的机器读到的就是既有配置）；
  * 第一次保存（关机或切换）后全局键冻结、后续以槽位为准。
+ * 睡眠定时时长（sleepdef）**始终**读写旧全局键，不随槽位冻结。
  *
  * 设计要点：
  *   - 所有 set_xxx 写 NVS，并**只置一个"待通知"标志**；真正的变更回调由
@@ -189,7 +197,6 @@ typedef struct {
     bool     shuffle;                         /* 随机播放开关 */
     bool     shuffle_pos_valid;               /* 随机位置是否有记录 */
     uint64_t shuffle_pos;                     /* 随机序列逻辑位置 */
-    uint32_t sleep_default_min;               /* 睡眠定时时长（分钟，0=未定时） */
     bool     eq_valid;                        /* 是否带 EQ 预设 */
     char     eq_name[EQ_FILE_NAME_MAX];       /* .eq 文件名 */
     eq_preset_t eq_data;                      /* 解析后的 EQ 参数（eq_valid 时有效） */
@@ -230,10 +237,10 @@ bool config_store_get_shuffle(void);
  */
 bool config_store_get_shuffle_pos(uint64_t *pos);
 
-/** @brief 睡眠定时的默认时长（分钟，0=无默认） */
+/** @brief 睡眠定时的默认时长（分钟，0=无默认）。全局一份，与配置槽位无关；是否自动开启由 sleep_def_on 决定 */
 uint32_t config_store_get_sleep_default_min(void);
 
-/** @brief 开机默认是否开启睡眠定时器（true=开机自动用默认时长开启） */
+/** @brief 总开关：开机默认是否开启睡眠定时器（true=开机/切槽位自动用默认时长开启） */
 bool config_store_get_sleep_def_on(void);
 
 /** @brief 睡眠定时清醒感知开关（true=切歌/调音量等动作按 NightPlayer 算法加时） */
@@ -373,10 +380,15 @@ void config_store_set_shuffle(bool on);
  */
 void config_store_set_shuffle_pos(uint64_t pos);
 
-/** @brief 设置睡眠定时的默认时长并持久化（分钟，0=关闭） */
+/**
+ * @brief 设置睡眠定时的默认时长并持久化（分钟，0=关闭）
+ *
+ * ⚠ 全局键（sleepdef），**不进配置槽位**：切换 SAVE1~SAVE4 不会改变它，
+ *   也不会把定时重新开表（睡眠定时与配置槽位互相独立）。
+ */
 void config_store_set_sleep_default_min(uint32_t minutes);
 
-/** @brief 设置开机默认开启睡眠定时器并持久化 */
+/** @brief 设置开机默认开启睡眠定时器并持久化（全局键，同样不进槽位） */
 void config_store_set_sleep_def_on(bool on);
 
 /** @brief 设置睡眠清醒感知开关并持久化 */

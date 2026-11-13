@@ -55,6 +55,10 @@ void sleep_timer_init(void);
  *   - boot_flow 进入主界面后按返回值弹 Toast 提醒用户"定时已开启"
  *     （见 ideas_and_exps/FUTURE_PLAN.md 第 27 点）。
  *
+ * ⚠ 开关关闭时，**任何自动路径都不得启动定时**：开机不启动（main.c）；
+ *   切换配置槽位也完全不动定时（睡眠定时与配置槽位互相独立，时长/开关都是
+ *   全局配置，见 config_slots.c）。记忆的时长只是"下次开启时用的默认档位"。
+ *
  * @return >0 = 开机应自动开启该分钟数的定时；0 = 不自动开启
  */
 uint32_t sleep_timer_boot_autostart_min(void);

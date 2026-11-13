@@ -68,8 +68,17 @@ CONFIG_FATFS_USE_LABEL=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_LOG_COLORS=y
+# ⚠ 以下 LWIP / WIFI / mbedtls 配置项：2026-11 起 wifi/bt/lwip/wpa_supplicant
+#   等组件已被 COMPONENTS 白名单移出构建（见根 CMakeLists.txt），这些项在当前
+#   构建里**不再起作用**；保留它们是因为随时可能重新引入，删掉反而要多记一笔。
+#   真正仍生效的是下面的 mbedtls 两条关闭项 —— mbedtls 摘不掉（bootloader_support
+#   与 nvs_flash 硬依赖，见 ideas_and_exps/MBEDTLS_BUILD_AUDIT.md），但项目不做
+#   任何网络/TLS，所以证书包与 PKCS#7 纯属浪费：关掉可少编 esp_crt_bundle.c 与
+#   pkcs7.c，并跳过 gen_crt_bundle.py 生成证书包这一步（零风险，量级很小）。
 CONFIG_LWIP_HOOK_IP6_INPUT_NONE=y
 CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM=y
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set
+# CONFIG_MBEDTLS_PKCS7_C is not set
 CONFIG_WS_TRANSPORT=n
 # S31 的 LP core 固件当前未使用，关闭 ULP 以省掉 RTC 内存预留与 LP 镜像构建
 # CONFIG_ULP_COPROC_ENABLED is not set

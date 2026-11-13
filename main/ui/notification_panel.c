@@ -218,6 +218,10 @@ static void notif_attach_events(lv_obj_t *obj)
 /* 亮度 / 音量应用                                                     */
 /* ------------------------------------------------------------------ */
 
+/* 前向声明：拖动时要"立即"刷新本面板的竖条/文字（定义在下方显示刷新一节） */
+static void notif_refresh_volume_ui(uint8_t vol);
+static void notif_refresh_brightness_ui(uint8_t brightness);
+
 /* 应用亮度：只改内存（不写 NVS），再写硬件。
    ⚠ 事件回调运行在 LVGL 任务上下文（已持锁），display_set_brightness 安全。
    ⚠⚠ 拖动中**绝不落盘**：一次拖动会有上百次值变化，而每次 nvs_commit 都要
@@ -234,6 +238,13 @@ static void notif_apply_brightness(uint8_t brightness)
     }
     config_store_set_brightness_deferred(brightness);
     display_set_brightness(brightness);
+    /* ⚠ 必须在这里**立即**刷新本面板的竖条填充：config_store 的变更通知是
+       延迟派发的（100ms lv_timer），只靠它的话拖动时竖条只能以 10Hz 一格一格
+       跳 —— 手指在 30Hz 移动、条在 10Hz 更新，观感就是"一顿一顿"（v0.9 时代
+       set_xxx 同步回调所以没这个问题，v1.0.0.0 引入延迟派发后出现）。
+       本函数运行在 LVGL 事件回调里（已持锁），直接改自己的控件是安全的；
+       延迟派发那一路稍后仍会跑一次（值没变 → 不产生重绘，幂等）。 */
+    notif_refresh_brightness_ui(brightness);
 }
 
 /* 应用音量：先写硬件（config_store 变更回调会读 audio 值，顺序不能反），
@@ -249,6 +260,9 @@ static void notif_apply_volume(uint8_t level)
     sleep_timer_fade_cancel();
     audio_set_volume_level(level);          /* 先写硬件（回调读到的即新值） */
     config_store_set_volume_deferred(level);/* 后改内存 + 通知（持锁安全） */
+    /* ⚠ 同亮度：立即刷新本面板音量显示，别等 100ms 的延迟派发，否则拖动
+       音量竖条也是 10Hz 的"一格一格"（见 notif_apply_brightness 的说明） */
+    notif_refresh_volume_ui(level);
     /* ⚠ 音量调节不触发睡眠定时清醒感知加时（只有切歌/播放控制/点歌等
        算"用户动作"，见 sleep_timer_note_activity 注释） */
 }

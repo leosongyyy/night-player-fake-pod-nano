@@ -54,20 +54,28 @@
 config_store（core/storage/config_store.c）
 ├── 可切换字段（随槽位切换）  → static config_live_t s_live
 │     volume / loop_mode / shuffle / shuffle_pos /
-│     sleep_default_min / last_valid + last_global / eq_name + eq_data
+│     last_valid + last_global / eq_name + eq_data
 │     ↑ 全部通过原有 get_xxx / set_xxx 访问
 ├── 不可切换字段（全局共用一份）
-│     brightness / sleep_def_on / sleep_awake / screen_off /
-│     click_wheel(×3) / batt_log(×2) / touch_test / replay_gain / was_playing
+│     brightness / sleep_default_min / sleep_def_on / sleep_awake /
+│     screen_off / click_wheel(×3) / batt_log(×2) / touch_test /
+│     replay_gain / was_playing
+│     ⚠ 睡眠定时（时长 + 开机默认开启）2026-11 起**与槽位互相独立**：
+│       全局键 sleepdef / sleepdefon，切槽位不改也不重新开表
 └── 槽位层
       4 × config_slot_blob_t（NVS 键 slot0..slot3，整块 blob 一次读写）
       + 活跃槽位下标（NVS 键 slot_active）
 ```
 
 槽位 blob（`config_slot_blob_t`，POD，可直接 `nvs_set_blob`）字段：
-`version` / `last_global` / `sleep_default_min` / `shuffle_pos` / `volume` /
+`version` / `last_global` / `reserved_sleep`（原睡眠时长，现仅占位） /
+`shuffle_pos` / `volume` /
 `loop_mode` / `shuffle` / `shuffle_pos_valid` / `last_valid` / `eq_valid` /
 `eq_band_count` / `eq_name[64]` / `eq_data(128B eq_preset_t)` / `last_list_name[128]`。
+
+- `reserved_sleep`：睡眠定时的时长**不再属于槽位**（改用全局键 `sleepdef`）。
+  保留这 4 字节是为了让 blob 的布局、大小与 `SLOT_BLOB_VERSION=1` **完全不变**——
+  老固件存的槽位照常读出（该字段被忽略），升级不会丢槽位配置。
 
 - `last_list_name` 是**保存时记下的目录/歌单名快照**，纯粹给 UI 显示
   `SAVE1 <列表名>` 用（`config_store` 不认识 playlist，名字由 UI 层
@@ -96,6 +104,8 @@ config_store（core/storage/config_store.c）
 - 活跃槽位**从未保存过**（首次升级上来的机器）→ `config_store_init` 照旧读全局键，
   且此时 `set_xxx` 会**同时**写全局键（`s_slot_active_saved == false` 的兼容分支）；
 - 第一次保存槽位后 → 全局键冻结，此后一律以槽位为准。
+- **例外：`sleepdef`（睡眠定时时长）永不冻结**——它是全局键，与槽位无关，
+  `config_store_set_sleep_default_min()` 直接写它并 commit，不经过槽位 blob。
 
 于是：老用户升级后**配置原样保留**，并在第一次关机时被收进"槽位 1"。
 
@@ -112,11 +122,14 @@ config_store（core/storage/config_store.c）
    `config_notify()`（设置页等 UI 随即刷新为新值）；
 3. **音量**：`audio_set_volume_level()`（直接落 DAC，不等下次播放）；
 4. **EQ**：`eq_apply()`（无预设则 `eq_apply(NULL)` 直通）；
-5. **睡眠定时**：`sleep_timer_set()`（按槽位存的**原时长**重新开表，0 = 关闭）；
-6. **播放器**：`player_controller_restore_config()` → 控制器任务里**原子**恢复
+5. **播放器**：`player_controller_restore_config()` → 控制器任务里**原子**恢复
    循环模式 / 随机开关 / 随机序列位置 / 当前歌曲，然后开始播放；
-7. Toast：**只报槽位编号**「已切换到 SAVE2」——列表名可能长达 128 字节，
+6. Toast：**只报槽位编号**「已切换到 SAVE2」——列表名可能长达 128 字节，
    塞进底部提示框会溢出/折行（列表名在槽位弹窗里看，见 §4.2）。
+
+> **睡眠定时不在其中**（2026-11 起与槽位互相独立）：时长（全局键 `sleepdef`）与
+> "开机默认开启"开关（`sleepdefon`）都是全局配置，切槽位既不改变它们、也不
+> 重新开表——正在跑的定时继续跑，没开的定时不会被切配置打开。
 
 ### 为什么播放部分要单独一条命令
 
@@ -162,12 +175,12 @@ config_store（core/storage/config_store.c）
 
 | 文件 | 改动 |
 | --- | --- |
-| `main/core/storage/config_store.h/.c` | 可切换字段收进 `s_live`；槽位 blob 打包/解包/缓存；活跃槽位记忆；`config_store_load_active_slot` / `get_slot_info` / `get_slot_snapshot` / `save_active_slot` / `switch_slot` / `set_slot_list_name`；`get/set_last_song` 去掉秒数参数 |
-| `main/core/storage/config_slots.h/.c` | **新增**：`config_slots_switch()`（切槽位 + 应用音量/EQ/睡眠定时/播放器 + Toast） |
+| `main/core/storage/config_store.h/.c` | 可切换字段收进 `s_live`（睡眠定时时长/开关除外，走全局键）；槽位 blob 打包/解包/缓存；活跃槽位记忆；`config_store_load_active_slot` / `get_slot_info` / `get_slot_snapshot` / `save_active_slot` / `switch_slot` / `set_slot_list_name`；`get/set_last_song` 去掉秒数参数 |
+| `main/core/storage/config_slots.h/.c` | **新增**：`config_slots_switch()`（切槽位 + 应用音量/EQ/播放器 + Toast；**不碰睡眠定时**） |
 | `main/core/player/player_controller.h/.c` | 新增 `CMD_RESTORE_CONFIG` 与 `player_controller_restore_config()`；`save_last_position` 末尾存回活跃槽位 |
 | `main/ui/config_slot_popup.h/.c` | **新增**：槽位选择弹窗 |
 | `main/ui/settings_page.c` | 九宫格重排（EQ→4、回放增益→5、配置切换→9）+ 槽位状态文字刷新 |
-| `main/main.c` | `config_store_init()` 后立刻 `config_store_load_active_slot()`；开机按当前配置的定时时长恢复睡眠定时 |
+| `main/main.c` | `config_store_init()` 后立刻 `config_store_load_active_slot()`；开机仅在「开机默认开启睡眠定时器」为开时按**全局**记忆的时长启动睡眠定时（与槽位无关） |
 | `main/CMakeLists.txt` | 加入两个新 `.c` |
 
 ---
@@ -178,18 +191,24 @@ config_store（core/storage/config_store.c）
    `active slot -> N` / `switch: load new slot: SAVE N -> live (...)`
    / `SAVE N saved to NVS: ... last=<歌曲>(valid) list=<列表名>`。
 2. **切换**：设置页第 9 格 → 弹窗（当前槽位黄色、行文本带列表名）→ 点 SAVE2 →
-   立即换列表/歌曲/音量/EQ/定时；Toast 只显示「已切换到 SAVE2」（不带列表名）。
+   立即换列表/歌曲/音量/EQ（**睡眠定时不变**）；Toast 只显示「已切换到 SAVE2」（不带列表名）。
 3. **记忆**：在 SAVE2 下关机 → 重启后仍是 SAVE2（日志 + 设置页状态文字）。
 4. **回切**：SAVE1 改了音量/换了歌 → 切 SAVE2 → 再切回 SAVE1，应回到离开时的状态。
    ⚠ 重点测"**从列表点一首歌后立刻切槽位**"（旧实现必错，见 §七）。
 5. **升级兼容**（重要，用旧固件造数据）：先用旧固件跑一次配好音量/循环/EQ →
    刷本固件 → 配置应原样保留（日志 `active slot N empty: keep legacy global keys`），
    关机后变成 `slot 1 saved`。
-6. **空槽位**：点从未保存过的槽位 → 回到默认音量/列表循环/顺序播放/EQ 关闭/无定时，
+6. **空槽位**：点从未保存过的槽位 → 回到默认音量/列表循环/顺序播放/EQ 关闭，
    从第一首开始播放，且该槽位随后变为"已保存"（弹窗里也应有列表名，不再是光秃秃的
    `SAVE2`）。
 7. **配置通知不再崩**：开着播放，反复点"随机/播放模式/音量"与切槽位，
    串口不应出现 `task_wdt` / `lv_inv_area` 卡死。
+8. **睡眠定时与槽位独立**（2026-11）：
+   - 关掉「开机默认开启睡眠定时器」→ 开机日志 `boot: sleep timer off`，定时不启动；
+   - 切槽位日志 `sleep timer untouched by slot switch (def_on=…, 45 min, active=…)`，
+     正在跑的定时剩余时间**不变**、没开的定时**不会**被打开；
+   - 时长在任一槽位下修改（设置页睡眠格子点击会写入全局 `sleepdef`），切到别的
+     槽位后仍是该时长；`SAVE N saved to NVS` 日志里不再出现 `sleep=`。
 
 ### 踩坑提醒
 
@@ -203,6 +222,10 @@ config_store（core/storage/config_store.c）
   本身还会直接操作 Toast/音量/EQ，同样要在 LVGL 上下文中调用。
 - **改 `config_slot_blob_t` 布局要 bump `SLOT_BLOB_VERSION`**，否则老 blob 会被按新
   布局解释（读出垃圾）。bump 后老槽位自动变"空槽位"，属于可接受的降级。
+  （2026-11 睡眠时长移出槽位时**没有** bump：字段改为 `reserved_sleep` 占位，
+  结构体大小/偏移完全不变，老 blob 照常读出、该字段被忽略。）
+- **不要在槽位切换里碰睡眠定时**：睡眠定时（时长 + 开关）是全局配置，`config_slots_switch`
+  只应用音量/EQ/播放器。历史 bug 与解耦方案见 §九。
 - **⚠ 本功能抬高 NVS 写密度后暴露了一个潜伏崩溃**（切槽位 → NVS 写 flash 期间命中
   `performance_monitor` 的 `ESP_TIMER_ISR` 采样回调 → `Cache error` panic 重启）：
   根因是该回调没进 IRAM，而 systimer 中断带 `ESP_INTR_FLAG_IRAM`、**关缓存期间
@@ -312,3 +335,59 @@ IDLE0 得不到调度 → task_wdt。
 LVGL 任务上下文里统一调用（`config_notify_timer_cb`）。
 延迟只影响"数值/文字标签刷新"，音量/EQ/亮度等硬件应用仍由调用方立即执行。
 因此：**不要再把回调改回 `set_xxx` 内同步执行**，也不要在 `set_xxx` 里调任何 LVGL API。
+
+## 八、延迟派发的边界：拖动类控件必须"就地刷新"（2026-11-11 修复）
+
+**现象**：下拉控制中心拖动亮度/音量竖条时"画面一顿一顿"，但拖动事件间隔（32~35ms）、
+"应用亮度"耗时（50~230µs）、刷屏传输（1.3~1.5ms/块）全都正常——**没有任何一处卡住**。
+
+**根因**：延迟派发的 100ms 周期同时把**拖动控件自己的视觉反馈**也限速了。
+v0.9 时代 `set_xxx` 同步回调 → 竖条在每个拖动事件（30Hz）里重画；改成 §七 的
+100ms 派发后，`notif_apply_brightness()` 只写内存 + 写硬件，竖条由 100ms 后的
+`notif_config_changed_cb` 才更新 → **手指 30Hz 走、进度条 10Hz 跳**，观感就是掉帧。
+（这也是为什么"回退 LVGL/IDF 版本"没能修好它：延迟派发本身是保留的特性。）
+
+**修复**（`ui/notification_panel.c`）：`notif_apply_brightness()` / `notif_apply_volume()`
+在改完内存与硬件之后，**立即调用本模块的 `notif_refresh_brightness_ui()` /
+`notif_refresh_volume_ui()` 刷新自己的竖条/文字**。事件回调本来就在 LVGL 任务里、
+持着锁，直接改本地控件是安全的；100ms 派发那一路照旧跑（值没变则不产生重绘，幂等）。
+
+**通用规则**（写新控件时照着办）：
+1. **拖动/连续调节的控件**（竖条、滑块、进度条的"手指反馈"）**不能**依赖延迟派发，
+   必须在事件回调里就地刷新自己；
+2. 延迟派发只负责**其它模块**的显示同步（状态栏、设置页文字等），它们 100ms 更新
+   一次完全够用；
+3. 判断"是不是被限速了"最快的办法：看拖动事件的间隔（≈33ms 正常）与**画面**更新
+   次数是否对得上——对不上就是刷新被合并了，而不是性能不够。
+
+## 九、睡眠定时与配置槽位解耦（2026-11-11，务必别回退）
+
+**历史 bug**：即使设置里关掉了「开机默认开启睡眠定时器」，睡眠定时器仍会在启动时
+自动开启（切一次配置槽位也会）。两个根因：
+
+1. `main.c` 开机：`sleep_timer_boot_autostart_min()` 返回 0（开关关闭）时，else
+   分支仍按槽位里存的 `sleep_default_min` 调 `sleep_timer_set()`；
+2. `config_slots_switch()`：无条件 `sleep_timer_set(槽位时长)`。
+
+**根因的根因**：睡眠定时时长被当成"槽位字段"。它的语义是**全局档位**——
+"下次开启时用多久"——而不是"这个配置下定时必须开着"。
+
+**改法（现状，按此维护）**：
+
+- `sleep_default_min` 从 `s_live`（可切换字段）移到**全局** `static uint32_t
+  s_sleep_default_min`，NVS 键 `sleepdef`（与 `sleepdefon` 成对），
+  `set_sleep_default_min()` 直接 `cfg_write_u32(KEY_SLEEP_DEFAULT)`，不再进槽位 blob；
+- `config_slot_blob_t` 里原字段改为 `reserved_sleep`（4B 占位）：**布局/大小/版本
+  不变**，老槽位照常读出、该值被忽略（升级不丢槽位）；
+- `config_slots_switch()` **完全不碰**睡眠定时（不 set、也不 cancel），只打一条
+  `sleep timer untouched by slot switch` 日志；
+- `main.c` 开机只走 `sleep_timer_boot_autostart_min()`（`sleep_def_on` 为门），
+  开关关闭时不启动。
+
+**结论**：睡眠定时只由三处改变——设置页睡眠格子、通知栏睡眠开关、开机默认开启；
+任何"切配置/重启"路径都不得顺带打开它。
+
+**同属"全局、不进槽位"的还有自动息屏超时**（`screenoff`，设置菜单 → 屏幕自动息屏）：
+它一直就在不可切换字段里（`config_store.c` 的 `s_screen_off`，直接 `cfg_write_u32`），
+切换 SAVE1~SAVE4 不会改变它，也不经过槽位 blob——新增字段时照这个标准分类即可。
+

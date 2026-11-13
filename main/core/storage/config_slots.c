@@ -52,8 +52,14 @@ void config_slots_switch(uint32_t idx)
         eq_apply(NULL);
     }
 
-    /* 6. 睡眠定时：按槽位里存的**原时长**重新开表（0 = 关闭） */
-    sleep_timer_set(config_store_get_sleep_default_min());
+    /* 6. 睡眠定时：**不属于配置槽位**（2026-11 起时长与开关都是全局键），
+          切槽位既不改变它的时长/开关，也不重新开表——正在跑的定时继续跑，
+          没开的定时不会因为切配置被打开。需要调整只在设置页/通知栏操作。 */
+    ESP_LOGI(TAG, "sleep timer untouched by slot switch (def_on=%d, %u min, "
+                  "active=%d)",
+             (int)config_store_get_sleep_def_on(),
+             (unsigned)config_store_get_sleep_default_min(),
+             (int)sleep_timer_is_active());
 
     /* 7. 播放器：循环 / 随机 / 当前歌曲（越界回退第一首）并自动播放。
           控制器在 Core0 控制任务上下文原子执行，避免与切歌命令抢时序。 */
@@ -66,11 +72,9 @@ void config_slots_switch(uint32_t idx)
                                      snap.shuffle, snap.shuffle_pos_valid,
                                      snap.shuffle_pos, song_idx);
 
-    ESP_LOGI(TAG, "switched to SAVE%u: vol=%u loop=%u shuffle=%d sleep=%u min "
-                  "song=%u eq=%s",
+    ESP_LOGI(TAG, "switched to SAVE%u: vol=%u loop=%u shuffle=%d song=%u eq=%s",
              (unsigned)(idx + 1u), (unsigned)config_store_get_volume(),
              (unsigned)snap.loop_mode, (int)snap.shuffle,
-             (unsigned)config_store_get_sleep_default_min(),
              (unsigned)song_idx, eq_name[0] ? eq_name : "none");
 
     /* 8. 提示用户：只报槽位编号（列表名可能很长，见第 3 步说明） */

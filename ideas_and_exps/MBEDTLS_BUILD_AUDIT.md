@@ -4,6 +4,11 @@
 >
 > **调研方式：纯只读**（IDF 源码 + 上次构建留下的产物）。没有跑计时构建、没有改任何文件，
 > 所以本文的时间类数字是**编译单元占比**，不是实测墙钟。证据全部可用本文 §7 的脚本复现。
+>
+> ✅ **2026-11-14 已按 §5-B / §5-C 落地**：`COMPONENTS` 白名单进了根 `CMakeLists.txt`，
+> `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE` / `CONFIG_MBEDTLS_PKCS7_C` 已关闭，并做了真机回归。
+> **实测数据、最终白名单、为什么冷编译墙钟没测，全在 §9**（§1~§7 保留调研原文不改）。
+
 
 ## 1. 结论摘要
 
@@ -233,10 +238,86 @@ python -c "import json;d=json.load(open('build/debug/project_description.json'))
 
 ## 8. 未验证 / 待办
 
-- [ ] `COMPONENTS` 草案清单**未经构建验证**（本次只读，且当时另一 agent 在跑构建）。
-- [ ] 剪裁后的编译单元数（估算 ≈1 195）与冷编译墙钟收益**需实测**。
-- [ ] 剪裁后必须回归：SD/FATFS 挂载、NVS 读写（配置槽位）、字体分区读取、
-      音频（I2S/CS43131）、触摸三型号识别、OTA/分区表相关路径。
+- [x] `COMPONENTS` 清单**已构建验证并落地**（2026-11-14，见 §9）——草案与最终清单基本一致，
+      一次就编过，没有出现"缺头文件"的迭代（因为清单是从 main/组件的实际 `#include`
+      反推的，而不是靠编译报错试）。
+- [ ] 剪裁后的编译单元数（估算 ≈1 195）与冷编译墙钟收益**需实测** ——
+      编译单元数**已实测 1235**；**冷编译墙钟未实测**（见 §9.3 的原因）。
+- [x] 剪裁后必须回归：SD/FATFS 挂载、NVS 读写（配置槽位）、字体分区读取、
+      音频（I2S/CS43131）、触摸三型号识别、OTA/分区表相关路径 —— 见 §9.4。
 - [ ] 若哪天真的要摘 mbedtls，先确认 `bootloader_sha.c` 改 ROM SHA 后
       `app_update` / `esp_image_format` 的校验链有对应用例（目前项目不做 OTA，风险集中在
       "以后加 OTA 时要重做一遍"）。
+
+## 9. 落地记录（2026-11-14）
+
+### 9.1 最终 `COMPONENTS` 白名单
+
+写在根 [CMakeLists.txt](../CMakeLists.txt) 的 `include(project.cmake)` **之前**，
+注释里写清了三个坑（不能只写 main / 本地 4 个组件必须显式列 / 新增依赖漏写会编译报错）：
+
+```
+main
+esp_lcd_qspi_amoled esp_lcd_touch_cst816 esp_lcd_touch_cst820 esp_lcd_touch_chsc6417
+esp_lcd esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_spi esp_driver_sdmmc
+esp_driver_ppa esp_mm esp_partition esp_pm esp_timer esp_ringbuf
+nvs_flash fatfs vfs sdmmc
+```
+
+推导方法：把 `main/` 与 4 个本地组件里**所有 `#include` 的顶层头文件**列出来，
+反查每个头文件属于哪个 IDF 组件。`freertos / heap / log / soc / hal / esp_hw_support /
+esp_rom / esp_common / esp_system / esp_stdio / cxx / esp_libc` 是 IDF 的
+"common requirements"（自动加给每个组件），**不用列**。
+`esp_adc` / `esp_psram` / `spiffs` 一度在草案里，核对后发现本工程并不直接 include 它们的头
+（电池是 AXP2101 占位实现、PSRAM 走 `heap_caps_*`），依赖闭包会自动带上 `esp_psram`。
+
+⚠ **`esp_driver_*` 必须逐个列**：IDF 6.0 起旧 `driver` 组件不再**公共**依赖 18 个
+`esp_driver_*` 子组件（只在 `PRIV_REQUIRES` 里），所以 `driver` 转发不了
+`driver/gpio.h` 之类的头文件。反过来旧 `driver` 组件本身仍会被
+`espressif/esp_lcd_touch` 的 `REQUIRES "driver"` 拉进构建（见 `patches/esp_lcd_touch_deps/`）。
+
+### 9.2 实测结果（结构指标，确定性可比）
+
+| 指标 | 剪裁前 | 剪裁后 | 变化 |
+|---|---|---|---|
+| `build_components`（project_description.json） | **155** | **89** | −42.6 % |
+| 编译单元（compile_commands.json） | **1 665** | **1 235** | **−25.8 %** |
+| 其中 mbedtls | 153 | **152** | 摘不掉（§3） |
+| 其中 lvgl | 527 | 530 | 不变（托管组件，含 PPA 绘制单元） |
+| 移出构建的**大件** | wifi / bt / lwip(91) / wpa_supplicant(84) / esp_http_client / esp_https_ota / protocomm / openthread / unity / cmock | — | 全不编 |
+
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE` / `CONFIG_MBEDTLS_PKCS7_C` 关闭后，
+`esp_crt_bundle.c` 与 `pkcs7.c` 不再编译，`gen_crt_bundle.py` 也不再生成证书包
+（已核对生成的 `build/debug/sdkconfig` 里两项均为 `is not set`）。
+
+### 9.3 冷编译墙钟：**没测**（为什么）
+
+本机 `ccache` 已有 3.2 GiB / 77 % 命中率，要得到"同条件冷编译"的对照数必须先
+`ccache -C`；而该命令在本机（沙箱内）会卡住十几分钟不出结果（`ccache -z` 同样卡），
+用户 2026-11-14 决定**跳过这项实测**，改用 §9.2 的确定性结构指标作为验收口径。
+想自己量的话：`ccache -C` → `idfc fullclean` → `idfc build`，做两次（剪裁开/关）。
+
+### 9.4 真机回归（COM3，debug 构建）
+
+一次烧录跑通，逐项对上 §8 的清单：
+
+| 项 | 证据（开机日志） |
+|---|---|
+| SD/FATFS + exFAT | `sd_card: SD card mounted at /sdcard, listing root: …`（含 musics / playlists） |
+| 播放列表分区 mmap | `pldata: pldata mapped to 0x405e0000` + `playlist: dirs=9 songs=123` |
+| NVS 配置 | `config_store: config loaded …` 正常，无默认值回退 |
+| font 分区 / NPF1 | 字体挂载正常，UI 中文完整（无方框） |
+| 音频 I2S + CS43131 | `mp3_player: mp3: 44100 Hz, 2 ch` + `cs43131: sample rate -> 44100 Hz` |
+| 触摸 | `CST820: LCD touch panel create success` + `touch: Touch controller ready` |
+| LVGL / 封面解码 | 5 页 UI 建完 + `cover_jpeg: pixel 423200 B -> PSRAM` |
+| 启动收尾 | `app_main: App started`，无断言 / 无看门狗 |
+
+### 9.5 维护提醒
+
+- **新增任何组件依赖，忘了写进 `COMPONENTS` 就会编译报错**（报"找不到头文件"），
+  按提示补一行即可；这是这份白名单位一的长期成本。
+- 那个 `espressif/esp_lcd_sh8601` 依赖已经**没有代码引用**（本项目显示驱动是本地组件
+  `esp_lcd_qspi_amoled`），但仍在 `main/idf_component.yml` 里、占 1 个编译单元。
+  本次**未清理**（超出本条范围）；要清就删那条 `dependencies` 项 + 让组件管理器
+  重新生成 `dependencies.lock`，并确认 `esp_lcd` 仍由其它路径提供。
+

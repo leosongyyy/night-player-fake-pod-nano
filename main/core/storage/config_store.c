@@ -43,8 +43,10 @@ static const char *TAG = "config_store";
 /* ---------- 配置槽位（SAVE1~SAVE4，见 config_store.h 文件头"配置槽位"） ----------
    ⚠ 上面那批"可切换字段"的旧全局键**保留不删**：活跃槽位从未保存过时仍读写
    它们（升级兼容，见 s_slot_active）；首次保存槽位后全局键冻结，后续以槽位为准。
-   槽位内字段（音量/循环/随机/随机位置/睡眠时长/EQ/最后歌曲）不再单独写全局键，
-   避免一次 set 两次 nvs_commit（每槽位整块 blob 一次写完）。 */
+   槽位内字段（音量/循环/随机/随机位置/EQ/最后歌曲）不再单独写全局键，
+   避免一次 set 两次 nvs_commit（每槽位整块 blob 一次写完）。
+   ⚠ 睡眠定时（时长 sleepdef + 开关 sleepdefon）**不进槽位**，始终读写全局键，
+   与"配置插槽"互相独立（2026-11 调整）。 */
 #define KEY_ACTIVE_SLOT      "slot_active"                   /* 活跃槽位下标 */
 #define SLOT_KEY_PREFIX      "slot"                          /* 槽位 blob 前缀：slot0..slot3 */
 #define SLOT_BLOB_VERSION    1u                              /* 槽位 blob 结构版本（布局改了要 +1，
@@ -69,7 +71,6 @@ typedef struct {
     bool     shuffle;               /* 随机播放开关 */
     bool     shuf_pos_valid;        /* 随机序列位置是否有记录 */
     uint64_t shuf_pos;              /* 随机序列逻辑位置（uint64 无限序列） */
-    uint32_t sleep_default_min;     /* 睡眠定时时长（分钟；0=未定时） */
     bool     last_valid;            /* 是否有"最后播放歌曲"记录 */
     uint32_t last_global;           /* 最后播放歌曲全局下标 */
     bool     eq_valid;              /* 是否选择了 EQ 预设 */
@@ -90,7 +91,6 @@ static config_live_t s_live = {
     .shuffle           = false,
     .shuf_pos_valid    = false,
     .shuf_pos          = 0,
-    .sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN,
     .last_valid        = false,
     .last_global       = 0,
     .eq_valid          = false,
@@ -101,9 +101,15 @@ static config_live_t s_live = {
 /* ========== 不可切换字段（全局共用一份，不随配置槽位切换） ========== */
 
 static uint8_t  s_brightness  = CONFIG_STORE_BRIGHTNESS_DEFAULT;
+/* 睡眠定时（2026-11 起与配置槽位**互相独立**，全局只有一份）：
+   - s_sleep_default_min：记忆的定时时长（分钟，0=无默认），是"开启时用的档位"；
+   - s_sleep_def_on：开机默认开启的总开关。
+   两者都不进槽位 blob，切换 SAVE1~SAVE4 不会改变睡眠定时的时长/开关。 */
+static uint32_t s_sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
 static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
-static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;
+static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;   /* 息屏超时：全局键
+                                                                     screenoff，与配置槽位无关 */
 /* 虚拟 ClickWheel 速滑按钮（默认开）：设置菜单 →「虚拟 ClickWheel 选项」子页
    切换。三项配套配置：开关 / 滑动方向（正常=顺时针向下滚，反转=顺时针向上滚）/
    速度档位（普通 ×1.00 / 快速 ×0.75 / 极速 ×0.50，点击循环），均立即生效 */
@@ -152,7 +158,11 @@ static int64_t       s_volume_dirty_us = 0;   /* 最后一次音量修改时刻�
 typedef struct {
     uint32_t version;                       /* = SLOT_BLOB_VERSION，版本不符视为空槽位 */
     uint32_t last_global;                   /* 最后播放歌曲全局下标 */
-    uint32_t sleep_default_min;             /* 睡眠定时时长（分钟） */
+    uint32_t reserved_sleep;                /* 原 sleep_default_min 字段：睡眠定时时长
+                                               2026-11 起不再属于槽位（改用全局键
+                                               sleepdef），此 4 字节仅作占位以保持
+                                               blob 布局/大小/版本不变——老槽位照常
+                                               读出（该字段被忽略），不会因升级丢槽位 */
     uint64_t shuffle_pos;                   /* 随机序列逻辑位置 */
     uint8_t  volume;                        /* 音量档位 0~30 */
     uint8_t  loop_mode;                     /* 循环模式 */
@@ -210,7 +220,6 @@ static void slot_pack(config_slot_blob_t *b)
     memset(b, 0, sizeof(*b));
     b->version           = SLOT_BLOB_VERSION;
     b->last_global       = s_live.last_global;
-    b->sleep_default_min = s_live.sleep_default_min;
     b->shuffle_pos       = s_live.shuf_pos;
     b->volume            = s_live.volume;
     b->loop_mode         = s_live.loop_mode;
@@ -230,7 +239,6 @@ static void slot_pack(config_slot_blob_t *b)
 static void slot_unpack(const config_slot_blob_t *b)
 {
     s_live.last_global       = b->last_global;
-    s_live.sleep_default_min = b->sleep_default_min;
     s_live.shuf_pos          = b->shuffle_pos;
     s_live.volume            = b->volume;
     s_live.loop_mode         = b->loop_mode;
@@ -265,7 +273,6 @@ static void slot_apply_defaults(void)
     s_live.shuffle           = false;
     s_live.shuf_pos_valid    = false;
     s_live.shuf_pos          = 0;
-    s_live.sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
     s_live.last_valid        = false;
     s_live.last_global       = 0;
     s_live.eq_valid          = false;
@@ -498,7 +505,6 @@ static void slot_persist_live(void)
         cfg_set_u8(KEY_VOLUME, s_live.volume);
         cfg_set_u8(KEY_LOOP_MODE, s_live.loop_mode);
         cfg_set_u8(KEY_SHUFFLE, s_live.shuffle ? 1u : 0u);
-        cfg_set_u32(KEY_SLEEP_DEFAULT, s_live.sleep_default_min);
         cfg_set_u32(KEY_LAST_GLOBAL, s_live.last_global);
         /* ⚠ 秒数位置不保存（NightPlayer 机制：只记"当前歌曲"，开机从歌
            曲开头开始）——旧键 last_pos 保持不写，其历史值为 0 */
@@ -530,11 +536,10 @@ static void slot_load_into_live(uint32_t idx, bool mark_saved, const char *log_w
     if (slot_cache_load(idx)) {
         slot_unpack(&s_slot_cache[idx]);
         s_slot_active_saved = mark_saved;
-        ESP_LOGI(TAG, "%s: SAVE%u -> live (vol=%u loop=%u shuffle=%d sleep=%u min "
+        ESP_LOGI(TAG, "%s: SAVE%u -> live (vol=%u loop=%u shuffle=%d "
                       "song=%s(%u))",
                  log_why, (unsigned)(idx + 1u), (unsigned)s_live.volume,
                  (unsigned)s_live.loop_mode, (int)s_live.shuffle,
-                 (unsigned)s_live.sleep_default_min,
                  s_live.last_valid ? "yes" : "no", (unsigned)s_live.last_global);
     } else {
         slot_apply_defaults();
@@ -627,8 +632,10 @@ void config_store_init(void)
         s_live.shuf_pos_valid = false;
         s_live.shuf_pos = 0;
     }
-    if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_live.sleep_default_min) != ESP_OK) {
-        s_live.sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
+    /* 睡眠定时时长：全局键，与配置槽位无关（切槽位不改变它）。
+       ⚠ 旧版本的槽位 blob 里也存过一份该值，现已忽略（见 reserved_sleep）。 */
+    if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_sleep_default_min) != ESP_OK) {
+        s_sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
     }
     uint8_t sleep_def_on = 0;
     if (nvs_get_u8(s_nvs, KEY_SLEEP_DEF_ON, &sleep_def_on) != ESP_OK) {
@@ -746,7 +753,7 @@ void config_store_init(void)
                   "batt_log=%d(%u min) touch_test=%d was_playing=%d last=%s(global=%u) shuf_pos=%s eq=%s(%u bands) slot=%u(%s)",
              (unsigned)s_live.volume, (unsigned)s_brightness,
              (unsigned)s_live.loop_mode,
-             (int)s_live.shuffle, (unsigned)s_live.sleep_default_min,
+             (int)s_live.shuffle, (unsigned)s_sleep_default_min,
              (int)s_sleep_def_on,
              (int)s_sleep_awake, (unsigned)s_screen_off,
              (int)s_click_wheel, (int)s_cw_reverse, (unsigned)s_cw_speed,
@@ -801,10 +808,9 @@ void config_store_load_active_slot(void)
         slot_unpack(&s_slot_cache[idx]);
         s_slot_active_saved = true;
         ESP_LOGI(TAG, "active slot %u restored (vol=%u loop=%u shuffle=%d "
-                      "sleep=%u min last=%s(%u) eq=%s)",
+                      "last=%s(%u) eq=%s)",
                  (unsigned)(idx + 1u), (unsigned)s_live.volume,
                  (unsigned)s_live.loop_mode, (int)s_live.shuffle,
-                 (unsigned)s_live.sleep_default_min,
                  s_live.last_valid ? "yes" : "no", (unsigned)s_live.last_global,
                  s_live.eq_valid ? s_live.eq_name : "none");
     } else {
@@ -854,7 +860,6 @@ void config_store_get_slot_snapshot(uint32_t idx, config_store_slot_snapshot_t *
     out->shuffle            = (b->shuffle != 0);
     out->shuffle_pos_valid  = (b->shuffle_pos_valid != 0);
     out->shuffle_pos        = b->shuffle_pos;
-    out->sleep_default_min  = b->sleep_default_min;
     out->eq_valid           = (b->eq_valid != 0) && (b->eq_band_count > 0) &&
                               (b->eq_band_count <= EQ_MAX_BANDS);
     snprintf(out->list_name, sizeof(out->list_name), "%s", b->last_list_name);
@@ -879,11 +884,11 @@ static void slot_save_active(bool commit)
     slot_pack(&b);
     slot_cache_store(s_slot_active, &b, commit);
     s_slot_active_saved = true;
-    ESP_LOGI(TAG, "SAVE%u saved to NVS: vol=%u loop=%u shuffle=%d sleep=%u min "
+    ESP_LOGI(TAG, "SAVE%u saved to NVS: vol=%u loop=%u shuffle=%d "
                   "last=%u(%s) list=%s eq=%s",
              (unsigned)(s_slot_active + 1u), (unsigned)b.volume,
              (unsigned)b.loop_mode, (int)b.shuffle,
-             (unsigned)b.sleep_default_min, (unsigned)b.last_global,
+             (unsigned)b.last_global,
              b.last_valid ? "valid" : "none",
              b.last_list_name[0] ? b.last_list_name : "-",
              b.eq_valid ? b.eq_name : "none");
@@ -969,7 +974,7 @@ bool config_store_get_shuffle_pos(uint64_t *pos)
 
 uint32_t config_store_get_sleep_default_min(void)
 {
-    return s_live.sleep_default_min;
+    return s_sleep_default_min;
 }
 
 bool config_store_get_sleep_def_on(void)
@@ -1183,11 +1188,12 @@ void config_store_set_shuffle_pos(uint64_t pos)
 
 void config_store_set_sleep_default_min(uint32_t minutes)
 {
-    if (minutes == s_live.sleep_default_min) {
+    if (minutes == s_sleep_default_min) {
         return;
     }
-    s_live.sleep_default_min = minutes;
-    slot_persist_live();
+    s_sleep_default_min = minutes;
+    /* 全局键（不进槽位 blob）：睡眠定时时长与配置槽位互相独立 */
+    cfg_write_u32(KEY_SLEEP_DEFAULT, minutes);
     config_notify();
 }
 

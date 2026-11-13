@@ -1673,4 +1673,88 @@ reconfigure 指引改为 `build --reconfigure`，端口确认改用 `idfc ports`
 | `status` 扩展成"多构建状态仪表盘"（各 `build/<cfg>` 是否存在 / sdkconfig 是否过期 / 产物是否比源码新） | 用户在 2026-09-16 直接删除了该条；实际使用时 `build --dry-run` 已经回答了同一问题 |
 | 两处小瑕疵：`# Executing` 回显行末尾多一个空格；`ports` 过滤蓝牙串口后仍说"当前系统上还没有连接任何串口" | 都是文案级瑕疵、不影响使用，不值得为此再动一次工具链 |
 
+## 48. 拖动类控件被 100ms 延迟派发限速（从 legacy_s3 移植）✅ 已完成（2026-11-14）
+
+> 来源：`FUTURE_PLAN.md` 第 48 点（2026-11-11 在 `legacy_s3` 上定位并修好，
+> commit `dffc1a8`；本次原样移植到 master）。完整调查过程见
+> **`CONFIG_SLOTS.md` §八**，这里只记改动与结论。
+
+**根因**：`config_store` 的变更通知是 100ms 延迟派发的（§七 bug B 的修法），
+而 `notif_apply_brightness()` / `notif_apply_volume()` 只写内存 + 写硬件，
+**竖条本身要等 100ms 后的 `notif_config_changed_cb` 才更新** → 手指 30Hz 移动、
+进度条 10Hz 跳格。v0.9 时代 `set_xxx` 同步回调，所以没有这个问题；
+与 LVGL 8.4/9.4、IDF 5.5/6.1 的版本组合无关（"回退版本"修不好它）。
+
+**改动**（`main/ui/notification_panel.c`，14 行）：
+`notif_apply_brightness()` / `notif_apply_volume()` 在改完内存与硬件后
+**立即调用本模块的 refresh 接口刷新自己的竖条/文字**；100ms 派发那一路保留
+（值未变 → 不产生重绘，幂等）。事件回调本来就在 LVGL 任务上下文、已持锁。
+
+**master 侧顺带核实**：`ui/now_playing.c` 的进度条 seek 走 `lv_slider` 自身的
+拖动与自绘填充（值变化由 LVGL 内部在 PRESSING 里直接重绘），**不经过
+config_store 回调**，因此没有这个限速问题——无需改动。
+
+## 49. 睡眠定时器自动开启 bug + 睡眠定时与配置槽位解耦（从 legacy_s3 移植）✅ 已完成（2026-11-14）
+
+> 来源：`FUTURE_PLAN.md` 第 49 点（`legacy_s3` commit `4eb04c6`）。
+> 数据模型与运行时应用的完整说明见 **`CONFIG_SLOTS.md` §九**。
+
+**根因**：睡眠定时时长 `sleep_default_min` 被当成"配置槽位字段"，于是两条
+自动路径把"记忆的时长"误当成"恢复定时的指令"：`main.c` 开机 else 分支、
+`config_slots_switch()` 无条件 `sleep_timer_set(槽位时长)`。
+
+**改动（三处，缺一不可）**：
+
+1. `main/main.c`：删掉 else 分支，只保留 `sleep_timer_boot_autostart_min() > 0`
+   时启动；开关关闭时打 `boot: sleep timer off (开机默认开启已关闭)`；
+2. `core/storage/config_slots.c`：切槽位**完全不碰**睡眠定时（不 set 也不 cancel），
+   只打一条 `sleep timer untouched by slot switch (def_on=…, N min, active=…)`；
+3. `core/storage/config_store.c/.h`：`sleep_default_min` 移出 `config_live_t`，
+   改为全局 `s_sleep_default_min` + 全局键 `sleepdef`；槽位 blob 原字段改名
+   `reserved_sleep` **占位 4 字节**（布局/大小/`SLOT_BLOB_VERSION` 全不变 →
+   老槽位照常读出、该值被忽略，升级不丢槽位）；
+   `config_store_slot_snapshot_t` 去掉该字段。
+
+**改完的语义**：睡眠定时只由三处改变——设置页睡眠格子、通知栏睡眠开关、
+开机默认开启；切 SAVE1~SAVE4 既不改时长/开关，也不重开表。
+
+**顺带核实**：息屏超时 `screen_off_s` 本来就是全局键（`screenoff`，不在槽位 blob
+里），master 与 legacy_s3 一致，未动。
+
+**验证（master 真机，COM3）**：开机日志 `sleep_timer: sleep timer ready (off by default)`
+→ `app_main: boot: sleep timer off (开机默认开启已关闭)`，与 legacy_s3 一致；
+切槽位日志待下次交互复测（代码与 legacy_s3 逐字相同）。
+
+## 50. 构建裁剪：COMPONENTS 白名单 + mbedtls 证书包/PKCS7 关闭 ✅ 已完成（2026-11-14）
+
+> 来源：`FUTURE_PLAN.md` 第 50 点 + `MBEDTLS_BUILD_AUDIT.md`（只读调研）。
+> 本次按该文档 §5-B / §5-C 落地，实测数据补在 `MBEDTLS_BUILD_AUDIT.md` §9。
+
+**做了什么**：
+
+1. **`CMakeLists.txt` 增加 `set(COMPONENTS …)` 白名单**（写在 `include(project.cmake)`
+   之前）：IDF 默认编译 `COMPONENT_DIRS` 下**全部**组件，本工程实测 155 个；
+   白名单只列"本项目源码直接 `#include` 头文件的组件" + 仓库自带的 4 个本地组件，
+   其余由 IDF 自动补依赖闭包与 common requirements。
+   **结果：155 → 89 个组件、1665 → 1235 个编译单元（−25.8%）**，
+   wifi / bt / lwip / wpa_supplicant / esp_http_client / esp_https_ota /
+   protocomm / openthread / unity / cmock 全部不再进构建。
+2. **`sdkconfig.defaults`**：`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE` 与
+   `CONFIG_MBEDTLS_PKCS7_C` 关闭（不校验任何证书、不解析 PKCS#7）。
+
+**没做 / 做不到的**：mbedtls **摘不掉**（`bootloader_support` 的
+`bootloader_sha.c` 用 PSA 算 SHA-256；`nvs_flash` 无条件编
+`nvs_encrypted_partition.cpp`，与 `CONFIG_NVS_ENCRYPTION` 无关），它仍是 152 个
+编译单元；要摘就得改 IDF 源码 + 换回 ROM SHA，性价比为负（`MBEDTLS_BUILD_AUDIT.md` §5-A）。
+
+**冷编译墙钟收益**：**未实测**（用户 2026-11-14 决定跳过）。原因是本机 `ccache`
+有 3.2 GiB / 77% 命中率，而 `ccache -C` / `-z` 在该沙箱里会卡死，
+拿不到"同条件冷编译"的对照数；改用**确定性的结构指标**（组件数、编译单元数）
+作为验收口径。想自己量：`ccache -C` 后 `idfc fullclean` + `idfc build` 各一次。
+
+**真机回归（COM3，debug）**：开机到 `App started` 全程正常，且逐项覆盖——
+SD 卡挂载 + 目录列举（fatfs/exFAT）、播放列表 mmap + 123 首加载（esp_partition）、
+NVS 配置读取、NPF1 字体分区挂载、音频（I2S + CS43131 44100Hz）、CST820 触摸识别、
+LVGL 5 页 UI + 封面解码、`boot: sleep timer off`。无断言 / 无看门狗。
+
 
