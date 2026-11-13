@@ -260,7 +260,9 @@ static void lvgl_port_task(void *arg)
 
         /* 每 2 秒汇总一次刷屏占用：平均每次 QSPI 传输时长 + 占空比。
            占空比高（>70%）说明已经撞 QSPI 带宽天花板，优化绘制代码没用；
-           占空比低而帧率上不去，才是 CPU（渲染/布局）瓶颈。 */
+           占空比低而帧率上不去，才是 CPU（渲染/布局）瓶颈。
+           只在 debug（PERFORMANCE_MONITOR）下打印，正式版不需要这条日志。 */
+#if CONFIG_PERFORMANCE_MONITOR
         int64_t now_us = esp_timer_get_time();
         if (now_us - s_last_report_us >= 2000000) {
             uint32_t cnt = s_flush_cnt;
@@ -272,6 +274,7 @@ static void lvgl_port_task(void *arg)
                      (unsigned)cnt, (unsigned)(cnt ? tot / cnt : 0),
                      (unsigned)(tot / 1000), (unsigned)(tot / 20000));
         }
+#endif
 
         vTaskDelay(pdMS_TO_TICKS(task_delay_ms));
     }
