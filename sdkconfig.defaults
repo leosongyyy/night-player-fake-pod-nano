@@ -176,6 +176,29 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_18=y
 CONFIG_LV_FONT_FMT_TXT_LARGE=y
 
 # ---------------------------------------------------------------------------
+# Espressif PPA 2D 加速（ESP32-S31，2026-11 实验中）
+# ---------------------------------------------------------------------------
+# LVGL 9.4 自带 PPA 绘制单元（src/draw/espressif/ppa，LV_USE_PPA）。PPA 只处理
+# **不透明、无圆角、无渐变**的 FILL；文字仍由 CPU 光栅化，但列表/卡片的底色
+# 填充量很大，交给 PPA 可以给 CPU 腾出时间。
+# ⚠ 上游 9.4 的 FILL 实现只适用于"整屏缓冲"：它把目标块固定画在 buffer 左上角
+#   （block_offset=0、pic_w/h=块宽高），局部刷新（PARTIAL）下每一块都会错位，
+#   表现为每 46 行（= 一个绘制缓冲块）一条黑线。本项目用 patches/lvgl_ppa_partial
+#   在构建期修正 block_offset 与 pic_w/h，并改用阻塞模式（见 main/CMakeLists.txt）。
+# ⚠ PPA 要求 64B 对齐，lv_draw_ppa_private.h 是编译期 #error 检查。
+CONFIG_LV_ATTRIBUTE_MEM_ALIGN_SIZE=64
+CONFIG_LV_DRAW_BUF_ALIGN=64
+# ⚠ 2026-11 实测结论（S31）：PPA **FILL** 每次约 285~330µs / 1.5 万像素
+#   （≈50M px/s），比 320MHz CPU 的软件填充慢一个数量级；给列表/卡片底色
+#   开 PPA 会让滑动帧率明显下降。PPA 的优势在 blend（alpha 合成）与 SRM
+#   （缩放/旋转），不是纯色填充，因此这里先关闭 PPA draw unit，只保留
+#   64B 对齐分配器修复（对缓存/未来 PPA 都有益）。
+#   后续若要接官方那套 “lvgl blend handle”，应走自定义 blend handler，
+#   而不是 LVGL 9.4 内置的 PPA draw unit（其 FILL 实现只适用于整屏缓冲）。
+# CONFIG_LV_USE_PPA is not set
+# CONFIG_LV_USE_PPA_IMG is not set
+
+# ---------------------------------------------------------------------------
 # TTF 矢量字体（FreeType，2026-10 字体迁移）
 # ---------------------------------------------------------------------------
 # 界面字体不再内嵌位图，改为从 font 分区（partitions.csv，裸二进制 4MiB）

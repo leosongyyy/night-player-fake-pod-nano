@@ -51,10 +51,37 @@
 
 static const char *TAG = "lvgl_mem";
 
-/* 首选 PSRAM（8MB，充裕）；PSRAM 无 8BIT 能力标记则不可用，一并写上 */
+/* 首选 PSRAM（16MB，充裕）；PSRAM 无 8BIT 能力标记则不可用，一并写上 */
 #define LVGL_MEM_PREFER   (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 /* 兜底：内部 RAM（8BIT，不要求 DMA —— LVGL 对象不需要 DMA 能力） */
 #define LVGL_MEM_FALLBACK (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+
+/* ⚠ PPA（LV_USE_PPA）要求 LVGL 的**绘制/图层缓冲**按 64B（= L1 cache line）
+   对齐；LVGL 9.4 的 lv_draw_buf_init() 只检查、不纠正，不满足时会打印
+   "Data is not aligned, ignored" 并继续用未对齐指针，PPA 填充/混合会错位。
+   我们的自定义分配器原来只保证堆的默认对齐（4/8B），所以这里把**所有**
+   LVGL 分配统一按 64B 对齐（PSRAM 充裕，多出的对齐开销可忽略）。
+   realloc 也不能用 heap_caps_realloc（它不保证对齐），改为 aligned_alloc
+   + memcpy + free。 */
+#define LVGL_MEM_ALIGN    64
+
+static void *lvgl_mem_aligned_alloc(size_t size, uint32_t caps)
+{
+    return heap_caps_aligned_alloc(LVGL_MEM_ALIGN, size, caps);
+}
+
+/* 带对齐保证的 realloc：原分配由本文件负责，新分配失败时原指针保持有效 */
+static void *lvgl_mem_aligned_realloc(void *p, size_t new_size, uint32_t caps)
+{
+    const size_t old_size = heap_caps_get_allocated_size(p);
+    void *np = lvgl_mem_aligned_alloc(new_size, caps);
+    if (np == NULL) {
+        return NULL;
+    }
+    memcpy(np, p, old_size < new_size ? old_size : new_size);
+    heap_caps_free(p);
+    return np;
+}
 
 /* 回退到内部 RAM 只提示一次，避免心跳类小分配把串口刷爆 */
 static bool s_fallback_logged = false;
@@ -101,16 +128,16 @@ static void *lvgl_mem_alloc(size_t size)
     if (s_internal_prefer_depth > 0 &&
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >=
             LVGL_INTERNAL_RESERVE + size) {
-        void *pinned = heap_caps_malloc(size, LVGL_MEM_FALLBACK);
+        void *pinned = lvgl_mem_aligned_alloc(size, LVGL_MEM_FALLBACK);
         if (pinned != NULL) {
             s_internal_prefer_used += size;
             return pinned;
         }
     }
 
-    void *p = heap_caps_malloc(size, LVGL_MEM_PREFER);
+    void *p = lvgl_mem_aligned_alloc(size, LVGL_MEM_PREFER);
     if (p == NULL) {
-        p = heap_caps_malloc(size, LVGL_MEM_FALLBACK);
+        p = lvgl_mem_aligned_alloc(size, LVGL_MEM_FALLBACK);
         if (p != NULL && !s_fallback_logged) {
             s_fallback_logged = true;
             ESP_LOGW(TAG, "PSRAM alloc failed (size=%u), fallback to internal RAM",
@@ -181,15 +208,15 @@ void *lv_realloc_core(void *p, size_t new_size)
     if (esp_ptr_internal(p) &&
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) +
             heap_caps_get_allocated_size(p) >= LVGL_INTERNAL_HARD_FLOOR + new_size) {
-        void *np = heap_caps_realloc(p, new_size, LVGL_MEM_FALLBACK);
+        void *np = lvgl_mem_aligned_realloc(p, new_size, LVGL_MEM_FALLBACK);
         if (np != NULL) {
             return np;
         }
     }
 
-    void *np = heap_caps_realloc(p, new_size, LVGL_MEM_PREFER);
+    void *np = lvgl_mem_aligned_realloc(p, new_size, LVGL_MEM_PREFER);
     if (np == NULL) {
-        np = heap_caps_realloc(p, new_size, LVGL_MEM_FALLBACK);
+        np = lvgl_mem_aligned_realloc(p, new_size, LVGL_MEM_FALLBACK);
     }
     return np;
 }

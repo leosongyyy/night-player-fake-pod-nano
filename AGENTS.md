@@ -13,14 +13,18 @@
 
 **1. 硬件**
 
-本项目是基于 ESP32-S3 成品播放器（开源项目 **FakePodNano** 的硬件）开发的第三方固件。设备通过 USB 串口（COM?，USB-Serial/JTAG 模式）连接，芯片参数：
+本项目是基于 **FakePodNano Pro（ESP32-S31）** 成品播放器（开源项目 **FakePodNano** 的新硬件）开发的第三方固件。设备通过 USB 串口（COM?，USB-Serial/JTAG 模式）连接，芯片参数：
 
-- 芯片：ESP32-S3 (QFN56) rev v0.2，WiFi/BLE，240MHz 双核
-- 存储：8MB Octal PSRAM（AP_3v3）、16MB Flash（QIO，80MHz）
-- 屏幕：鱼鹰光电 AMOLED，**460x460**（型号 AM200Q460460LK，QSPI 接口），驱动 `esp_lcd_qspi_amoled`
-- 触摸：**CST816 / CST820 / CHSC6417**（按屏幕自动选择），驱动对应 `esp_lcd_touch_cst816` / `esp_lcd_touch_cst820` / `esp_lcd_touch_chsc6417`
-- 电源：电池电压经 10K+10K 分压到 GPIO1（ADC1_CH0）
-- 耳放芯片：CS43131，I2C控制端口在0x30，通过I2S写入音频
+- 芯片：**ESP32-S31**（rev v0.0），Wi-Fi 6 / BT 5.4 LE / IEEE802.15.4，**320MHz 双核 + LP core**，512KB SRAM
+- 存储：**16MB Flash + 16MB Octal PSRAM（200MHz）**
+- 屏幕：**CO5300** AMOLED，**460x460**，QSPI（`esp_lcd_qspi_amoled` 通用驱动），窗口 X 偏移 10；**VCI_EN=GPIO44** 必须提前拉高
+- 触摸：**CST820**，I²C0（SDA48/SCL47/INT45/RST46）
+- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——AXP/RTC 尚未适配
+- 耳放芯片：CS43131，**I²C1**（SDA55/SCL54，0x30），I²S1（BCK52/WS51/DIN50，RST53），24.576MHz 板载晶振
+- SD：SDMMC 4-bit，CLK24/CMD25/D0 20/D1 21/D2 22/D3 23
+- 按键：**下方独立按键 GPIO61**（低有效、内部上拉）；**上方电源键接 AXP2101**（无主控 GPIO，需 PMU 驱动）
+
+详细外设/引脚见 `ideas_and_exps/reference_docs/hardware_v1.md`。
 
 **2. 开发环境**
 
@@ -260,37 +264,37 @@ patches/
 
 | GPIO | 功能 | 说明 |
 |---|---|---|
-| 0 | B 键 | 按键接 GND，外部 10kΩ 上拉（`core/hardware/button_service.c`）。⚠ strapping 引脚：复位时若被按住会进入下载模式。RTC GPIO，deepsleep 唤醒源：伪关机后按下可"取消关机"并唤醒重启 |
-| 1 | 电池电压 ADC | ADC1_CH0，10K+10K 分压（`battery.c`） |
-| 2 | 触摸 SCL | I²C 时钟（`touch.h`） |
-| 3 | 触摸 SDA | I²C 数据（`touch.h`） |
-| 4 | 触摸 INT | 触摸中断（`touch.h`） |
-| 5 | 触摸 RST | 触摸复位（`touch.h`） |
-| 7 | LCD RST | 屏幕复位（`display.h`） |
-| 8 | LCD CS | QSPI 片选（`display.h`） |
-| 9 | LCD PCLK | QSPI 时钟（`display.h`） |
-| 10~13 | LCD DATA0~3 | QSPI 数据线（`display.h`） |
-| 14 | SD DAT1 | SDMMC 数据线 1，10k 上拉（`core/hardware/sd_card.c`） |
-| 15 | SD DAT0 | SDMMC 数据线 0，10k 上拉（`core/hardware/sd_card.c`） |
-| 16 | SD CLK | SDMMC 时钟，直连 MCU（`core/hardware/sd_card.c`） |
-| 17 | SD CMD | SDMMC 命令线，10k 上拉（`core/hardware/sd_card.c`） |
-| 18 | SD DAT3 | SDMMC 数据线 3，10k 上拉（`core/hardware/sd_card.c`） |
-| 21 | SD DAT2 | SDMMC 数据线 2，10k 上拉（`core/hardware/sd_card.c`） |
-| 38 | 音频 LRCK/WS | I2S 帧时钟，主机输出（`core/hardware/audio/audio.c`） |
-| 39 | 音频 DIN | I2S 数据输出（`core/hardware/audio/audio.c`） |
-| 40 | 音频 BCK | I2S 位时钟，主机输出（`core/hardware/audio/audio.c`） |
-| 41 | CS43131 RESET# | DAC 复位，低有效，经 3.3→1.8V 电平转换（`core/hardware/audio/cs43131.c`） |
-| 48 | A 键（电源键） | 按键接 GND，内部上拉（`core/hardware/button_service.c`）。⚠ 与电源侧**3 秒关机芯片复用同一按键**：长按满阈值固件伪关机（`fake_shutdown_wait_power_off`，保存配置+停外设+定格提示+deepsleep）——**亮屏 1.2s（`KEY_A_LONG_PRESS_ON_MS`）/ 息屏 0.9s（`KEY_A_LONG_PRESS_OFF_MS`），宏在 `ui/key_handler.h`**，息屏更短是因为息屏长按要先点亮屏幕（耗时数百毫秒），得从 3 秒硬断电窗口里省回来；继续按住满 3s 由硬件直接断电/开机。非 RTC GPIO，无法用于 deepsleep 唤醒 |
+| 2 | PDM 麦克风 DATA | I²S0 PDM 输入（当前未启用，`hardware_v1.md` §7） |
+| 6 | PDM 麦克风 CLK | I²S0 PDM 时钟（当前未启用） |
+| 20 | SD D0 | SDMMC 4-bit 数据线 0（`core/hardware/sd_card.c`） |
+| 21 | SD D1 | SDMMC 数据线 1 |
+| 22 | SD D2 | SDMMC 数据线 2 |
+| 23 | SD D3 | SDMMC 数据线 3 |
+| 24 | SD CLK | SDMMC 时钟 |
+| 25 | SD CMD | SDMMC 命令线 |
+| 35 | LCD TE | 屏幕刷新同步（当前未使用，保留定义） |
+| 36 | LCD RST | 屏幕复位（`display.h`） |
+| 37 | LCD CS | QSPI 片选 |
+| 38 | LCD PCLK | QSPI 时钟（注意：S31 上音频在 50~52，不冲突） |
+| 39 / 40 / 42 / 43 | LCD DATA0~3 | QSPI 四条数据线 |
+| 44 | LCD VCI_EN | AMOLED 电源使能，高有效，**初始化前必须先拉高** |
+| 45 | 触摸 INT | CST820 中断，低有效（`touch.h`） |
+| 46 | 触摸 RST | CST820 复位，低有效 |
+| 47 | I²C0 SCL | 触摸 / AXP2101 / PCF85063 / QMI8658 共用 |
+| 48 | I²C0 SDA | 同上 |
+| 49 | AXP2101 INT | PMU 中断（当前未使用，AXP 待适配） |
+| 50 | I²S1 DIN | CS43131 音频数据输出（`audio.c`） |
+| 51 | I²S1 WS | CS43131 LRCK/WS |
+| 52 | I²S1 BCK | CS43131 位时钟 |
+| 53 | CS43131 RESET | DAC 复位，低有效（`cs43131.c`） |
+| 54 | I²C1 SCL | CS43131 专用 I²C1 |
+| 55 | I²C1 SDA | CS43131 专用 I²C1 |
+| 61 | 下方独立按键 | 低电平按下，内部上拉；当前唯一主控按键（`button_service.c`） |
 
-**历史注释规划（源码 `main.c` 旧版注释，当前未启用、未验证）：**
-- LCD 相关：`TFT_TE = 6`（撕裂效果同步）
-- I²C 总线：`I2C_WIRE_SDA = 3`、`I2C_WIRE_SCL = 2`（与触摸共用）
-- 音频（I2S + CS43131 DAC）：`MCK=-1, BCK=40, WS=38, DO=39, CS43131_RST=41`（**已确认启用**，见 `core/hardware/audio/`；MCLK 由板载 24.576MHz 晶振提供，不占用 GPIO）
-- 按键/静音：~~普通版 `BTN_PIN=47`、`AUDIO_MUTE=48`；HIFI 版 `BTN_PIN=48`~~（**已确认**：A 键=GPIO48、B 键=GPIO0，见 `button_service.c`）
-- 麦克风（PDM）：`MIC_PDM_DATA=46, MIC_PDM_SCK=45`
-- IMU 中断：`IMU_INT1=47`（HIFI 版）
+**AXP2101 电源键**：上方电源键接 AXP2101，不占主控 GPIO；短按/长按事件需读 PMU 中断（待适配）。
+**历史 S3 引脚已作废**（GPIO0/1/2~5/7~18/21/38~41/48），不要再用。
 
-**已确认的 I²C 设备（开机扫描）：** 0x15、0x30（CS43131）、0x6b、0x7e。
+**已确认的 I²C 设备（S31 开机扫描）：** I²C0：0x15（CST820）、0x34（AXP2101）、0x51（PCF85063）、0x6b（QMI8658）；I²C1：0x30（CS43131）。
 
 ### 使用技术（架构总览）
 

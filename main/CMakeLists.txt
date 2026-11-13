@@ -298,6 +298,39 @@ if(CONFIG_LV_USE_FREETYPE)
 endif()
 
 # ============================================================================
+# PPA（ESP32-S31 的 2D 像素加速器）接线 —— LVGL 9.4 自带 PPA 绘制单元
+# ----------------------------------------------------------------------------
+# `CONFIG_LV_USE_PPA=y` 时 LVGL 的 src/draw/espressif/ppa/* 会：
+#   1) #include "driver/ppa.h" / "esp_cache.h" / "hal/color_hal.h"；
+#   2) 在 lv_draw_ppa_private.h 里做编译期对齐检查：
+#        CONFIG_LV_ATTRIBUTE_MEM_ALIGN_SIZE == CONFIG_CACHE_L1_CACHE_LINE_SIZE
+#   3) 在 lv_init() 里调用 lv_draw_ppa_init()（无需应用侧再初始化）。
+#
+# 但托管组件 lvgl 的 env_support/cmake/esp.cmake 虽然写了
+#   PRIV_REQUIRES esp_driver_ppa esp_mm ...
+# 在本工程（IDF 6.1 + 组件管理器）实测**没有把 include 目录传进 lvgl 的编译**
+# （表现为 fatal error: driver/ppa.h: No such file or directory）。
+# 所以这里像 FreeType 一样，手动把 PPA 组件链接给 lvgl 目标。
+#
+# ⚠ 第二个坑：LVGL 头里写的是 `CONFIG_CACHE_L1_CACHE_LINE_SIZE`（ESP32-P4 的
+#   符号名），而 ESP32-S31 的 Kconfig 里叫 `CONFIG_CACHE_L1_DCACHE_LINE_SIZE`
+#   （=64）。不补这个宏就会命中 #error "For using PPA buffers need to be
+#   aligned to 64-byte boundary!"，即使两个 LVGL 对齐配置都已经设成 64。
+# ============================================================================
+if(CONFIG_LV_USE_PPA)
+    idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)
+    idf_component_get_property(ppa_lib esp_driver_ppa COMPONENT_LIB)
+    idf_component_get_property(mm_lib esp_mm COMPONENT_LIB)
+    if(TARGET ${ppa_lib} AND TARGET ${mm_lib})
+        target_link_libraries(${lvgl_lib} PRIVATE ${ppa_lib} ${mm_lib})
+    else()
+        message(WARNING "PPA 组件目标缺失：LV_USE_PPA 可能编译失败")
+    endif()
+    target_compile_definitions(${lvgl_lib} PRIVATE
+        "CONFIG_CACHE_L1_CACHE_LINE_SIZE=${CONFIG_CACHE_L1_DCACHE_LINE_SIZE}")
+endif()
+
+# ============================================================================
 # font 分区（partitions.csv 的 font @ 0x800000，4MiB）：字体**不由构建系统烧录**
 # ----------------------------------------------------------------------------
 # 2026-10-25 改版：这里原本用
