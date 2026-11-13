@@ -56,6 +56,7 @@ set(COMPONENTS
     esp_driver_spi                 # driver/spi_master.h（QSPI 面板）
     esp_driver_sdmmc               # driver/sdmmc_host.h（SD 卡）
     esp_driver_ppa                 # driver/ppa.h（PPA 2D 加速，core/ui/lvgl_ppa_accel.c）
+    esp_driver_jpeg                # driver/jpeg_decode.h（封面硬件 JPEG 解码，core/image/cover_jpeg.c）
     esp_mm                         # esp_cache.h（PPA 缓冲对齐/缓存同步）
     esp_partition                  # esp_partition.h（font 分区 mmap、pldata）
     esp_pm                         # esp_pm.h（亮屏 320MHz / 息屏 80MHz）

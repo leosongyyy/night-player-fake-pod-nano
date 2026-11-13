@@ -49,6 +49,7 @@
 - `BUILD_CONFIG.md`（`ideas_and_exps/`）：构建配置（2026-11 起只剩 debug/release 两套；releasecandidate 已随字体统一移除）的完整说明
 - `BUILD_MATRIX.md`（`ideas_and_exps/`）：**配置矩阵**（`idfc_buildconfig.json`）的定义、配置文件格式规范、给 idfc 仓库的逐文件修改说明，以及 **2026-10-02 的新版 idfc 验收记录**（§7，含实测证据与已知小问题）
 - `reference_docs/`（`ideas_and_exps/`）：**硬件原厂资料的整理版**（不是抄手册，是"写驱动该看什么"）。索引见 `reference_docs/README.md`；已整理 **`pmu_axp2101.md`**（AXP2101 寄存器/电量百分比/电源键与长按阈值/软关机/600mAh 充电整定/接入方案，含"芯片没有电流读数"的结论与替代方案）与 **`rtc_pcf85063a.md`**（PCF85063A 寄存器/BCD/闹钟/CLKOUT/驱动与参考代码）。AXP/RTC 目前**代码尚未适配**（`battery.c` 仍是占位实现）
+- `COVER_JPEG_HW.md`（`ideas_and_exps/`）：**封面硬件 JPEG 解码**的接线方式、三个必踩坑（MCU 对齐尺寸 / `jpeg_alloc_decoder_mem` 的对齐要求 / **PPA 不看 stride 必须压实行**）、实测数据与回退方法
 
 **4. idfc 使用说明（重要）**
 
@@ -210,7 +211,10 @@ main/
     music/
       song_meta.h/.c        # 歌曲元数据（.npd 文件解析：标题/艺术家-专辑/回放增益/封面）
     image/
-      cover_jpeg.h/.c       # JPEG 封面解码（esp_jpeg/tjpgd → LVGL RGB565 img，后台任务）
+      cover_jpeg.h/.c       # JPEG 封面解码 → LVGL RGB565 img，后台任务。**默认走 ESP32-S31 硬件
+                            #   JPEG 解码器**（esp_driver_jpeg + DMA2D，460x460 约 20ms），失败自动
+                            #   退回 esp_jpeg/tjpgd 软件解码（100~300ms）；Kconfig 开关
+                            #   CONFIG_UI_COVER_HW_JPEG。详见 ideas_and_exps/COVER_JPEG_HW.md
       default_cover.h/.c    # 默认封面（2bit 索引色，省 Flash）
       default_cover_flash.c # 默认封面（RGB565 极速版，423KB，CONFIG_UI_COVER_FLASH）
     fonts/
