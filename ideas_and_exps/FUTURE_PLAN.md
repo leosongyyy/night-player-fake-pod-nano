@@ -318,5 +318,39 @@ notif_refresh_brightness_ui(brightness);   /* ← 新增：拖动即时反馈 */
 - 改完同步文档：`CONFIG_SLOTS.md`（数据模型 / 运行时应用 / 验证 / §九）、
   `config_store.h` 配置项说明、`config_slots.h` 注释、`CHANGELOG`。
 
+## 50. 构建裁剪：mbedtls 摘不掉，全量组件编译才是大头
+
+> 来源：2026-11-13 只读调研「项目不用任何网络/HTTPS，能不能关掉 mbedtls 并从构建里排除」。
+> **完整证据、量化数字与只读复现脚本见 `ideas_and_exps/MBEDTLS_BUILD_AUDIT.md`**，这里只留结论与待办。
+
+**三条结论（细节看文档）**：
+
+1. **没有开关可关**：mbedtls 不是可裁组件；`bootloader_support/CMakeLists.txt:102`
+   （app 构建分支）硬写 `PRIV_REQUIRES mbedtls`，且 `bootloader_sha.c` 真 `#include "psa/crypto.h"`；
+   `nvs_flash/CMakeLists.txt:86-89` 又无条件编 `nvs_encrypted_partition.cpp` 并链 `idf::mbedtls`
+   （与 `CONFIG_NVS_ENCRYPTION` 无关）。要摘就得改 IDF 源码 + 把 `bootloader_sha` 换回 ROM SHA，
+   只换回约 10 % 冷编译时间 —— **已判定不做**。
+2. **它几乎不进固件**：最终镜像里只有 **2 518 B / 8 个目标文件**（占 1 862.8 KB 的 0.13 %），
+   全是 PSA 初始化胶水，无 SSL/X509。所以「省 Flash」不是做这事的理由，动机只有编译时间。
+3. **真凶是"全量组件编译"**：工程没设 `COMPONENTS`，IDF 默认编译**所有** 155 个组件、
+   1 665 个编译单元（`build.cmake:588-597` / `build-system.rst:253`）。其中 lvgl 527 个、
+   **mbedtls 153 个（9.2 % 编译单元 / 11.8 % 源码字节）**、lwip 91、wpa_supplicant 84。
+
+**待办（按性价比排序，都还没做）**：
+
+- [ ] **A（主项，收益最大）**：加 `set(COMPONENTS …)`（写在 `include(project.cmake)` 之前，
+      与 `set(IDF_TARGET …)` 同处）把 155 组件裁到依赖闭包 ≈71 个、编译单元 ≈−28 %。
+      ⚠ 三个坑：① **不能只写 `MINIMAL_BUILD ON`**——`main` 的"链接全部组件"便利（`project.cmake:892-917`）
+      只在构建内组件范围生效，剪完立刻丢 `nvs_flash`/`fatfs`/`sdmmc`/`vfs`/`spiffs`/`esp_adc` 等头文件；
+      ② 本仓库 4 个本地组件（`esp_lcd_qspi_amoled` + 3 个触摸）**必须显式列进 `COMPONENTS`**，
+      它们今天能编上全靠全量构建；③ 以后新增组件依赖漏写会编译报错，白名单要维护。
+      做法：从 `main` + 4 个本地组件起步，按编译器报的缺失头文件迭代 2~3 轮收敛。
+- [ ] **B（顺手、零风险）**：`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n`（少编 `esp_crt_bundle.c`
+      并跳过 `gen_crt_bundle.py` 生成证书包）、`CONFIG_MBEDTLS_PKCS7_C=n`。只砍两三个文件，不改变量级。
+- [ ] **C（验收）**：剪裁后实测冷编译墙钟收益，并做一次全功能真机回归——
+      SD/FATFS 挂载、NVS（配置槽位）、字体分区、音频（I2S/CS43131）、三型号触摸、分区表/OTA 路径。
+- [ ] 顺带结论：`ccache` 已开（4.12.1），上述约 10 % 的 mbedtls 代价只落在冷编译上，
+      日常增量构建为 0；再想快先看 `ccache -s` 命中率。
+
 
 
