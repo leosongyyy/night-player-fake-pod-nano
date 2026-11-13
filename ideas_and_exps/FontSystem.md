@@ -1,8 +1,15 @@
 # 字体系统（TTF / FreeType 迁移记录）
 
+> ⚠ **本文是历史记录，已被 NPF1 位图方案取代（2026-11-14）**：`master` 现在与
+> `legacy_s3` 一样，系统字体是 **font 分区里的 NPF1 预烘焙位图全字库（`spiffs/system.npf`，
+> mmap 直读）**，不再使用 TTF / FreeType，`font_ttf.c`、`ftoption_lvgl.h`、
+> `espressif/freetype` 依赖与相关 CMake 接线都已删除。现行方案见
+> [NPF_FONT.md](NPF_FONT.md)；本文保留下来是因为 TTF 时代的**分区重排、栈预算、
+> 关缓存陷阱**等结论仍有参考价值（改回位图后栈已可回落，见 NPF_FONT.md §6）。
+
 > 2026-10 把系统字体从「内嵌位图字库」迁到 **font 分区里的 `system.ttf` + FreeType 按需光栅化**。
 > （迁完先用的是 MiSans，实测滚动帧率明显更低，最终**固定为 Droid Sans Fallback**，见 §8.1。）
-> 相关代码：`main/core/fonts/font_ttf.h/.c`、`main/core/fonts/ftoption_lvgl.h`、
+> 相关代码（**均已删除**）：`main/core/fonts/font_ttf.h/.c`、`main/core/fonts/ftoption_lvgl.h`、
 > `main/core/fonts/system_font.h`、`main/main.c`、`main/CMakeLists.txt`、`partitions.csv`。
 > 定位过程参考了另一个项目（OtoClock，`tempdir/oto-clock-master`，它把 TTF 放 SD 卡）的
 > `ideas_and_exps/FontSystem.md`，但**承载方式、文件系统与栈预算完全不同**。

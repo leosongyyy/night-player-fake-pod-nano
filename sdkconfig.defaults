@@ -54,9 +54,9 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_320=y
 # 主任务栈 16KB（原 8KB）：2026-10 TTF 迁移实测，app_main 里"持锁渲染首帧"
 # 那条链 app_main → lv_refr_now → LVGL 绘制 → FreeType 光栅化的栈需求超过 8KB，
 # 8KB 时栈溢出 12.6KB 跌进 .bss，把 esp_pm / task_wdt 的静态量写坏（详见
-# ideas_and_exps/FontSystem.md §崩溃定位 与 core/fonts/ftoption_lvgl.h 的说明）。
-# 光栅化器的 16KB 渲染池已通过 FT_CONFIG_OPTIONS_H 压到 4KB，所以 16KB 够用；
-# 这个栈只在 app_main 期间占用，app_main 返回后随任务一起释放。
+# ideas_and_exps/FontSystem.md §崩溃定位）。2026-11 已改回位图字体（NPF1，
+# 不再光栅化），16KB 继续保留（未重新收紧）；这个栈只在 app_main 期间占用，
+# app_main 返回后随任务一起释放。若内部 RAM 吃紧，可实测后回落到 8KB。
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_ESP_SYSTEM_BBPLL_RECALIB=n
 CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
@@ -199,47 +199,26 @@ CONFIG_LV_DRAW_BUF_ALIGN=64
 # CONFIG_LV_USE_PPA_IMG is not set
 
 # ---------------------------------------------------------------------------
-# TTF 矢量字体（FreeType，2026-10 字体迁移）
+# 系统字体：位图（NPF1 外置全字库，2026-11 从 TTF/FreeType 改回位图）
 # ---------------------------------------------------------------------------
-# 界面字体不再内嵌位图，改为从 font 分区（partitions.csv，裸二进制 4MiB）
-# 读取 spiffs/system.ttf（当前 Droid Sans Fallback），按需光栅化字形：
-#   CONFIG_LV_USE_FREETYPE          编入 LVGL 的 src/libs/freetype/*，
-#                                   提供 lv_freetype_font_create()。⚠ 它只编译
-#                                   源码、不加依赖，ft2build.h 的 include 与
-#                                   FT_* 符号靠 main/CMakeLists.txt 把
-#                                   espressif/freetype 链接给 lvgl 组件；
-#                                   初始化由 lv_init() 自动完成（见下）。
-#   CONFIG_LV_FREETYPE_USE_LVGL_PORT 文件访问走 lv_fs（我们用自定义驱动读 font
-#                                   分区，盘符 F:）、内存分配走 lv_malloc
-#                                   （即 core/ui/lvgl_mem.c → PSRAM，不占内部 RAM）
-#   CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT
-#                                   字形缓存条目数基准，**同时管两个 LRU 缓存**
-#                                   （lv_freetype.c 的 freetype_on_font_create）：
-#                                     · 字形度量缓存 glyph_cache = 本值 × 2
-#                                     · **位图缓存 draw_data_cache = 本值**
-#                                   位图缓存才是关键：24px 汉字一字约 0.5KB，
-#                                   1024 条 ≈ 0.5MB，全部落在 PSRAM（不占内部 RAM）。
-#                                   2026-10 实测：256 时"列表快速重绑"约 10fps
-#                                   （位图字体时代同场景约 20fps，差距全在未命中
-#                                   时的现场光栅化），调到 1024 后重复滚动基本
-#                                   全命中。若 PSRAM 吃紧可回落 512。
-# ⚠ 应用侧**不要**调 lv_freetype_init()：LVGL 9.4 的 lv_init() 已经初始化过
-#   FreeType（lv_init.c 里带 LV_FREETYPE_CACHE_FT_GLYPH_CNT），重复调用会
-#   LV_LOG_WARN("freetype already initialized") 并返回 LV_RESULT_INVALID，
-#   把它当致命错误就会表现为"字体文件完全正常却报字体加载失败"。
-#   （参考项目 OtoClock 踩过这个坑，见 ideas_and_exps/FontSystem.md）
-CONFIG_LV_USE_FREETYPE=y
-CONFIG_LV_FREETYPE_USE_LVGL_PORT=y
-CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=1024
-# font 分区里烧的字体**写死**为 spiffs/system.ttf（见 main/Kconfig.projbuild 的说明与
-# 2026-10-25 起的刷入文档 ideas_and_exps/FONT_FLASH.md）：当前内容是 **Droid Sans Fallback**
-# （3.55MiB / 50951 字形 / 24px 行高 31、20px 行高 26，AOSP Apache-2.0，许可文本入库在
-# spiffs/DroidSansFallback-LICENSE.txt）。2026-10 实测它同一手势下滚动帧率明显高于此前的
-# MiSans：单字形轮廓数据只有 MiSans 的约 1/4（光栅化更便宜 + flash 局部性更好），故弃用
-# MiSans、固定使用 Droid。
-# ⚠ 换字体：用新字体文件**改名覆盖** spiffs/system.ttf，然后 `idfc build` + **手动刷字体分区**
-#   （`esptool.exe --chip esp32s31 -p COMx write_flash 0x800000 spiffs/system.ttf`；字体不在
-#   固件里，普通 `idfc flash` 不会更新它）；启动日志的 "N 张表，M 个字形" 可确认生效的是哪份。
+# 界面字体是 24px **位图**全字库（bpp2）：Droid Sans Fallback 的 34,461 个码位
+# 离线预烘焙成 spiffs/system.npf（4.44MiB），烧进 font 分区（partitions.csv，
+# 6MiB @0x600000）。运行时由 core/fonts/font_npf.c 做一次 esp_partition_mmap +
+# 填 lv_font_fmt_txt_dsc_t，字形位图与 glyph_dsc 都留在 Flash（占 MMU 页、不占
+# RAM）；详见 ideas_and_exps/NPF_FONT.md。
+#
+# 因此这里**不再有** FreeType 相关配置（CONFIG_LV_USE_FREETYPE /
+# LV_FREETYPE_USE_LVGL_PORT / LV_FREETYPE_CACHE_FT_GLYPH_CNT 全部移除），也不需要
+# espressif/freetype 组件。位图字体没有字形缓存、不占 PSRAM：
+#   · 20px 小字体（状态栏时间/两行文字图标）用内嵌的 system_smaller_font（位图）；
+#   · NPF 挂载失败时回退内嵌精简字库 system_global_font_lite（能开机，用户数据缺字）；
+#   · LV_FONT_FMT_TXT_LARGE 必须保持 y（见上方）：NPF 的 glyph_dsc 是 LARGE 的
+#     16B 布局、位图索引超过 20bit（4.4MB），关掉会直接读错。
+# ⚠ 换字体：改 tools/font 的生成流程重新烘焙 spiffs/system.npf，然后 `idfc build`
+#   + **手动刷字体分区**（`esptool.exe --chip esp32s31 -p COMx write_flash 0x600000
+#   spiffs/system.npf`；字体不在固件里，普通 `idfc flash` 不会更新它）；启动日志的
+#   "NPF1 全字库已挂载: 24px ... N 个字形" 可确认生效的是哪份。
+#   当前字体许可文本入库在 spiffs/DroidSansFallback-LICENSE.txt（AOSP Apache-2.0）。
 
 # 完整固件启动耗时较大，跳过校验来提高启动速度
 CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y

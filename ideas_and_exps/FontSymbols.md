@@ -52,21 +52,25 @@ TTF 主路径掩盖了这个问题（FreeType 按需光栅化，字体里有什�
 参数**照抄**现有字库文件头 `Opts:` 行，只替换 `--symbols` 与 `-o`：
 
 ```powershell
+# 先取源字体（仓库只存 NPF 镜像，不再存 TTF）：
+#   git log --diff-filter=D --oneline -- spiffs/system.ttf → 取删除前的提交
+git show <ttf_commit>:spiffs/system.ttf > tempdir\system.ttf
+
 # 24px 正文（覆盖 main/core/fonts/system_global_font_lite.c）
 lv_font_conv --bpp 2 --size 24 --no-compress --stride 1 --align 1 `
-  --font spiffs/system.ttf `
+  --font tempdir\system.ttf `
   --symbols "$((Get-Content -Raw ideas_and_exps/FontSymbols.symbols.txt).Trim())" `
   --range 32-127 --format lvgl -o main/core/fonts/system_global_font_lite.c
 
 # 20px 小字（覆盖 main/core/fonts/system_smaller_font.c）
 lv_font_conv --bpp 2 --size 20 --no-compress --stride 1 --align 1 `
-  --font spiffs/system.ttf `
+  --font tempdir\system.ttf `
   --symbols "$((Get-Content -Raw ideas_and_exps/FontSymbols.symbols.txt).Trim())" `
   --range 32-127 --format lvgl -o main/core/fonts/system_smaller_font.c
 ```
 
-- `--font` 用 **`spiffs/system.ttf`**（Droid Sans Fallback）：与 TTF 主路径同源，回退态与正常态的
-  字面观感一致，也不必再去找 MiSans 原始文件。若想保留旧的 MiSans 观感，换成自己的
+- `--font` 用 **Droid Sans Fallback**（`tempdir/system.ttf`）：与 font 分区的 NPF1 全字库同源
+  （`spiffs/system.npf`），回退态与正常态的字面观感一致。若想保留旧的 MiSans 观感，换成自己的
   `MiSans-Normal.ttf` / `MiSans-Bold.ttf` 即可（20px 原来用的是 **Bold**，Droid 只有常规字重）。
 - `--range 32-127` 必须保留（ASCII：数字、拉丁字母、半角标点）。
 - `--symbols` 一定要用 `.Trim()`（或手工粘贴时确认末尾没有多余换行/空格，否则会多出一个空白字形）。
@@ -79,14 +83,15 @@ lv_font_conv --bpp 2 --size 20 --no-compress --stride 1 --align 1 `
    `.fallback = &lv_font_montserrat_20`（20px）。UI 里的 `LV_SYMBOL_*` 图标（⚠ 警告、SD 卡、
    OK/CLOSE 等）**不在这份清单里**，全靠这个 fallback 链渲染。生成后检查该字段是否仍在；
    丢了图标会全变方框。
-2. **换字体源会改变回退态的行高**：老字库是 26（24px）/ 24（20px）；2026-10-25 用
-   `system.ttf`（Droid Sans Fallback）重新生成后实测 **27（24px）/ 23（20px）**。
-   影响面：`virtual_list` 用 `lv_font_get_line_height()` 动态算行高（自适应，无碍）；
-   `settings_page.c` 的两行文字图标用 `text_line_space=-6` 收紧（2×23-6=40，48px 图标区仍放得下）。
+2. **换字体源会改变回退态的行高**：两份内嵌字库当前是用 Droid Sans Fallback 生成的
+   **24px 行高 27**（`system_global_font_lite`）/ **20px 行高 23**（`system_smaller_font`）；
+   NPF 主路径的 24px 全字库**行高 32**。影响面：`virtual_list` 用
+   `lv_font_get_line_height()` 动态算行高（自适应，无碍）；`settings_page.c` 的两行文字图标
+   用 20px 内嵌字体（行高 23，两行 46px < 48px 图标区），**不需要 `text_line_space` 修正**。
 3. **用户数据不在清单内**：歌曲名/目录名/歌手（可能含生僻字、日文）是运行时字符串，
-   点阵字库覆盖不了——这正是 TTF 主路径存在的意义；回退态下这类文字仍会缺字，属已知限制。
-   ⚠ 也正因如此，TTF 是**延迟加载**的：只有真正要进常规界面时才加载（`FontSystem.md` §9 第 8 条）；
-   低电 / 无卡 / 待扫描这些分支全程用内嵌位图字库——那些界面只有固定文案，不缺字。
+   点阵字库覆盖不了——这正是 **NPF1 全字库主路径**存在的意义；回退态下这类文字仍会缺字，属已知限制。
+   ⚠ NPF1 全字库在 `app_main` 早期就挂载（`system_font_init()`），所有界面都用同一份字体；
+   内嵌精简字库只在 NPF 挂载失败（没刷字体/镜像损坏）时兜底。
 4. **生成后必须重新构建**才生效（字库是编译进固件的 `.rodata`，不是分区文件）。
 5. **`-o` 的文件名决定生成的符号名**（2026-10-25 真实踩坑）：lv_font_conv 用输出文件的
    主文件名命名 `const lv_font_t` 变量（`-o foo.c` → `foo`）。那次 lite 的 `-o` 误写成

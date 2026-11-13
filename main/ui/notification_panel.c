@@ -716,8 +716,8 @@ void notification_panel_create(lv_obj_t *status_bar)
 
     lv_obj_t *grab_label = lv_label_create(grab_bar);
     /* 图标+文字混排：必须用内嵌位图字体（UI_ICON_TEXT_FONT）——它缺字时回退到
-       LVGL 内置 montserrat_24，LV_SYMBOL_UP 才能画出来；TTF 系统字体没有 PUA
-       区图标字形，用一个字就会变成方块（2026-10 TTF 迁移时曾因此删掉图标） */
+       LVGL 内置 montserrat_24，LV_SYMBOL_UP 才能画出来；系统字体（NPF1 全字库与
+       20px 内嵌字体）都没有 PUA 区图标字形，直接用会变成方块 */
     lv_label_set_text(grab_label, LV_SYMBOL_UP " 向上滑动关闭");
     lv_obj_set_style_text_font(grab_label, UI_ICON_TEXT_FONT, 0);
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);

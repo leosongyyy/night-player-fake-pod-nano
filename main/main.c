@@ -17,7 +17,7 @@
 #include "core/hardware/pldata.h"
 #include "core/hardware/sd_card.h"
 #include "core/hardware/touch.h"
-#include "core/fonts/font_ttf.h"
+#include "core/fonts/system_font.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/battery_logger.h"
@@ -93,18 +93,15 @@ void app_main(void)
     lvgl_port_init(panel_handle, NULL);
     mem_trace_log("04-lvgl_port");
 
-    /* 系统字体（TTF / FreeType）**故意不在这里加载**：改成**延迟加载**，
-    由 boot_flow 在"确实要进常规界面"时才调 font_ttf_init()（见 ui/boot_flow.c
-    的 boot_enter_normal）。好处：
-      · 低电 / 无卡 / 待扫描这些非正常启动分支全程用内嵌位图字体，boot 阶段
-        完全不碰 FreeType、不占 PSRAM 字形缓存；
-      · "待扫描"分支紧接着要扫描 SD 卡并整体重写 pldata（约占 2.8MB PSRAM，
-        写 flash 时还会关外部内存缓存、PSRAM 不可访问），少一层 TTF 依赖就少
-        一处会踩"关缓存陷阱"的地方；
-      · 内嵌位图字库已覆盖全部 UI 文案（见 ideas_and_exps/FontSymbols.md），
-        这些只有固定文案的界面不会缺字。
-    ⚠ 应用侧只调 lv_freetype_font_create()，不要再调 lv_freetype_init()
-      （lv_init() 已经初始化过 FreeType 引擎）。 */
+    /* 系统字体（必须早于任何 UI 创建，含开机封面上的提示文字）：
+       先试 font 分区的 NPF1 全字库（mmap + 填指针，零解析），失败则回退内嵌
+       精简字库（system_global_font_lite）。位图字体不像 FreeType 那样有"字形
+       缓存占 PSRAM / 关缓存期间取不到字形"的问题，所以直接在这里挂载，不需要
+       像 TTF 时代那样延迟到 boot_enter_normal。
+       ⚠ 放在 LVGL 锁外调用：它只做分区查找 + mmap + 填结构体，不碰 LVGL 对象。 */
+    ESP_LOGI(TAG, "Initialize system font");
+    system_font_init();
+    mem_trace_log("04b-system_font");
 
     /* 开机封面（默认封面）：此时面板亮度仍为 0，先把整屏写满再点亮——与原
        来"全黑启动防白屏"的顺序完全一致。

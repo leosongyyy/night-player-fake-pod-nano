@@ -774,9 +774,9 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
                                           UI_SYSTEM_FONT, lv_color_white());
     lv_obj_set_pos(s_title_label, 0, 0);
 
-    /* 专辑/艺术家：普通大小字体 + 灰色（20px 的 UI_SMALL_FONT 只含系统 UI 用字，
-       回退态下字不全；用户数据可能含生僻字/日文，改用与标题同族的
-       UI_SYSTEM_FONT —— TTF 正常时两者本就是同一个字体文件，只是字号不同），滚动 */
+    /* 专辑/艺术家：普通大小字体 + 灰色（20px 的 UI_SMALL_FONT 是内嵌位图字库，
+       只含系统 UI 用字 + ASCII，用户数据里的生僻字/日文会缺字；改用与标题
+       同族的 24px 全字库 UI_SYSTEM_FONT），滚动 */
     s_sub_label = np_make_marquee_label(s_title_bar, st.dir_name,
                                         UI_SYSTEM_FONT,
                                         lv_palette_main(LV_PALETTE_GREY));
@@ -796,7 +796,7 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
     lv_obj_set_scrollbar_mode(s_control_bar, LV_SCROLLBAR_MODE_OFF);
 
     /* 第一行：当前时长（左）+ 上一曲/播放/下一曲（居中）+ 总时长（右）。
-       时长用 UI_SMALL_FONT（20px 系统字体，比内置 montserrat 的 14px 更大更协调） */
+       时长用 UI_SMALL_FONT（20px 内嵌位图小字体；纯数字/冒号，不涉及生僻字） */
     s_cur_time = lv_label_create(s_control_bar);
     lv_label_set_text(s_cur_time, "0:00");
     lv_obj_set_style_text_font(s_cur_time, UI_SMALL_FONT, 0);

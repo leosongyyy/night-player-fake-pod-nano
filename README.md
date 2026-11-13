@@ -219,22 +219,22 @@ python tools/make_full_firmware.py -t release
 > 💡 如果用的是 **全量固件**（`tools/make_full_firmware.py` 生成的单文件，烧到 `0x0`），
 > 字体已经包含在镜像里，**本节可以跳过**；本节只针对日常 `idfc flash`（它不含字体）。
 
-系统字体（Droid Sans Fallback，3.55 MiB，含 5 万+ 汉字）**不在固件里**，而是单独放在 flash 的
-`font` 分区（`partitions.csv`：偏移 `0x800000`，4 MiB）。所以刷完固件之后，**还要用手边的
-esptool 单独刷一次字体**：
+系统字体（Droid Sans Fallback 的 NPF1 位图全字库，4.44 MiB，34,461 个码位）**不在固件里**，
+而是单独放在 flash 的 `font` 分区（`partitions.csv`：偏移 `0x600000`，6 MiB）。所以刷完固件之后，
+**还要用手边的 esptool 单独刷一次字体**：
 
 ```powershell
-esptool.exe --chip esp32s3 --port COMx write_flash 0x800000 spiffs/system.ttf
+esptool.exe --chip esp32s31 --port COMx write_flash 0x600000 spiffs/system.npf
 ```
 
-- 约 30~40 秒（实测 33.4 秒）；结束时出现 `Hash of data verified.` 就说明写入无误
-  （有些版本还会多打一行 `doesn't look like an image file` 的警告，同样是正常的）。
-- **不刷也能开机**：界面会自动回退到编译进固件的位图字体，但生僻字、日文、韩文等会显示成方框。
-- **换字体**：把新字体改名成 `system.ttf` 覆盖 `spiffs/system.ttf` 再刷一遍即可（文件要 ≤ 4 MiB）。
+- 约 30~40 秒（实测 28.9 秒）；结束时出现 `Hash of data verified.` 就说明写入无误。
+- **不刷也能开机**：界面会自动回退到编译进固件的精简位图字库，但生僻字、日文、韩文等会显示成方框。
+- **换字体**：用 `tools/font/` 的流程重新烘焙 `spiffs/system.npf`（需要一份覆盖完整的 TTF
+  作为源字体），再刷一遍即可（镜像要 ≤ 6 MiB）。
 - 完整的刷入说明（校验方法、出错表现、分区上限、历史坑）见
   [ideas_and_exps/FONT_FLASH.md](ideas_and_exps/FONT_FLASH.md)。
 
-> 为什么字体要单独刷？它 3.55 MiB，如果跟着每次 `idfc flash` 一起烧，每轮更新固件都要多花半分钟，
+> 为什么字体要单独刷？它 4.44 MiB，如果跟着每次 `idfc flash` 一起烧，每轮更新固件都要多花半分钟，
 > 而字体几乎从不变化。因此分区表只**保留它的位置**，内容由 esptool 一条命令写入。
 
 ## 📱 兼容设备

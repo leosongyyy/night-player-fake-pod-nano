@@ -53,16 +53,6 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.2.1
-  espressif/freetype:
-    component_hash: aa9f7657a69b2b1c1f49044017fc424081d4e0fe6e97834cb43883548d44e3ca
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=5.1'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 2.14.3~1
   idf:
     source:
       type: idf
@@ -80,9 +70,8 @@ direct_dependencies:
 - espressif/esp_jpeg
 - espressif/esp_lcd_sh8601
 - espressif/esp_lcd_touch
-- espressif/freetype
 - idf
 - lvgl/lvgl
-manifest_hash: 7fc47e118608efd5a87b4a7b07dbdd62234b3f5083b4608a5f6b42ccca91485b
+manifest_hash: f34076adf881d4320007916001ad50191413f53470c00015f34e18f81806cce9
 target: esp32s31
 version: 3.0.0

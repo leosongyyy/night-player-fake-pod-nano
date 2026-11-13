@@ -29,14 +29,16 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ release 构建关闭（正式版不需要这些诊断日志）。
             关闭时所有调用点编译为空语句，不产生任何代码与日志。
 
-    # 系统字体固定走 TTF：font 分区里的 spiffs/system.ttf + FreeType 按需光栅化
-    # （见 core/fonts/font_ttf.c 与 ideas_and_exps/FontSystem.md），**没有构建期
-    # 开关**；TTF 打不开（分区为空/损坏）时运行时自动回退内嵌位图字体。
-    # ⚠ 字体文件**写死**为 ../spiffs/system.ttf，而且**不在固件里**：刷完固件还要用
-    #   esptool 手动把它刷进 font 分区（见 ideas_and_exps/FONT_FLASH.md）。换字体 =
-    #   用新字体文件**改名覆盖** spiffs/system.ttf，然后 idfc build + 重刷字体分区。
-    #   当前内容是 Droid Sans Fallback（AOSP/Apache-2.0，50951 字形，3.55MiB，
-    #   24px 行高 31 / 20px 行高 26）；许可文本入库在 spiffs/DroidSansFallback-LICENSE.txt。
+    # 系统字体固定走**位图**：font 分区里的 spiffs/system.npf（NPF1 预烘焙 24px 全字库，
+    # 运行时 esp_partition_mmap 直读；见 core/fonts/font_npf.c 与
+    # ideas_and_exps/NPF_FONT.md），**没有构建期开关**；NPF 挂载失败（分区为空/
+    # 镜像损坏/没刷字体）时运行时自动回退内嵌精简位图字库。
+    # ⚠ 字体镜像**不在固件里**：刷完固件还要用 esptool 手动把它刷进 font 分区
+    #   （`write_flash 0x600000 spiffs/system.npf`，见 ideas_and_exps/FONT_FLASH.md）。
+    #   换字体 = 用 tools/font 的流程重新烘焙 spiffs/system.npf，然后 idfc build +
+    #   重刷字体分区。
+    #   当前内容是 Droid Sans Fallback（AOSP/Apache-2.0，34,461 码位，24px 行高 32，
+    #   镜像 4.44MiB）；许可文本入库在 spiffs/DroidSansFallback-LICENSE.txt。
 
     config UI_COVER_FLASH
         bool "默认封面使用极速版（RGB565 真彩色，体积大）"

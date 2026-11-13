@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "core/fonts/font_ttf.h"   /* font_ttf_release/reload：非正常启动分支切换字体 */
 #include "core/fonts/system_font.h"
 #include "core/image/default_cover.h"
 #include "core/player/player_controller.h"
@@ -299,17 +298,9 @@ static void boot_enter_normal(void)
 {
     s_state = BOOT_ST_NORMAL;
 
-    /* 加载 TTF 系统字体（延迟加载点）：只有走到"常规界面"才需要它——boot 的
-       低电/无卡/待扫描分支全程用内嵌位图字体。幂等；失败就继续用内嵌位图字体，
-       界面不会没字。⚠ 必须在 app_ui_create() 之前，UI 创建时就要按 TTF 的行高
-       算列表行高。⚠ 本函数在 boot_flow_run 内被调用，已持 LVGL 锁（init 要求）。 */
-    esp_err_t ferr = font_ttf_init();
-    /* 失败（font 分区缺失 / 字体文件损坏 / 字形创建失败）时继续用内嵌位图字体，
-       界面不会没字——这是"能开机"的兜底，不是正常状态，故打 W 级日志。 */
-    if (ferr != ESP_OK) {
-        ESP_LOGW(TAG, "TTF init failed (%s), UI keeps built-in bitmap font",
-                 esp_err_to_name(ferr));
-    }
+    /* 系统字体已在 app_main 早期由 system_font_init() 挂载好（NPF1 全字库或
+       内嵌精简字库兜底），这里不需要再加载。UI 创建时按 UI_SYSTEM_FONT 的
+       行高（NPF 24px 行高 32）算列表行高，所以字体必须先就绪。 */
 
     if (s_root != NULL) {
         lv_obj_del(s_root);
@@ -362,13 +353,17 @@ static void boot_scan_progress_cb(playlist_build_phase_t phase, uint32_t song_co
         return;
     }
 
-    /* ⚠ 写入阶段（playlist_store_save_playlist → 擦写 pldata 分区）会**关闭外部
-       内存缓存**，期间 PSRAM 完全不可访问；而 LVGL 的对象堆（core/ui/lvgl_mem.c）
-       与 FreeType 的字形位图缓存都在 PSRAM。若此时 LVGL 任务正在渲染，轻则那一帧
-       停摆、新字形取不到（界面出现方框、进度界面冻住），重则绘制状态错乱。
-       所以这里**先把 LVGL 锁拿过来**让渲染停下来，顺便主动提交"正在写入…"这一帧
-       （进度定时器已被挡在锁外，等不到它来更新文案），锁则交给 boot_scan_task
-       在写完 flash 之后归还。
+    /* ⚠⚠ 写入阶段（playlist_store_save_playlist → 擦写 pldata 分区）会**关闭外部
+       flash 缓存**，此时所有"映射在 flash 上的数据"都不可访问——本项目的系统
+       字体正是 NPF1 全字库：`font_npf.c` 用 esp_partition_mmap 把 font 分区直接
+       映射进来，LVGL 渲染文字时（draw_main 里取字形位图）就是读这块 flash。若
+       LVGL 在写入期间还在渲染，取字形的总线访问会卡在"缓存已关、flash 忙"状态里
+       出不来：**LVGL 任务永久卡死**（实测：task_wdt 在 5s 后报 "CPU 0: LVGL" 并
+       打出 lv_label 绘制 → lv_refr 的调用栈；WDT 关闭时表现为扫描完成后界面再也
+       不动、日志刷 task_wdt，只能断电重启。详见 ideas_and_exps/NPF_FONT.md §7.1）。
+       修法与 TTF 时代（commit 255f0b9）一致：**先把 LVGL 锁拿过来**让渲染停下来，
+       并主动提交"正在写入…"这一帧；锁交给 boot_scan_task 在写完 flash（含无音乐
+       时的 playlist_store_invalidate）之后归还。
        ⚠ 本回调跑在扫描任务上下文（Core1，栈在内部 RAM——关缓存期间栈必须可访问）。
        ⚠ 持锁期间本任务只做 flash 擦写，不再碰 PSRAM/LVGL。 */
     if (lvgl_port_lock(-1)) {
@@ -515,15 +510,14 @@ static void reset_position_btn_cb(lv_event_t *e)
 /* 开机流程入口                                                        */
 /* ------------------------------------------------------------------ */
 
-/* ⚠ 字体是**延迟加载**的：低电 / 无卡 / 数据无效这三个非正常启动分支全程使用
-   内嵌位图字体，只有走到"常规界面"（下面第 4 步，或扫描成功后）才由
-   boot_enter_normal() 调 font_ttf_init() 加载 TTF。原因：
-   · 这三个界面上的文字都是固定文案，内嵌位图字库完全覆盖（UI 用字已补齐，见
-     ideas_and_exps/FontSymbols.md）；
-   · "数据无效"这一支紧接着要扫描 SD 卡并整体重写 pldata 分区——扫描期一次吃掉
-     约 2.8MB PSRAM，写 flash 时还会关外部内存缓存、PSRAM 不可访问。此时若已经
-     加载了 TTF，FreeType 的字形位图缓存既白占 PSRAM，又会在关缓存期间让渲染
-     取不到字形（文字变方框、进度界面冻住）。干脆一开始就不加载。 */
+/* ⚠ 系统字体在 app_main 早期已挂载（NPF1 全字库，mmap 只读）：本流程的所有
+   分支（无卡 / 待扫描 / 扫描 / 常规界面）都用同一份字体，不再有 TTF 时代的
+   "延迟加载"。
+   · 内嵌精简字库仍作为 NPF 挂载失败时的兜底（system_font.c），覆盖全部 UI
+     固定文案（见 ideas_and_exps/FontSymbols.md）；
+   · "数据无效"这一支会扫描 SD 卡并整体重写 pldata 分区，写入阶段会关闭外部
+     flash 缓存——此时 mmap 在 font 分区上的字形位图不可访问，所以**写入期间必须
+     让 LVGL 停止渲染**（见 boot_scan_progress_cb 的持锁逻辑与 NPF_FONT.md §7.1）。 */
 void boot_flow_run(void)
 {
     /* 1. SD 卡检查：未挂载 → 无卡界面（failsafe 清除扫描数据） */

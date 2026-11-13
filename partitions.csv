@@ -5,8 +5,8 @@
 #                               分区表自身占用到 0x9000，故下方 nvs 从 0x9000 起
 #   nvs      @ 0x9000   (0x6000 = 24KB)        配置/用户数据
 #   phy_init @ 0xF000   (0x1000 = 4KB)         射频校准数据
-#   factory  @ 0x10000  (0x7F0000 = 7.9375MB)  应用固件
-#   font     @ 0x800000 (4MB)                  系统字体 system.ttf，**裸二进制、无文件系统**
+#   factory  @ 0x10000  (0x5F0000 = 5.9375MB)  应用固件
+#   font     @ 0x600000 (6MB)                  NPF1 位图全字库镜像 system.npf，**裸二进制、无文件系统**
 #   pldata   @ 0xC00000 (4MB)                  播放列表数据结构分区（锚定在**最尾部**）
 #
 # ---------- 布局原则（2026-10-25 重排确立，务必遵守） ----------
@@ -16,41 +16,46 @@
 # 2) font 与 pldata 的偏移都要按 64KB（SPI_FLASH_MMU_PAGE_SIZE）对齐，否则无法整体内存映射。
 # 3) factory 起始固定 0x10000（app 分区对齐要求）；它和 font 平分中间那块空间，此消彼长。
 #
-# ---------- font 分区（2026-10 字体 TTF 化时新增） ----------
-# 分区里就是 system.ttf 本身，必须从分区偏移 0 开始（驱动按绝对偏移读）。
-# 裸分区而非 SPIFFS 的原因（实测数据，当时的字体是 7.82MiB 的 MiSans）：
-#   · SPIFFS 至少要 8.625MiB 分区（spiffsgen 用 IDF 的精确参数二分：8.5625MiB 直接
-#     SpiffsFullError，8.625MiB 才通过），即额外吃掉 0.4~0.8MiB；
-#   · 裸分区按文件大小对齐即可，且不必每轮构建生成大镜像、没有挂载扫描时间、没有常驻开销。
-# 该结论与字体选型无关：现在字体只有 3.55MiB，裸分区依然是最省最简单的一档。
-# 代价：分区里放不了第二个文件，读写要靠自己的 lv_fs 驱动（见 main/core/fonts/font_ttf.c）。
+# ---------- font 分区（NPF1 全字库，2026-11 起） ----------
+# 分区里是 spiffs/system.npf（Droid Sans Fallback 的 24px 全字库预烘焙镜像，
+# 34,461 个码位 ≈ 4.44MiB），必须从分区偏移 0 开始（运行时按绝对偏移 mmap）。
+# 由 main/core/fonts/font_npf.c 做一次 esp_partition_mmap + 填指针，字形位图与
+# glyph_dsc 始终留在 Flash，只占 MMU 页、不占 RAM（详见 ideas_and_exps/NPF_FONT.md）。
+# 裸分区而非文件系统的原因见下方 2026-10 记录（SPIFFS 要多花 0.4~0.8MiB 且要挂载）。
+# 代价：分区里放不了第二个文件；读写直接走 mmap，不需要 lv_fs 驱动。
 #
 # ---------- 字体怎么刷进来（2026-10-25 起改为**手动**） ----------
 # 分区表只**保留位置**，构建系统不参与字体烧录（此前由 main/CMakeLists.txt 的
 # font-flash 目标代劳，该目标已移除）。刷字体就用**装固件时手边的 esptool**，一条命令：
-#   esptool.exe --chip esp32s31 --port COMx write_flash 0x800000 spiffs/system.ttf
+#   esptool.exe --chip esp32s31 --port COMx write_flash 0x600000 spiffs/system.npf
 # 完整刷入文档（何时必须刷、怎么校验、出错表现、换字体流程）：ideas_and_exps/FONT_FLASH.md
-# ⚠ 普通 `idfc flash` **不含字体**（有意为之：字体 3.55MiB，每轮多烧 30~40 秒不值）。
+# ⚠ 普通 `idfc flash` **不含字体**（有意为之：字体 4.44MiB，每轮多烧 30~40 秒不值）。
 #
-# 当前字体：Droid Sans Fallback（AOSP，Apache-2.0），3,725,920 B = 3.554MiB
-#          → 4MiB 分区余 468,384 B（约 457KB，12.5%）。
-# ⚠ 换字体前先确认文件仍在 4MiB 以内；超了就调大 font 并等量缩小 factory（**不必动 pldata**）。
+# 当前字体：Droid Sans Fallback（AOSP，Apache-2.0）经 lv_font_conv 24px/bpp2 栅格化，
+#          再预烘焙成 NPF1：4,653,106 B = 4.44MiB → 6MiB 分区余约 1.34MiB。
+# ⚠ 换字体/改字号前先确认镜像仍在 6MiB 以内；超了就调大 font 并等量缩小 factory
+#   （**不必动 pldata**）。
 #
-# ---------- 2026-10 分区重排记录（两次，别再踩第三遍） ----------
-# 第一次（字体 TTF 化）：迁移前 factory = 6M、pldata @ 0x610000，尾部空闲只有 5.94MiB，
+# ---------- 分区重排记录（三次边界调整，别再踩第四遍） ----------
+# 2026-10 第一次（字体 TTF 化）：迁移前 factory = 6M、pldata @ 0x610000，尾部空闲只有 5.94MiB，
 #   装不下 7.82MiB 的 MiSans，因此从 factory 割出 2MiB 给 font（font 8M @0x800000、
 #   factory 3.9375M、pldata @0x400000）。副作用：pldata 偏移 0x610000 → 0x400000，
 #   **旧播放列表数据作废、首次开机要走一次"重新扫描"**；nvs 偏移未动，用户配置不丢。
-# 第二次（即当前布局）：字体换成 Droid Sans Fallback 后 8MiB 明显浪费，于是 font 8M→4M、
+# 2026-10 第二次：字体换成 Droid Sans Fallback 后 8MiB 明显浪费，于是 font 8M→4M、
 #   factory 3.9375M→7.9375M，并把 pldata 从中间挪到最尾部锚定（0x400000 → 0xC00000）。
 #   · font 起始偏移仍是 0x800000 → **字体数据不受影响、不需要重烧**（前半段字节完全一致）；
 #   · pldata 偏移又变了一次 → **旧播放列表数据再次作废，首次开机再重扫一次**（这次是最后一次）；
 #   · nvs 依旧未动，用户配置不丢。
 #   · 旧 pldata 区 0x400000~0x800000 现归属 factory，但烧录只写 app 镜像长度内的数据
 #     （实测 debug 1.78MiB / release 2.19MiB，远小于 0x400000），不会擦到那里。
+# 2026-11 第三次（本布局，改用 NPF1 位图全字库）：font 4M→6M、起始 0x800000→0x600000，
+#   factory 7.9375M→5.9375M；**pldata 不动（0xC00000）→ 播放列表与配置都不丢**。
+#   · font 内容整体换成 .npf，**必须重刷字体**（旧 TTF 所在 0x800000 现在落在 font 分区里，
+#     会被新镜像覆盖）；
+#   · 分区表变了 → 必须重刷分区表（idfc flash 会一并写入 0x8000），app 仍从 0x10000 开始。
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xF000,   0x1000,
-factory,  app,  factory, 0x10000,  0x7F0000,
-font,     data, 0x41,    0x800000, 4M,
+factory,  app,  factory, 0x10000,  0x5F0000,
+font,     data, 0x41,    0x600000, 6M,
 pldata,   data, 0x40,    0xC00000, 4M,

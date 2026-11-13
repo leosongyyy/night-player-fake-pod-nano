@@ -148,7 +148,7 @@ start_prog(chip);  // 到这里才关缓存
 
 | 调用点 | 任务 | 结论 |
 | --- | --- | --- |
-| `font_ttf_init` → `esp_partition_mmap`（font 分区） | 主任务（开机、内部栈） | ✓ |
+| `font_npf_init` → `esp_partition_mmap`（font 分区，2026-11 起；TTF 时代是 `font_ttf_init`） | 主任务（开机、内部栈） | ✓ |
 | `playlist_init` → `pldata_mmap` | 主任务 / `player_controller_init` | ✓ |
 | 重新扫描 → `playlist_deinit` → `pldata_munmap` | `deep_worker`（内部栈） | ✓ |
 

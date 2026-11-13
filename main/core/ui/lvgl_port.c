@@ -58,10 +58,12 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    这种重页面时溢出 —— 实测现象：从主界面滑到第 4 页（播放设置）必定
    `A stack overflow in task LVGL has been detected` 并 panic 重启。
    改到 12KB 后位图字体时代不再溢出。
-   ⚠ **换成 TTF 字体后 12KB 又不够了**：光栅化字形会进 FreeType 的
-   smooth 光栅化器，而它把渲染池当栈上局部变量用（见 core/fonts/ftoption_lvgl.h，
-   池子已从默认 16KB 压到 4KB），叠加深层绘制链后实测 12KB 只剩 **172 字节**，
-   所以再上调到 20KB（余量 ~8KB）。
+   ⚠ **2026-10 TTF 迁移时**12KB 又不够了：光栅化字形会进 FreeType 的
+   smooth 光栅化器，而它把渲染池当栈上局部变量用（当时池子已从默认 16KB 压到
+   4KB），叠加深层绘制链后实测 12KB 只剩 **172 字节**，所以曾上调到 20KB。
+   **2026-11 已改回位图字体（NPF1）**，不再有光栅化，20KB 继续保留（余量约 8KB，
+   未重新收紧；位图 bpp2→A8 展开与绘制管线仍吃栈）。若内部 RAM 吃紧，可按
+   mem_monitor 的 stk 行实测后回落到 12KB。
    ⚠ 内部栈不能走 PSRAM（见 AGENTS.md），加栈会吃内部 RAM，改动前先看
    mem_monitor 的 stk 行与内部 RAM 余量。 */
 #define EXAMPLE_LVGL_TASK_STACK_SIZE   (20 * 1024)

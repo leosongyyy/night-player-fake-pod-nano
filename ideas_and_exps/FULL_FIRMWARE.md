@@ -1,8 +1,9 @@
 # 全量固件（单文件、烧 0x0 一次完成整片更新）
 
-> **一句话**：把 `bootloader.bin` + `partition-table.bin` + 应用固件 + `spiffs/system.ttf`
+> **一句话**：把 `bootloader.bin` + `partition-table.bin` + 应用固件 + `spiffs/system.npf`
 > 按分区表偏移拼成一个 **16 MiB** 的 bin，整片烧到 **0x0** 即可完成更新，并**顺带清空
-> nvs 与 pldata**（配置和播放列表都不保留）。字体已包含，不需要再单独刷 `font` 分区。
+> nvs 与 pldata**（配置和播放列表都不保留）。字体（NPF1 位图全字库）已包含，
+> 不需要再单独刷 `font` 分区。
 
 产物示例：`dist/FakePodNanoNightPlayer_v1.0.0.0_release_full_20261105.bin`（16,777,216 B）。
 
@@ -17,7 +18,7 @@
 | `0x009000` | 24 KiB | `nvs` —— **0xFF（清空）** | 填充 |
 | `0x00F000` | 4 KiB | `phy_init` —— **0xFF（清空）** | 填充 |
 | `0x010000` | 2,195,872 B | 应用固件 `FakePodNanoNightPlayer.bin` | `build/<cell>/` |
-| `0x800000` | 3,725,920 B | 系统字体 `system.ttf`（裸 TTF） | `spiffs/system.ttf` |
+| `0x600000` | 4,653,106 B | 系统字体 `system.npf`（NPF1 位图全字库，裸镜像） | `spiffs/system.npf` |
 | `0xC00000` | 4 MiB | `pldata` —— **0xFF（清空）** | 填充 |
 | 其余空隙 | — | 0xFF（擦除态） | 填充 |
 
@@ -62,7 +63,7 @@ flash 大小取自 `flasher_args.json` 的 `flash_settings.flash_size`。
 
 生成时会做这些校验（任一失败直接报错退出）：
 
-- bootloader magic `0xE9`、分区表 magic `AA 50`、应用镜像 magic `0xE9`、字体 sfnt magic；
+- bootloader magic `0xE9`、分区表 magic `AA 50`、应用镜像 magic `0xE9`、字体 NPF1 magic `"NPF1"`；
 - `nvs` / `phy_init` / `pldata` 三个区域全为 `0xFF`；
 - 四段数据与源文件逐字节一致；
 - 字体不超过 `font` 分区、应用不超过 `factory` 分区、各段不重叠。
@@ -143,7 +144,7 @@ python -m esptool --chip esp32s3 -p COMx write-flash 0x0 dist\FakePodNanoNightPl
 ## 八、维护提示
 
 - 脚本产物在 `dist/`（已被 `.gitignore` 忽略），不入库；发版时上传到 release 即可。
-- 换字体：覆盖 `spiffs/system.ttf` 后重跑脚本，全量固件会自动带上新字体。
+- 换字体：用 `tools/font` 重新烘焙 `spiffs/system.npf`（见 `NPF_FONT.md` §4）后重跑脚本，全量固件会自动带上新字体。
 - 改分区表：确保 `pldata` 仍锚定在 flash 末尾（本脚本按 16 MiB 整片填充，若 pldata 结束
   位置小于 flash 大小，中间会自然填 `0xFF`，同样算"清空"）。
 - 若将来 flash 不是 16 MiB，脚本会按 `flasher_args.json` 的 flash 大小自动调整。

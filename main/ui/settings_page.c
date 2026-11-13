@@ -47,11 +47,11 @@ static const char *TAG = "settings_page";
    若不统一，格子内"图标 + 状态文字"的总高不同，flex 居中后各格子的
    图标/文字基线互相错开（矮格子的状态文字被往下推）。这里让所有格子的
    图标区都是 48×48，内部单行文字自行垂直居中，从而各格子完全对齐。
-   ⚠ 行高随字体变化：20px 点阵行高 24（两行 48 正好），换成 TTF 后行高 26
-   （两行 52 超 4px；MiSans 时代是 27、超 6px），所以 settings_icon_label_create
-   里对两行文字加了 text_line_space=-6 收紧到 46。改字体/字号时两处要一起看。
-   ⚠ 若把"回放/增益"改用 UI_SYSTEM_FONT（24px，TTF 行高 31），两行要 62px，
-   需同步把这里加到 64（并去掉那个 -6 的行距修正）。 */
+   ⚠ 行高随字体变化：UI_SMALL_FONT 是内嵌 20px 点阵，行高 23（两行 46 < 48，
+   放得下）；TTF 时代 20px 行高 27、需要 text_line_space=-6 收紧，位图字体
+   不需要那个修正（见 settings_icon_label_create）。改字体/字号时两处要一起看。
+   ⚠ 若把"回放/增益"改用 UI_SYSTEM_FONT（24px NPF 行高 32），两行要 64px，
+   需同步把这里加到 64。 */
 #define SETTINGS_ICON_W         48
 #define SETTINGS_ICON_H         48
 
@@ -491,13 +491,13 @@ static lv_obj_t *settings_icon_area_create(lv_obj_t *cell)
 
 /* 图标标签：
    - ascii=true 用 LVGL 内置 Montserrat 24（含 PUA 区图标字形，如 ↻ / ⇄）；
-   - ascii=false 用 20px 系统字体 UI_SMALL_FONT，供"文字图标"格使用
-     （回放增益格的 "回放\n增益"）——系统字体不含 PUA 图标字形，只能排文字。
-   ⚠ 图标里的文字若要跟系统正文统一取 24px 的 UI_SYSTEM_FONT，两行就会超框：
-     24px 系统字体行高 31（TTF 实测），两行 62px > SETTINGS_ICON_H(48)；
-     20px 字体行高 26，两行 52px，仍超 4px —— 所以下面用 text_line_space=-4
-     把两行压到 48px 正好塞满（TTF 迁移前 20px 点阵行高是 24，两行 48 刚好，
-     换 TTF 后行高变 26 才需要这一行修正）。
+   - ascii=false 用 20px 系统小字体 UI_SMALL_FONT（内嵌位图 system_smaller_font），
+     供"文字图标"格使用（回放增益格的 "回放\n增益"）——系统字体不含 PUA 图标
+     字形，只能排文字。
+   ⚠ 图标里的文字不能改用 24px 的 UI_SYSTEM_FONT：NPF 全字库 24px 行高 32，
+     两行 64px 远超 SETTINGS_ICON_H(48)；UI_SMALL_FONT 是 20px 点阵（行高 23），
+     两行 46px 正好放进 48px 图标区，不需要再压行距（TTF 时代 20px 行高 27，
+     当时才需要 text_line_space=-6）。
    ⚠ 换行只能用 "\n"：LVGL 只认 \n 为换行符，"\r\n" 里的 \r 会被当成普通
      字符排版，表现为字间多出一段空隙。 */
 static lv_obj_t *settings_icon_label_create(lv_obj_t *cell, const char *icon,
@@ -507,11 +507,6 @@ static lv_obj_t *settings_icon_label_create(lv_obj_t *cell, const char *icon,
     lv_obj_t *lbl = lv_label_create(area);
     lv_label_set_text(lbl, icon);
     lv_obj_set_style_text_font(lbl, ascii ? &lv_font_montserrat_24 : UI_SMALL_FONT, 0);
-    if (!ascii) {
-        /* 两行文字图标：把行距收紧 6px，保证 2×27-6 = 48px 正好放进图标区
-           （27 = 20px TTF 字体实测行高，见 font_ttf.c 启动日志） */
-        lv_obj_set_style_text_line_space(lbl, -6, 0);
-    }
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
     return lbl;
 }
