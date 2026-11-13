@@ -60,8 +60,10 @@ static void touch_init_task(void *arg)
     esp_lcd_panel_io_handle_t tp_io_handle = (esp_lcd_panel_io_handle_t)arg;
 
     const esp_lcd_touch_config_t tp_cfg = {
-        .x_max = EXAMPLE_LCD_H_RES + 20,
-        .y_max = EXAMPLE_LCD_V_RES,
+        /* S31 的 CST820 输出已经是 460x460 逻辑坐标（hardware_v1.md §4），
+           直接用屏幕分辨率作为最大值；x_max/y_max 只影响镜像计算。 */
+        .x_max = EXAMPLE_LCD_H_RES - 1,
+        .y_max = EXAMPLE_LCD_V_RES - 1,
         .rst_gpio_num = EXAMPLE_PIN_NUM_TOUCH_RST,
         .int_gpio_num = EXAMPLE_PIN_NUM_TOUCH_INT,
         .levels = {
@@ -122,7 +124,8 @@ esp_lcd_touch_handle_t touch_init(void)
             .enable_internal_pullup = 1,
         },
     };
-    // 200kHz：400kHz 在 TXS0102 上长时间工作不可靠；100kHz 实测反而更易触发切换后卡死，故用 200kHz
+    // 400kHz：S31 板上 CST820 直接挂在 I2C0（无 TXS0102 电平转换），
+    // 按硬件参考文档的 400kHz 参考值使用。
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_conf, &s_i2c_bus));
 
     // Scan I2C devices
@@ -144,7 +147,7 @@ esp_lcd_touch_handle_t touch_init(void)
        要切换到的 SCL 频率，所以必须与总线同速（都用 200kHz）。
        这里在调用点覆盖而不是改 3 个驱动头文件里的宏：位置集中、不影响上游宏文件。 */
     esp_lcd_panel_io_i2c_config_t tp_io_config = TOUCH_IO_I2C_CONFIG();
-    tp_io_config.scl_speed_hz = 200 * 1000;   // 与 i2c_new_master_bus 的总线速率一致
+    tp_io_config.scl_speed_hz = 400 * 1000;   // 与 i2c_new_master_bus 的总线速率一致
     // Attach the TOUCH to the I2C bus（v6.1 起只接受 i2c_master_bus_handle_t）
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_config, &tp_io_handle));
 

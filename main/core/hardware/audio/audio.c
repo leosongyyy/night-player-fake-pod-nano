@@ -16,10 +16,11 @@ static const char *TAG = "audio";
 /* 引脚与 I2S 配置                                                      */
 /* ------------------------------------------------------------------ */
 
-#define AUDIO_I2S_NUM      I2S_NUM_0
-#define AUDIO_BCK_PIN      GPIO_NUM_40   /* I2S 位时钟（主机输出） */
-#define AUDIO_WS_PIN       GPIO_NUM_38   /* I2S 帧时钟 LRCK/WS（主机输出） */
-#define AUDIO_DOUT_PIN     GPIO_NUM_39   /* I2S 数据输出 DIN */
+/* ESP32-S31：DAC 走 I2S1（I2S0 留给 PDM 麦克风，见 hardware_v1.md §6/§7） */
+#define AUDIO_I2S_NUM      I2S_NUM_1
+#define AUDIO_BCK_PIN      GPIO_NUM_52   /* I2S1 位时钟（主机输出） */
+#define AUDIO_WS_PIN       GPIO_NUM_51   /* I2S1 帧时钟 LRCK/WS（主机输出） */
+#define AUDIO_DOUT_PIN     GPIO_NUM_50   /* I2S1 数据输出 DIN */
 
 /* 播放缓冲：帧数（每帧 = 左右各 32bit slot），48kHz 下约 10.7ms/缓冲 */
 #define AUDIO_BUF_FRAMES 512
@@ -118,7 +119,7 @@ static esp_err_t i2s_audio_init(void)
         ESP_LOGE(TAG, "init i2s std mode failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "I2S channel ready (BCK=GPIO40, WS=GPIO38, DOUT=GPIO39)");
+    ESP_LOGI(TAG, "I2S channel ready (I2S1 BCK=GPIO52, WS=GPIO51, DOUT=GPIO50)");
     return ESP_OK;
 }
 

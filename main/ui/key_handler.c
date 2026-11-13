@@ -5,7 +5,6 @@
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
-#include "core/utils/fake_shutdown.h"
 #include "core/utils/power_service.h"
 #include "core/utils/sleep_timer.h"
 
@@ -16,27 +15,16 @@
 
 static const char *TAG = "key_handler";
 
-/* 唤醒防循环：deepsleep 唤醒 = 芯片重启，若唤醒时按键仍被按住，boot 后
-   button_service 去抖仍会报告事件 → 立即再次休眠。开机 1.2 秒内忽略
-   按键事件（长按由 button_service 的"开机初始按压"机制另行抑制）。 */
+/* 开机/唤醒后的按键保护窗口（ms）：AXP2101 开机瞬间可能带着按键残留，
+   同时避免 deep sleep 时代"唤醒时按键仍被按住 → 立即再次关机"的循环。
+   当前 S31 不做固件伪关机，但保留该保护以过滤开机抖动。 */
 #define DEEP_SLEEP_IGNORE_MS  1200
 
 /* 音量按键步进（单位：档，音量范围 0~30）：
-   - 短按 ±1（0=静音，1~30 线性映射 20%~80%，每档约 2 个百分点）；
-   - B 键长按一次性 -10 档（B 键可安全长按）。 */
+   - 短按 -1（0=静音，1~30 线性映射 20%~80%，每档约 2 个百分点）；
+   - 长按一次性 -10 档。 */
 #define VOL_STEP_SHORT   1
-#define VOL_STEP_LONG_B  10
-
-/* A 键长按阈值：亮屏 / 息屏两档，宏定义在 ui/key_handler.h
-   （KEY_A_LONG_PRESS_ON_MS / KEY_A_LONG_PRESS_OFF_MS）。
-   由 button_service 在每次按下 A 键时调用下方 provider 取值：
-   息屏按 A 键长按会**先点亮屏幕**再走伪关机保存流程，亮屏耗时要靠更短的
-   阈值省回来，否则极罕见情况下可能来不及保存就被 3s 硬断电。 */
-static uint32_t a_long_press_ms_provider(void)
-{
-    return power_service_is_screen_off() ? KEY_A_LONG_PRESS_OFF_MS
-                                         : KEY_A_LONG_PRESS_ON_MS;
-}
+#define VOL_STEP_LONG    10
 
 /* 调节音量：config_store（持久化 + 通知 UI 回调）+ audio（写 CS43131 硬件）。
    ⚠ 顺序必须是【先 audio_set_volume_level 再 config_store_set_volume】：
@@ -64,12 +52,12 @@ static void key_adjust_volume(int8_t delta)
 }
 
 /* 按键事件回调（button_service 任务上下文）：
-   按当前息屏状态分发两套按键映射（见 key_handler.h 注释）。 */
+   S31 只有一个独立按键，按屏幕状态分发两套映射（见 key_handler.h）。 */
 static void on_button_event(button_event_t event, void *ctx)
 {
     (void)ctx;
 
-    /* 防循环：刚开机/唤醒 1.2 秒内忽略按键事件（唤醒时用户可能仍按着按键） */
+    /* 防抖/防残留：刚开机/唤醒 1.2 秒内忽略按键事件 */
     if (esp_timer_get_time() < (int64_t)DEEP_SLEEP_IGNORE_MS * 1000) {
         ESP_LOGI(TAG, "button event %d ignored within %d ms after boot",
                  (int)event, DEEP_SLEEP_IGNORE_MS);
@@ -81,53 +69,28 @@ static void on_button_event(button_event_t event, void *ctx)
 
     const bool sleeping = power_service_is_screen_off();
     switch (event) {
-    case BUTTON_EVENT_A_SHORT:
+    case BUTTON_EVENT_SHORT:
         if (sleeping) {
-            /* 息屏：播放/暂停（黑屏盲操作，不亮屏） */
-            player_controller_toggle();
-            /* 息屏播放控制属于"用户动作"：清醒感知加时
-               （音量调节不再加时，见 sleep_timer_note_activity 注释） */
-            sleep_timer_note_activity();
-        } else {
-            /* 亮屏：音量 + */
-            key_adjust_volume(VOL_STEP_SHORT);
-        }
-        break;
-    case BUTTON_EVENT_B_SHORT:
-        if (sleeping) {
-            /* 息屏：下一曲 */
+            /* 息屏：先亮屏，再下一曲（单键唯一能兼顾"唤醒 + 盲操作"的方案） */
+            power_service_screen_on();
             player_controller_next();
             /* 息屏切歌属于"用户动作"：清醒感知加时 */
             sleep_timer_note_activity();
         } else {
-            /* 亮屏：音量 - */
+            /* 亮屏：音量 -1 */
             key_adjust_volume(-VOL_STEP_SHORT);
         }
         break;
-    case BUTTON_EVENT_A_LONG:
+    case BUTTON_EVENT_LONG:
         if (sleeping) {
-            /* 息屏：先亮屏（恢复屏幕/LVGL/亮度），再走"等待断电"伪关机，
-               让用户看到保存/关机提示画面（计划第 6 点要求） */
+            /* 息屏：先亮屏，再上一曲 */
             power_service_screen_on();
-        }
-        /* A 键（电源键，与 3 秒关机芯片复用）长按：固件先保存配置并停外设，
-           定格提示后 deepsleep；继续按住满 3s 即硬件断电（真正关机） */
-        fake_shutdown_wait_power_off();
-        break;
-    case BUTTON_EVENT_B_LONG:
-        if (sleeping) {
-            /* 息屏：上一曲（B 键 GPIO0 可安全长按） */
             player_controller_prev();
-            /* 息屏切歌属于"用户动作"：清醒感知加时 */
             sleep_timer_note_activity();
         } else {
             /* 亮屏：音量一次性 -10 */
-            key_adjust_volume(-VOL_STEP_LONG_B);
+            key_adjust_volume(-VOL_STEP_LONG);
         }
-        break;
-    case BUTTON_EVENT_BOTH:
-        /* 双键同时按下：息屏/亮屏切换（计划第 5 点：双按不再是伪关机） */
-        power_service_screen_toggle();
         break;
     default:
         break;
@@ -137,10 +100,7 @@ static void on_button_event(button_event_t event, void *ctx)
 void key_handler_init(void)
 {
     button_service_register_cb(on_button_event, NULL);
-    /* A 键长按阈值随屏幕状态变化：息屏 900ms / 亮屏 1200ms（详见上方说明） */
-    button_service_set_a_long_press_provider(a_long_press_ms_provider);
-    ESP_LOGI(TAG, "key handler ready: "
-                  "screen on [A=vol+, B=vol-, A long (%d ms)=power off, B long=vol-10, both=screen off]; "
-                  "screen off [A=play/pause, B=next, B long=prev, A long (%d ms)=power off, both=screen on]",
-             KEY_A_LONG_PRESS_ON_MS, KEY_A_LONG_PRESS_OFF_MS);
+    ESP_LOGI(TAG, "key handler ready (single key): "
+                  "screen on [short=vol-1, long=vol-10]; "
+                  "screen off [short=wake+next, long=wake+prev]");
 }

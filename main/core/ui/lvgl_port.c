@@ -313,10 +313,9 @@ static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         touched = true;
     }
 
-    /* 以下坐标校准，LVGL 与触摸测试回调共用此值。
-       经过调整和优化后点击位置最符合直觉。 */
-    touchpad_y = (uint16_t)((uint32_t)touchpad_y * 29 / 30);
-    touchpad_x = (uint16_t)((uint32_t)touchpad_x * 29 / 30);
+    /* 坐标校准：S3 旧板曾做 ×29/30 的线性缩放；S31 的 CST820 直接输出
+       460x460 逻辑坐标（hardware_v1.md §4），迁移初期先不做缩放，
+       待真机点击验证后再决定是否需要校准系数。 */
 
     if (touched) {
         /* 只有真正按下（读到有效坐标）时才更新"最后坐标"基准。

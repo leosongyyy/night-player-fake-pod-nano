@@ -5,7 +5,6 @@
 #include "core/fonts/system_font.h"
 #include "core/fonts/system_smaller_font.h"
 #include "core/hardware/audio/audio.h"
-#include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 #include "core/utils/sleep_timer.h"
@@ -78,7 +77,6 @@ static lv_obj_t *notif_bar = NULL;
 
 /* 顶部状态信息区（左音量 / 右电量，与主状态栏数据同步） */
 static lv_obj_t *header_vol_label = NULL;
-static lv_obj_t *header_bat_label = NULL;
 
 /* 亮度竖条 */
 static lv_obj_t *bright_fill = NULL;
@@ -299,35 +297,7 @@ static void notif_config_changed_cb(void *ctx)
     notif_refresh_brightness_ui(config_store_get_brightness());
 }
 
-/* 电量图标按百分比分级（对应 LV_SYMBOL_BATTERY_* 五档，与主状态栏一致） */
-static const char *header_battery_icon(float pct)
-{
-    if (pct >= 90.0f) return LV_SYMBOL_BATTERY_FULL;
-    if (pct >= 60.0f) return LV_SYMBOL_BATTERY_3;
-    if (pct >= 40.0f) return LV_SYMBOL_BATTERY_2;
-    if (pct >= 15.0f) return LV_SYMBOL_BATTERY_1;
-    return LV_SYMBOL_BATTERY_EMPTY;
-}
-
-/* 周期刷新顶部状态区电量（约 1s，与主状态栏同一电压源） */
-static void battery_timer_cb(lv_timer_t *timer)
-{
-    (void)timer;
-    if (header_bat_label == NULL) return;
-
-    float vbat_mv = battery_read_voltage_mv();
-    if (vbat_mv < 0) {
-        lv_label_set_text(header_bat_label, LV_SYMBOL_BATTERY_EMPTY " --.-- V");
-        return;
-    }
-    float pct = (vbat_mv - BAT_EMPTY_MV) / (float)(BAT_FULL_MV - BAT_EMPTY_MV) * 100.0f;
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%s %.2f V",
-             header_battery_icon(pct), vbat_mv / 1000.0f);
-    lv_label_set_text(header_bat_label, buf);
-}
+/* S31：电池电压显示暂缺（AXP2101 适配后再加），顶部状态区只保留音量。 */
 
 /* ------------------------------------------------------------------ */
 /* 竖条滑动交互（亮度 / 音量，iOS 控制中心风格）                        */
@@ -639,12 +609,7 @@ static void header_create(void)
     lv_obj_set_style_text_color(header_vol_label, lv_color_white(), 0);
     lv_obj_align(header_vol_label, LV_ALIGN_TOP_LEFT, 46, 23);
 
-    /* 右：电量（电池图标 + 电压），顶边距 23px、右边缘边距 46px */
-    header_bat_label = lv_label_create(header);
-    lv_label_set_text(header_bat_label, LV_SYMBOL_BATTERY_FULL " --.-- V");
-    lv_obj_set_style_text_font(header_bat_label, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(header_bat_label, lv_color_white(), 0);
-    lv_obj_align(header_bat_label, LV_ALIGN_TOP_RIGHT, -46, 23);
+    /* 右：S31 暂无电池电压显示（AXP2101 适配后恢复） */
 }
 
 /* 中间内容区：左中右三列（flex row，等宽均分）。
@@ -758,18 +723,14 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
-    /* 初始填充：顶部状态区（音量/电量）与亮度/音量竖条 */
+    /* 初始填充：顶部状态区音量与亮度/音量竖条 */
     notif_refresh_volume_ui(config_store_get_volume());
     notif_refresh_brightness_ui(config_store_get_brightness());
     notif_refresh_sleep_btn();
     s_sleep_btn_on = sleep_timer_is_active();
-    battery_timer_cb(NULL);
 
     /* 订阅配置变更：按键调音量、设置页改亮度等修改后同步本面板显示 */
     config_store_register_cb(notif_config_changed_cb, NULL);
-
-    /* 电池周期刷新（约 1s） */
-    lv_timer_create(battery_timer_cb, 1000, NULL);
 
     /* 睡眠定时开关按钮状态周期同步（1s）：睡眠定时可能被设置页长按/开机
        默认开启等入口修改，按钮颜色跟随（状态未变时不重绘） */

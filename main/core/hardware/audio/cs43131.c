@@ -6,20 +6,22 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "core/hardware/touch.h"   /* touch_get_i2c_bus()：与触摸共用 I2C_NUM_0 */
-
 static const char *TAG = "cs43131";
 
 /* ------------------------------------------------------------------ */
 /* 引脚与 I2C 配置                                                      */
 /* ------------------------------------------------------------------ */
 
-/* ⚠ IDF 6.1 新 I2C 驱动（driver/i2c_master.h）：不再按“端口号 + 现填地址”访问，
-   而是由 touch_init() 建好总线（I2C_NUM_0）后，本驱动用
-   i2c_master_bus_add_device() 把自己的设备句柄挂到那条总线上；
-   此后所有传输都带 s_i2c_dev（地址已绑定在其中）。
-   设备句柄在探测过程中按候选地址逐个建立/拆除（见 cs43131_probe_addr）。 */
-#define CS43131_RST_PIN    GPIO_NUM_41    /* RESET#，低有效，经 3.3→1.8V 转换 */
+/* ESP32-S31：DAC 独占 **I2C1**（SDA=GPIO55, SCL=GPIO54，地址 0x30），
+   与触摸/PMU/RTC/IMU 所在的 I2C0 物理隔离（hardware_v1.md §3/§6）。
+   因此本驱动自己建总线，不再依赖 touch_init() 的先后顺序。
+   ⚠ IDF 6.1 新 I2C 驱动模型：i2c_new_master_bus() 建总线 →
+   i2c_master_bus_add_device() 建设备句柄（地址绑在设备句柄上）。 */
+#define CS43131_I2C_PORT       I2C_NUM_1
+#define CS43131_I2C_SDA        GPIO_NUM_55
+#define CS43131_I2C_SCL        GPIO_NUM_54
+#define CS43131_I2C_SPEED_HZ   (400 * 1000)
+#define CS43131_RST_PIN        GPIO_NUM_53    /* RESET，低有效 */
 
 /* 单次 I2C 传输超时（旧驱动用 i2c_set_timeout 配硬件超时，新驱动按传输传参） */
 #define CS43131_I2C_TIMEOUT_MS  200
@@ -64,7 +66,8 @@ static const char *TAG = "cs43131";
 
 /* 内部状态 */
 static uint8_t  s_i2c_addr      = 0x30;  /* 探测后锁定的设备地址（仅作日志/展示） */
-static i2c_master_dev_handle_t s_i2c_dev = NULL; /* 挂在触摸总线上的本设备句柄 */
+static i2c_master_bus_handle_t s_i2c_bus = NULL; /* DAC 专用的 I2C1 总线句柄 */
+static i2c_master_dev_handle_t s_i2c_dev = NULL; /* 挂在该总线上的本设备句柄 */
 static bool     s_ready         = false; /* 设备是否可用 */
 static uint32_t s_cur_rate      = 48000; /* 当前采样率 */
 
@@ -76,25 +79,47 @@ static uint32_t s_cur_rate      = 48000; /* 当前采样率 */
    单字节访问无需自动递增，故控制字节 = 0x00（INCR=0, SIZE=00=8bit）。 */
 #define CS43131_CTRL_BYTE  0x00
 
-/* 把本设备挂到触摸已建好的总线上（幂等：已在总线上则直接返回）。
-   ⚠ 总线必须已由 touch_init() 建立——app_main 的顺序正是 touch_init() 在前、
-   audio_init() 在后（见 main/main.c）。 */
+/* 建立 DAC 专用的 I2C1 总线（幂等） */
+static esp_err_t cs43131_bus_ensure(void)
+{
+    if (s_i2c_bus != NULL) {
+        return ESP_OK;
+    }
+    const i2c_master_bus_config_t bus_conf = {
+        .i2c_port = CS43131_I2C_PORT,
+        .sda_io_num = CS43131_I2C_SDA,
+        .scl_io_num = CS43131_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags = {
+            .enable_internal_pullup = 1,
+        },
+    };
+    esp_err_t ret = i2c_new_master_bus(&bus_conf, &s_i2c_bus);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "create I2C%d bus failed: %s", CS43131_I2C_PORT,
+                 esp_err_to_name(ret));
+        s_i2c_bus = NULL;
+    }
+    return ret;
+}
+
+/* 把本设备挂到已建好的 I2C1 总线上（幂等：已在总线上则直接返回） */
 static esp_err_t cs43131_bus_attach(uint8_t addr)
 {
     if (s_i2c_dev != NULL) {
         return ESP_OK;
     }
-    i2c_master_bus_handle_t bus = touch_get_i2c_bus();
-    if (bus == NULL) {
-        ESP_LOGE(TAG, "I2C bus not ready (touch_init() must run first)");
-        return ESP_ERR_INVALID_STATE;
+    esp_err_t ret = cs43131_bus_ensure();
+    if (ret != ESP_OK) {
+        return ret;
     }
     const i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = addr,
-        .scl_speed_hz    = 200 * 1000,   /* 与触摸总线同速（TXS0102 上 400kHz 不可靠） */
+        .scl_speed_hz    = CS43131_I2C_SPEED_HZ,
     };
-    return i2c_master_bus_add_device(bus, &dev_cfg, &s_i2c_dev);
+    return i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_i2c_dev);
 }
 
 static esp_err_t cs43131_write_reg(uint32_t addr, uint8_t dat)
@@ -154,15 +179,14 @@ static esp_err_t cs43131_power_up_domain(uint8_t pdn_bits)
 
 static bool cs43131_probe_addr(uint8_t addr, uint8_t *id_ab, uint8_t *id_cd, uint8_t *id_e)
 {
-    i2c_master_bus_handle_t bus = touch_get_i2c_bus();
-    if (bus == NULL) {
+    if (cs43131_bus_ensure() != ESP_OK) {
         return false;
     }
 
     /* 只发设备地址 + STOP，验证 ACK。
        旧驱动是手搓 i2c_cmd_link(start/write_byte/stop) + i2c_master_cmd_begin；
        新驱动直接用 i2c_master_probe(bus, addr, timeout)，语义相同。 */
-    if (i2c_master_probe(bus, addr, CS43131_I2C_TIMEOUT_MS) != ESP_OK) {
+    if (i2c_master_probe(s_i2c_bus, addr, CS43131_I2C_TIMEOUT_MS) != ESP_OK) {
         return false;
     }
 
@@ -312,7 +336,13 @@ static esp_err_t cs43131_apply_full_config(void)
 
 esp_err_t cs43131_init(void)
 {
-    /* 1. 硬件复位：RESET# 拉低 ≥1ms 后拉高，等待 tPUD（1.5ms）+ 余量 */
+    /* 0. 建立 DAC 专用的 I2C1 总线（S31 上与触摸总线分离） */
+    esp_err_t ret = cs43131_bus_ensure();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    /* 1. 硬件复位：RESET 拉低 ≥1ms 后拉高，等待 tPUD（1.5ms）+ 余量 */
     gpio_reset_pin(CS43131_RST_PIN);
     gpio_set_direction(CS43131_RST_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(CS43131_RST_PIN, 0);
@@ -329,7 +359,7 @@ esp_err_t cs43131_init(void)
     s_ready = true;
 
     /* 3. 完整配置序列（晶振 → MCLK → ASP → HP → PCM） */
-    esp_err_t ret = cs43131_apply_full_config();
+    ret = cs43131_apply_full_config();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "apply full config failed: %s", esp_err_to_name(ret));
         return ret;
@@ -428,8 +458,8 @@ uint32_t cs43131_get_sample_rate(void)
 
 esp_err_t cs43131_reset_for_sleep(void)
 {
-    /* RESET#（GPIO41）拉低进入硬件复位：全部电源域（含晶振）默认掉电。
-       拉低后保持低电平直至 esp_deep_sleep_start（芯片持续复位，功耗最低）。
+    /* RESET（GPIO53）拉低进入硬件复位：全部电源域（含晶振）默认掉电。
+       拉低后保持低电平直至进入 deepsleep（芯片持续复位，功耗最低）。
        唤醒后 cs43131_init() 会重新做完整复位+配置，无需在此恢复。 */
     gpio_reset_pin(CS43131_RST_PIN);
     gpio_set_direction(CS43131_RST_PIN, GPIO_MODE_OUTPUT);
@@ -441,12 +471,15 @@ esp_err_t cs43131_reset_for_sleep(void)
 
 void cs43131_bus_detach(void)
 {
-    /* 把设备句柄从总线上摘掉：必须在 touch_power_off()（i2c_del_master_bus，
-       会销毁整条总线）之前调用，否则 s_i2c_dev 变成悬垂句柄，唤醒重启后
-       cs43131_bus_attach() 会误判“已挂载”而直接复用失效句柄。 */
+    /* 把设备句柄与总线一起释放（deepsleep 前用）。I2C1 是 DAC 独占总线，
+       与触摸的 I2C0 互不影响；唤醒重启后 cs43131_init() 会重新建总线。 */
     if (s_i2c_dev != NULL) {
         i2c_master_bus_rm_device(s_i2c_dev);
         s_i2c_dev = NULL;
         s_ready = false;
+    }
+    if (s_i2c_bus != NULL) {
+        i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
     }
 }

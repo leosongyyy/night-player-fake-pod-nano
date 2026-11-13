@@ -31,66 +31,32 @@ extern "C" {
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 
-// 鱼鹰光电屏幕验证底板
-#define EXAMPLE_PIN_NUM_LCD_CS            (GPIO_NUM_8)
-#define EXAMPLE_PIN_NUM_LCD_PCLK          (GPIO_NUM_9)
-#define EXAMPLE_PIN_NUM_LCD_DATA0         (GPIO_NUM_10)
-#define EXAMPLE_PIN_NUM_LCD_DATA1         (GPIO_NUM_11)
-#define EXAMPLE_PIN_NUM_LCD_DATA2         (GPIO_NUM_12)
-#define EXAMPLE_PIN_NUM_LCD_DATA3         (GPIO_NUM_13)
-#define EXAMPLE_PIN_NUM_LCD_RST           (GPIO_NUM_7)
+/* ESP32-S31 / FakePodNano Pro V1 的 QSPI AMOLED 引脚
+   （来源：ideas_and_exps/reference_docs/hardware_v1.md §2） */
+#define EXAMPLE_PIN_NUM_LCD_CS            (GPIO_NUM_37)
+#define EXAMPLE_PIN_NUM_LCD_PCLK          (GPIO_NUM_38)
+#define EXAMPLE_PIN_NUM_LCD_DATA0         (GPIO_NUM_39)
+#define EXAMPLE_PIN_NUM_LCD_DATA1         (GPIO_NUM_40)
+#define EXAMPLE_PIN_NUM_LCD_DATA2         (GPIO_NUM_42)
+#define EXAMPLE_PIN_NUM_LCD_DATA3         (GPIO_NUM_43)
+#define EXAMPLE_PIN_NUM_LCD_RST           (GPIO_NUM_36)
+/* AMOLED 电源使能（高有效）。S31 板把屏幕供电改成受 GPIO 控制，必须在
+   SPI 初始化/发命令之前拉高，否则面板无供电、命令全部无响应。 */
+#define EXAMPLE_PIN_NUM_LCD_VCI_EN        (GPIO_NUM_44)
+/* 屏幕刷新同步（TE），硬件参考文档列出但当前固件未使用（保留定义备查） */
+#define EXAMPLE_PIN_NUM_LCD_TE            (GPIO_NUM_35)
 
 #define CST816_ID   1
 #define CST820_ID   2
 #define CHSC6417_ID 3
 
-// 鱼鹰光电
-#define AM196Q410502LK_196_410x502   1
-#define AM178Q368448LK_178_368x448   2
-#define AM151Q466466LK_151_466x466_C 3
-#define AM160Q480480LK_160_480x480_C 4
-#define AM201Q240296LK_201_240x296   5
-#define AM200Q460460LK_200_460x460   6  //本项目使用这个
+// 屏幕型号枚举：S31 迁移后只保留本机这一款（CO5300，460x460）
+#define AM200Q460460LK_200_460x460   1
 
 // 设置当前屏幕尺寸
-#define CURRENT_SCREEN_SIZE AM200Q460460LK_200_460x460 // 在这里选择屏幕尺寸
+#define CURRENT_SCREEN_SIZE AM200Q460460LK_200_460x460
 
-#if CURRENT_SCREEN_SIZE == AM196Q410502LK_196_410x502
-  #define EXAMPLE_LCD_H_RES              410
-  #define EXAMPLE_LCD_V_RES              502
-  #define EXAMPLE_LCD_X_GAP              22
-  #define EXAMPLE_LCD_Y_GAP              0
-  #define TOUCH_IC_CONFIG                CST820_ID
-  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
-#elif CURRENT_SCREEN_SIZE == AM178Q368448LK_178_368x448
-  #define EXAMPLE_LCD_H_RES              368
-  #define EXAMPLE_LCD_V_RES              448
-  #define EXAMPLE_LCD_X_GAP              16
-  #define EXAMPLE_LCD_Y_GAP              0
-  #define TOUCH_IC_CONFIG                CHSC6417_ID
-  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
-#elif CURRENT_SCREEN_SIZE == AM151Q466466LK_151_466x466_C
-  #define EXAMPLE_LCD_H_RES              466
-  #define EXAMPLE_LCD_V_RES              466
-  #define EXAMPLE_LCD_X_GAP              6
-  #define EXAMPLE_LCD_Y_GAP              0
-  #define TOUCH_IC_CONFIG                CST820_ID
-  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
-#elif CURRENT_SCREEN_SIZE == AM160Q480480LK_160_480x480_C
-  #define EXAMPLE_LCD_H_RES              480
-  #define EXAMPLE_LCD_V_RES              480
-  #define EXAMPLE_LCD_X_GAP              0
-  #define EXAMPLE_LCD_Y_GAP              0
-  #define TOUCH_IC_CONFIG                CHSC6417_ID
-  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
-#elif CURRENT_SCREEN_SIZE == AM201Q240296LK_201_240x296
-  #define EXAMPLE_LCD_H_RES              240
-  #define EXAMPLE_LCD_V_RES              296
-  #define EXAMPLE_LCD_X_GAP              0
-  #define EXAMPLE_LCD_Y_GAP              0
-  #define TOUCH_IC_CONFIG                CST816_ID
-  #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
-#elif CURRENT_SCREEN_SIZE == AM200Q460460LK_200_460x460
+#if CURRENT_SCREEN_SIZE == AM200Q460460LK_200_460x460
   #define EXAMPLE_LCD_H_RES              460
   #define EXAMPLE_LCD_V_RES              460
   #define EXAMPLE_LCD_X_GAP              10
@@ -106,6 +72,10 @@ extern "C" {
        说明是传输时序边际而非绘制逻辑）。同一固件回到 40 MHz 即完全消失，
        故**保持 40 MHz**，不要为几毫秒 render 去冒这个风险。
      ⚠ 只在这块屏的排线过长 / 杜邦线飞线时才需要再降（症状是花屏/噪点）。 */
+  /* 2026-11 S31 实测：40MHz 滚动约 30fps；LVGL 刷新周期改 16ms 保留。
+     ⚠ 80MHz 实测**复现了 S3 的"局部 1px 黑竖线"**（对象重绘区域左边缘、
+     随宽度累积），退回 40MHz 即消失——结论与 S3 一致：这块 AMOLED 的 QSPI
+     时序在 80MHz 处于边际，**保持 40MHz**，不要再为帧率往上调。 */
   #define AMOLED_QSPI_MAX_PCLK           40 * 1000 * 1000
 #else
   #error "Unsupported screen size"

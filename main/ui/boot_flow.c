@@ -6,7 +6,6 @@
 
 #include "core/fonts/font_ttf.h"   /* font_ttf_release/reload：非正常启动分支切换字体 */
 #include "core/fonts/system_font.h"
-#include "core/hardware/battery.h"
 #include "core/image/default_cover.h"
 #include "core/player/player_controller.h"
 #include "core/hardware/display.h"
@@ -37,9 +36,8 @@ static void start_scan_btn_cb(lv_event_t *e);
 static void clear_scan_data_btn_cb(lv_event_t *e);
 static void reset_position_btn_cb(lv_event_t *e);
 
-/* 开机最低电池电压门槛：直接引用 battery.h 的公共临界低电压常量
-   （BATTERY_CRITICAL_LOW_MV，3.45V）——与运行中低电自动伪关机（power_service）
-   共用同一阈值，改动只在 battery.h 一处。 */
+/* S31 平台：电池电压由 AXP2101 提供（尚未适配），S3 时代的"低电拒启"分支
+   已移除；开机流程只剩 SD 卡/播放列表数据检查。 */
 
 /* 扫描进度界面刷新周期（ms） */
 #define BOOT_PROGRESS_TIMER_MS 300u
@@ -68,7 +66,6 @@ static void reset_position_btn_cb(lv_event_t *e);
 typedef enum {
     BOOT_ST_NONE = 0,
     BOOT_ST_SPLASH,       /* 开机封面（默认封面，屏幕最早点亮的那一屏） */
-    BOOT_ST_LOW_BAT,      /* 电池电压过低，拒绝启动（停在此屏） */
     BOOT_ST_NO_SD,        /* 未插入 SD 卡（停在此屏） */
     BOOT_ST_PROMPT_SCAN,  /* 提示扫描，等待用户点击开始扫描 */
     BOOT_ST_SCANNING,     /* 正在扫描（进度每 300ms 更新） */
@@ -190,37 +187,7 @@ void boot_splash_show(void)
     ESP_LOGI(TAG, "boot splash: default cover shown");
 }
 
-/* 1. 电池电压过低：拒绝启动，只展示警告 + 当前电压 + 提示（不自动重启） */
-static void boot_show_low_battery(void)
-{
-    s_state = BOOT_ST_LOW_BAT;
-    lv_obj_t *root = boot_root_create();
-
-    lv_obj_t *title = boot_make_title(root, LV_SYMBOL_WARNING " 电池电压过低");
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -120);
-
-    lv_obj_t *warn = boot_make_hint(root, "请充电");
-    lv_obj_align(warn, LV_ALIGN_CENTER, 0, -40);
-
-    /* 展示当前电池电压 */
-    char buf[32];
-    float vbat = battery_read_voltage_mv();
-    if (vbat < 0) {
-        snprintf(buf, sizeof(buf), "当前电压：--.- V");
-    } else {
-        snprintf(buf, sizeof(buf), "当前电压：%.2f V", vbat / 1000.0f);
-    }
-    s_status_label = boot_make_title(root, buf);
-    lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, 40);
-
-    lv_obj_t *hint = boot_make_hint(root, "充电完成后重启设备");
-    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 120);
-
-    ESP_LOGI(TAG, "low battery: refusing to boot, voltage=%.0f mV",
-             (double)(vbat < 0 ? 0 : vbat));
-}
-
-/* 2. 未插入 SD 卡：提示 + failsafe 按钮组（重置歌曲位置 / 清除扫描数据），
+/* 1. 未插入 SD 卡：提示 + failsafe 按钮组（重置歌曲位置 / 清除扫描数据），
       停在此屏。内容整体相对屏幕中心上移（基准偏移 -30），视觉居中偏上，
       给底部留白（460px 屏去掉标题与两按钮后仍不显拥挤） */
 static void boot_show_no_sd(void)
@@ -559,29 +526,20 @@ static void reset_position_btn_cb(lv_event_t *e)
      取不到字形（文字变方框、进度界面冻住）。干脆一开始就不加载。 */
 void boot_flow_run(void)
 {
-    /* 1. 电池电压检查：低于阈值拒绝启动 */
-    float vbat = battery_read_voltage_mv();
-    if (vbat >= 0 && vbat < (float)BATTERY_CRITICAL_LOW_MV) {
-        ESP_LOGW(TAG, "battery too low (%.0f mV < %u mV), refuse to boot",
-                 (double)vbat, BATTERY_CRITICAL_LOW_MV);
-        boot_show_low_battery();
-        return;
-    }
-
-    /* 2. SD 卡检查：未挂载 → 无卡界面（failsafe 清除扫描数据） */
+    /* 1. SD 卡检查：未挂载 → 无卡界面（failsafe 清除扫描数据） */
     if (!sd_card_is_mounted()) {
         ESP_LOGW(TAG, "SD card not mounted");
         boot_show_no_sd();
         return;
     }
 
-    /* 3. 播放列表数据检查 */
+    /* 2. 播放列表数据检查 */
     if (!playlist_store_is_valid()) {
         ESP_LOGW(TAG, "playlist data invalid, prompt to scan");
         boot_show_prompt_scan();
         return;
     }
 
-    /* 4. 有卡 + 数据有效：直接进入常规界面 */
+    /* 3. 有卡 + 数据有效：直接进入常规界面 */
     boot_enter_normal();
 }

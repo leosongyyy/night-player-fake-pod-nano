@@ -573,38 +573,12 @@ static void menu_bg_click_cb(lv_event_t *e)
 }
 
 /* ------------------------------------------------------------------ */
-/* 开发者选项：电池电压日志 / 触摸测试白点（NVS 运行时开关，重启生效）     */
+/* 开发者选项：触摸测试白点（NVS 运行时开关，重启生效）                   */
+/* S31 的电池电压日志随 AXP2101 适配一起延后（battery_logger 已是占位）。 */
 /* ------------------------------------------------------------------ */
 
-/* 电池日志采样间隔档位（分钟）：开发者选项循环选择，存 config_store
-   （batt_log_min，NVS 持久化），开机读取生效（battery_logger_init） */
-static const uint8_t BATT_INTERVAL_STEPS[] = { 1, 2, 3, 5, 10 };
-#define BATT_INTERVAL_STEP_COUNT  (sizeof(BATT_INTERVAL_STEPS) / sizeof(BATT_INTERVAL_STEPS[0]))
-
 /* 开发者选项子页行的右侧状态文字句柄 */
-static lv_obj_t *s_dev_battlog_status  = NULL;  /* 电池电压日志：开/关 */
-static lv_obj_t *s_dev_interval_status = NULL;  /* 日志间隔：x 分钟 */
 static lv_obj_t *s_dev_touch_status    = NULL;  /* 触摸测试白点：开/关 */
-
-static void dev_refresh_battlog(void)
-{
-    if (s_dev_battlog_status == NULL) {
-        return;
-    }
-    lv_label_set_text(s_dev_battlog_status,
-                      config_store_get_battery_log() ? "开" : "关");
-}
-
-static void dev_refresh_interval(void)
-{
-    if (s_dev_interval_status == NULL) {
-        return;
-    }
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%u 分钟",
-             (unsigned)config_store_get_battery_log_min());
-    lv_label_set_text(s_dev_interval_status, buf);
-}
 
 static void dev_refresh_touch(void)
 {
@@ -613,34 +587,6 @@ static void dev_refresh_touch(void)
     }
     lv_label_set_text(s_dev_touch_status,
                       config_store_get_touch_test() ? "开" : "关");
-}
-
-/* 电池电压日志开关：点击切换并持久化（NVS），重启后生效（开机才检查） */
-static void dev_battlog_row_cb(lv_event_t *e)
-{
-    (void)e;
-    config_store_set_battery_log(!config_store_get_battery_log());
-    dev_refresh_battlog();
-    ESP_LOGI(TAG, "battery log -> %d (reboot to apply)",
-             (int)config_store_get_battery_log());
-}
-
-/* 日志采样间隔：点击在档位间循环并持久化（NVS），重启后生效 */
-static void dev_interval_row_cb(lv_event_t *e)
-{
-    (void)e;
-    uint8_t cur = config_store_get_battery_log_min();
-    uint8_t next = BATT_INTERVAL_STEPS[0];
-    for (size_t i = 0; i < BATT_INTERVAL_STEP_COUNT; i++) {
-        if (BATT_INTERVAL_STEPS[i] == cur) {
-            next = BATT_INTERVAL_STEPS[(i + 1) % BATT_INTERVAL_STEP_COUNT];
-            break;
-        }
-    }
-    config_store_set_battery_log_min(next);
-    dev_refresh_interval();
-    ESP_LOGI(TAG, "battery log interval -> %u min (reboot to apply)",
-             (unsigned)next);
 }
 
 /* 触摸测试白点开关：点击切换并持久化（NVS），重启后生效 */
@@ -684,9 +630,8 @@ static void dev_restart_row_cb(lv_event_t *e)
 }
 
 /* 构建开发者选项子页（**懒加载**：从关于页首次点进来时才构建）。
-   三个功能均为"开机检查、重启生效"的运行时开关（config_store/NVS）：
-   电池电压日志对应 battery_logger_init 是否建任务，触摸测试白点对应
-   lvgl_port_init 末尾是否创建圆点，采样间隔对应日志写入周期。
+   S31 版本只保留"触摸测试白点"（开机检查、重启生效）：
+   它对应 lvgl_port_init 末尾是否创建圆点。电池电压日志等 AXP2101 适配后再加。
    入口行由 about_page_build() 挂在关于页最下方。 */
 static lv_obj_t *dev_page_build(void)
 {
@@ -696,47 +641,29 @@ static lv_obj_t *dev_page_build(void)
     lv_obj_t *dev_page = lv_menu_page_create(s_menu, (char *)"开发者选项");
     page_style_apply(dev_page);
 
-    /* 1. 电池电压日志：开关 */
-    lv_obj_t *battlog_row = menu_row_create(dev_page, NULL,
-                                            "电池电压日志", &s_dev_battlog_status);
-    lv_obj_add_flag(battlog_row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(battlog_row, dev_battlog_row_cb, LV_EVENT_CLICKED, NULL);
-
-    /* 2. 日志采样间隔：档位循环（1/2/3/5/10 分钟） */
-    lv_obj_t *interval_row = menu_row_create(dev_page, NULL,
-                                             "日志采样间隔", &s_dev_interval_status);
-    lv_obj_add_flag(interval_row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(interval_row, dev_interval_row_cb, LV_EVENT_CLICKED, NULL);
-
-    /* 3. 触摸测试白点：开关 */
+    /* 1. 触摸测试白点：开关 */
     lv_obj_t *touch_row = menu_row_create(dev_page, NULL,
                                           "触摸测试白点", &s_dev_touch_status);
     lv_obj_add_flag(touch_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(touch_row, dev_touch_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 4. 功能说明（小字）：同样按段落拆成多张卡片（滚动性能，见睡眠定时器页注释） */
-    menu_note_row_create(dev_page,
-        "电池电压日志：定期采样电池电压写入 SD 卡 /sdcard/battery_log.txt，"
-        "用于续航/功耗曲线分析。");
+    /* 2. 功能说明（小字）：同样按段落拆成多张卡片（滚动性能，见睡眠定时器页注释） */
     menu_note_row_create(dev_page,
         "触摸测试白点：白色圆点跟随手指，用于校准触摸区域。");
     menu_note_row_create(dev_page,
         "以上修改保存到设备（NVS），重启后生效。");
 
-    /* 5. 立即重启：一键生效 */
+    /* 3. 立即重启：一键生效 */
     lv_obj_t *restart_row = menu_row_create(dev_page, LV_SYMBOL_REFRESH,
                                             "立即重启生效", NULL);
     lv_obj_add_flag(restart_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(restart_row, dev_restart_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 初始刷新各状态文字（打开页面时显示当前 NVS 值） */
-    dev_refresh_battlog();
-    dev_refresh_interval();
+    /* 初始刷新状态文字（打开页面时显示当前 NVS 值） */
     dev_refresh_touch();
 
     s_dev_page = dev_page;
-    ESP_LOGI(TAG, "developer options page built (battery log / interval / "
-                  "touch test)");
+    ESP_LOGI(TAG, "developer options page built (touch test)");
     return dev_page;
 }
 

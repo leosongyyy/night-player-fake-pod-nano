@@ -121,6 +121,22 @@ static bool s_display_asleep = false; /* 面板是否处于 SLEEP IN（息屏）
 
 esp_lcd_panel_handle_t display_init(void)
 {
+    /* 1. 屏幕供电使能（S31 新增 VCI_EN=GPIO44，高有效）：
+          先拉低 10ms 放电，再拉高并等待 120ms 让面板电源稳定，
+          之后才能发 QSPI 命令（hardware_v1.md §2 的上电时序建议）。 */
+    gpio_config_t vci_cfg = {
+        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_LCD_VCI_EN,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&vci_cfg));
+    gpio_set_level(EXAMPLE_PIN_NUM_LCD_VCI_EN, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(EXAMPLE_PIN_NUM_LCD_VCI_EN, 1);
+    vTaskDelay(pdMS_TO_TICKS(120));
+
     ESP_LOGI(TAG, "Initialize SPI bus");
     const spi_bus_config_t buscfg = QSPI_AMOLED_PANEL_BUS_QSPI_CONFIG(EXAMPLE_PIN_NUM_LCD_PCLK,
                                                                  EXAMPLE_PIN_NUM_LCD_DATA0,

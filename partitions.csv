@@ -28,7 +28,7 @@
 # ---------- 字体怎么刷进来（2026-10-25 起改为**手动**） ----------
 # 分区表只**保留位置**，构建系统不参与字体烧录（此前由 main/CMakeLists.txt 的
 # font-flash 目标代劳，该目标已移除）。刷字体就用**装固件时手边的 esptool**，一条命令：
-#   esptool.exe --chip esp32s3 --port COMx write_flash 0x800000 spiffs/system.ttf
+#   esptool.exe --chip esp32s31 --port COMx write_flash 0x800000 spiffs/system.ttf
 # 完整刷入文档（何时必须刷、怎么校验、出错表现、换字体流程）：ideas_and_exps/FONT_FLASH.md
 # ⚠ 普通 `idfc flash` **不含字体**（有意为之：字体 3.55MiB，每轮多烧 30~40 秒不值）。
 #

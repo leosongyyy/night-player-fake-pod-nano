@@ -5,7 +5,6 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,21 +48,9 @@ static void on_touch_ready(esp_lcd_touch_handle_t tp, void *ctx)
 
 void app_main(void)
 {
-    /* 检查唤醒原因（deep sleep 调试：确认是否为按键唤醒，排查误唤醒）
-       ⚠ IDF 6.0 起 esp_sleep_get_wakeup_cause() 已弃用（多唤醒源同时命中时它只
-       返回其中一个），改用 esp_sleep_get_wakeup_causes() —— 返回 bitmap，每一位
-       对应 esp_sleep_wakeup_cause_t 的一个取值，用 BIT(原因) 按位与判断。
-       本工程伪关机只注册了 EXT1（B 键，见 core/utils/fake_shutdown.c），
-       语义与旧写法完全等价。 */
-    uint32_t wakeup_causes = esp_sleep_get_wakeup_causes();
-    if (wakeup_causes == 0) {
-        ESP_LOGI(TAG, "boot: cold start (not from deep sleep)");
-    } else if (wakeup_causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
-        ESP_LOGI(TAG, "boot: woken by EXT1 (B key press)");
-    } else {
-        ESP_LOGW(TAG, "boot: woken by unexpected source (causes=0x%08lx)",
-                 (unsigned long)wakeup_causes);
-    }
+    /* S31 平台不再使用固件伪关机（deep sleep）：关机/唤醒由 AXP2101 负责，
+       尚未适配。此处只保留冷启动日志。 */
+    ESP_LOGI(TAG, "boot: cold start (S31, no firmware deep-sleep shutdown)");
 
     // 用户配置存储（NVS）：尽早初始化，开机恢复音量/亮度/循环模式等
     ESP_LOGI(TAG, "Initialize config store (NVS)");
@@ -144,7 +131,7 @@ void app_main(void)
     touch_register_ready_cb(on_touch_ready, NULL);
     mem_trace_log("06-touch");
 
-    ESP_LOGI(TAG, "Initialize battery ADC");
+    ESP_LOGI(TAG, "Initialize battery (S31 placeholder, AXP2101 TBD)");
     battery_init();
     mem_trace_log("07-battery");
 
@@ -175,7 +162,7 @@ void app_main(void)
     }
     mem_trace_log("09-pldata");
 
-    ESP_LOGI(TAG, "Initialize button service (A=GPIO48, B=GPIO0)");
+    ESP_LOGI(TAG, "Initialize button service (single key=GPIO61)");
     button_service_init();
     mem_trace_log("10-button");
     /* 按键分发（亮屏/息屏两套映射）在 LVGL 初始化后统一注册（见下） */
@@ -209,7 +196,8 @@ void app_main(void)
 
     // 深路径执行器已在 app_main 早期初始化（见上：内部 RAM 碎片化前创建）
 
-    // 睡眠定时器（默认关闭，由播放设置页开启；到点自动伪关机）
+    // 睡眠定时器（默认关闭，由播放设置页开启；到点暂停播放 + 息屏，
+    // S31 的真正关机由 AXP2101 负责、尚未适配）
     sleep_timer_init();
     mem_trace_log("13-sleep_timer");
 
@@ -234,21 +222,18 @@ void app_main(void)
         }
     }
 
-    // 按键分发（亮屏：音量±/伪关机/息屏；息屏：播放控制/亮屏）。
+    // 按键分发（S31 单键：亮屏=音量-；息屏=亮屏+切歌）。
     // 放在 LVGL 初始化之后，注册 button_service 事件回调。
     key_handler_init();
     mem_trace_log("14-key_handler");
 
-    // 电源服务（power_service）：esp_pm 固定频率（亮屏 240MHz/息屏 80MHz）+
-    // 触摸活动订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）+ 自动关机
-    // 策略（息屏暂停超时 / 电池电压持续过低，见 Kconfig）。需在 LVGL 之后。
+    // 电源服务（power_service）：esp_pm 固定频率（亮屏 320MHz/息屏 80MHz）+
+    // 触摸活动订阅 + 无操作超时自动息屏（默认 30 秒，设置页可调）。
+    // 低电/暂停自动关机随 S31 迁移移除（关机交给 AXP2101）。需在 LVGL 之后。
     power_service_init();
     mem_trace_log("15-power_service");
 
-    // 电池电压采样日志（开发者选项：设置 → 关于 → 开发者选项，NVS 运行时
-    // 开关，默认关）：开启时独立任务按所选间隔（默认 5 分钟）把
-    // "运行时长 + 平均电压"写入 SD 卡；此处读取开机时的 NVS 值决定是否建
-    // 任务（修改需重启生效）。需在 sd_card_init 之后（SD 未挂载时任务自行跳过）。
+    // 电池电压采样日志（S31 占位：AXP2101 尚未适配，函数只打印说明不建任务）
     battery_logger_init();
     mem_trace_log("16-batt_logger");
 

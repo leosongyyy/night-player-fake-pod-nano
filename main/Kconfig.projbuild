@@ -48,33 +48,13 @@ menu "FakePodNanoNightPlayer 应用配置"
             关闭：使用 2bit 索引色版 default_cover（约 52KB，省 Flash，
                   但渲染需逐像素查调色板，滑动时略卡，适合调试）。
 
-    config PAUSE_AUTO_SHUTDOWN_MIN
-        int "息屏暂停超时自动伪关机（分钟，0=关闭）"
-        default 10
-        range 0 60
-        help
-            设备处于**息屏且暂停**状态持续超过该时长，自动伪关机省电
-            （deepsleep，B 键/双按唤醒重启）。亮屏时暂停不计时（用户在看
-            屏幕随时会操作）。伪关机前会记录播放状态（config_store 的
-            was_playing），开机按记忆恢复：关机前在播放 → 开机自动播放；
-            关机前已暂停 → 开机停在暂停态不自动出声。0 = 关闭该功能。
-
-    config LOW_BATTERY_SHUTDOWN_SEC
-        int "电池电压持续过低自动伪关机（秒，0=关闭）"
-        default 60
-        range 0 600
-        help
-            运行中（无论屏幕亮暗、是否播放）电池电压**持续**低于临界值
-            3.45V（BATTERY_CRITICAL_LOW_MV，与开机拒启同一阈值，见
-            core/hardware/battery.h）超过该时长，自动伪关机防过放
-            （deepsleep，B 键唤醒重启）。时间窗口兼作滤波，滤除播放瞬时
-            大电流压降与 ADC 抖动；期间任一采样恢复即清零重计。
-            0 = 关闭该功能。⚠ 本固件暂无充电检测：充电器接入时电压被抬高
-            （高于 3.45V）不会触发；若后续接入充电状态检测，应排除充电态。
+    # 注：S31 平台（2026-11 迁移）取消了 S3 时代的"暂停超时自动伪关机"与
+    # "低电压自动伪关机"：真正的关机由 AXP2101 负责（尚未适配），低电策略
+    # 也要等 AXP2101 的电压/充电状态接入后再恢复。相关配置项一并移除。
 
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
-        default "1.0.0.0"
+        default "2.0.0.0"
         help
             用户可见的固件版本标识，仅用于"关于"页展示，不影响功能。
             发版时修改此值即可（idfc 的过期检测会自动重新配置构建）。

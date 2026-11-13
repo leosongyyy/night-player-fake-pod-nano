@@ -2,13 +2,10 @@
 
 #include <assert.h>
 
-#include "core/hardware/audio/mp3_player.h"
-#include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/deep_worker.h"
-#include "core/utils/fake_shutdown.h"
 #include "core/utils/task_psram.h"
 
 #include "esp_heap_caps.h"
@@ -34,39 +31,23 @@ static const char *TAG = "power_service";
    息屏投递路径（power_svc → deep_worker_call 等待完成）栈峰值约
    1.9KB——曾缩到 2KB 实测仅剩 116B 余量（过紧），3KB 留约 1.1KB 余量。
    历史 2KB 栈爆栈是直接内跑 esp_pm_configure 深链所致，勿回到在任务内
-   直接执行深链的写法。低电检查只多一次 ADC 读数（battery_read_voltage_mv
-   调用链浅），余量充足。 */
+   直接执行深链的写法。 */
 #define POWER_SVC_TASK_STACK (3 * 1024)
 #define POWER_SVC_TASK_PRIO  1
 #define POWER_SVC_TASK_CORE  1
 
-/* 固定频率（MHz）：亮屏锁 240MHz；息屏直接锁 80MHz。
+/* 固定频率（MHz）：亮屏锁 320MHz（S31 CPLL 最高档）；息屏直接锁 80MHz。
    ⚠ 不用 DFS 动态调频（实测息屏释放频率锁后空闲期降频不明显），改为
-   esp_pm_configure 把最大/最小频率都设成同一值强制固定：
-   - 亮屏：240/240 → CPU 恒 240MHz；
-   - 息屏：80/80 → CPU 恒 80MHz（省电；ESP32-S3 的 APB 恒 80MHz，
-     I2S/SPI 时钟不受影响，但高采样率/高码率 MP3 解码在 80MHz 下可能
-     更吃力，若实测卡顿可考虑改锁 160MHz）。 */
-#define PM_CPU_FREQ_ON_MHZ  240
+   esp_pm_configure 把最大/最小频率都设成同一值强制固定。
+   ⚠ S31 的 CPU 频点由 CPLL/BSPLL 分频得到，80MHz 若不被该芯片支持，
+   esp_pm_configure 会返回错误（本模块只告警、保持原频率），息屏功能不受影响。 */
+#define PM_CPU_FREQ_ON_MHZ  320
 #define PM_CPU_FREQ_OFF_MHZ 80
 
-/* 暂停超时自动伪关机（分钟）：暂停状态持续超过该时长自动伪关机省电。
-   经 Kconfig CONFIG_PAUSE_AUTO_SHUTDOWN_MIN 配置（默认 10 分钟，0=关闭）。 */
-#ifdef CONFIG_PAUSE_AUTO_SHUTDOWN_MIN
-#define PAUSE_SHUTDOWN_MIN  CONFIG_PAUSE_AUTO_SHUTDOWN_MIN
-#else
-#define PAUSE_SHUTDOWN_MIN  10
-#endif
-
-/* 低电压持续超时自动伪关机（秒）：运行中电池电压持续低于
-   BATTERY_CRITICAL_LOW_MV（3.45V，与开机拒启同一阈值）超过该时长自动伪关机，
-   防过放。经 Kconfig CONFIG_LOW_BATTERY_SHUTDOWN_SEC 配置（默认 60 秒，0=关闭）。
-   时间窗口兼作滤波：滤除播放瞬时大电流压降与 ADC 单次抖动。 */
-#ifdef CONFIG_LOW_BATTERY_SHUTDOWN_SEC
-#define LOW_BATTERY_SHUTDOWN_SEC  CONFIG_LOW_BATTERY_SHUTDOWN_SEC
-#else
-#define LOW_BATTERY_SHUTDOWN_SEC 60
-#endif
+/* S31 平台说明：S3 时代的"暂停超时自动伪关机"与"低电压自动伪关机"两条策略
+   都依赖 deep sleep 伪关机，而 S31 的关机由 AXP2101 负责（尚未适配），
+   故 2026-11 迁移时整段移除；本模块只保留**自动息屏 / 亮屏**与固定 CPU 频率。
+   后续 AXP2101 适配时，可在这里重新接入真正的关机策略。 */
 
 /* 息屏状态与状态切换互斥锁：screen_off/screen_on 可能来自不同任务（按键
    任务/守护任务），用互斥锁保护状态机与"固定频率、挂起/恢复 LVGL、改亮度"
@@ -103,93 +84,16 @@ static void power_service_touch_cb(bool pressed, uint16_t tx, uint16_t ty, void 
 }
 
 /* ------------------------------------------------------------------ */
-/* 自动伪关机策略（由守护任务周期性检查）                                */
-/* ------------------------------------------------------------------ */
 
-/* 暂停超时自动伪关机（省电）：**仅统计"息屏 + 暂停"**——亮屏时用户在看
-   屏幕随时会操作，暂停时长不累计；息屏且暂停持续超过 PAUSE_SHUTDOWN_MIN
-   分钟 → 普通伪关机（deepsleep）。
-   伪关机前 player_controller_save_last_position 会记录播放状态
-   （was_playing=false），开机恢复暂停态不自动播放。 */
-static bool s_prev_paused = false;      /* 上一轮检测是否处于"息屏+暂停" */
-static int64_t s_pause_start_us = 0;    /* 本次"息屏+暂停"开始时刻（esp_timer，us） */
-
-static void power_service_check_pause_shutdown(void)
-{
-#if PAUSE_SHUTDOWN_MIN > 0
-    /* 亮屏：不计时（清标志，下次息屏重新起算） */
-    if (!s_screen_off) {
-        s_prev_paused = false;
-        return;
-    }
-    const mp3_player_state_t st = mp3_player_get_state();
-    if (st == MP3_STATE_PAUSED) {
-        if (!s_prev_paused) {
-            /* 进入"息屏+暂停"：记录开始时刻 */
-            s_prev_paused = true;
-            s_pause_start_us = esp_timer_get_time();
-        } else if (esp_timer_get_time() - s_pause_start_us
-                   >= (int64_t)PAUSE_SHUTDOWN_MIN * 60 * 1000000LL) {
-            ESP_LOGI(TAG, "paused (screen off) for %d min, auto fake shutdown",
-                     PAUSE_SHUTDOWN_MIN);
-            s_prev_paused = false;
-            fake_shutdown_enter();   /* 进入深度休眠，不返回 */
-        }
-    } else {
-        s_prev_paused = false;   /* 播放中/停止：暂停计时清零 */
-    }
-#endif
-}
-
-/* 低电压持续超时自动伪关机（防过放）：**与屏幕亮暗/播放状态无关**——只要
-   电池电压持续低于 BATTERY_CRITICAL_LOW_MV 超过 LOW_BATTERY_SHUTDOWN_SEC 秒
-   即伪关机。电压"过低"在带载播放时可能瞬时跌破（大电流压降），故要求
-   持续超时才触发（时间窗口兼作滤波）；任一采样恢复正常立即清零重计。
-   ⚠ 读取失败（返回 -1）视为"电压未知"，按不满足条件处理（清零计时），
-   绝不因单次读失败误关机。
-   ⚠ 本固件无充电检测：充电器接入时电池电压被抬高（高于 3.2V），不会进入
-   计时；若后续接入充电状态检测，应排除充电态再启用本检查。 */
-static bool s_lowbat_active = false;    /* 是否正处在"电压持续过低"计时中 */
-static int64_t s_lowbat_since_us = 0;   /* 进入低电计时的时刻（esp_timer，us） */
-
-static void power_service_check_low_battery(void)
-{
-#if LOW_BATTERY_SHUTDOWN_SEC > 0
-    float vbat_mv = battery_read_voltage_mv();
-    if (vbat_mv < 0 || vbat_mv >= (float)BATTERY_CRITICAL_LOW_MV) {
-        s_lowbat_active = false;   /* 电压正常/读取失败：清除计时 */
-        return;
-    }
-    if (!s_lowbat_active) {
-        s_lowbat_active = true;
-        s_lowbat_since_us = esp_timer_get_time();
-        ESP_LOGW(TAG, "battery low: %.0f mV < %u mV, auto shutdown in %d s "
-                      "if it persists",
-                 (double)vbat_mv, BATTERY_CRITICAL_LOW_MV,
-                 LOW_BATTERY_SHUTDOWN_SEC);
-        return;
-    }
-    if (esp_timer_get_time() - s_lowbat_since_us
-        >= (int64_t)LOW_BATTERY_SHUTDOWN_SEC * 1000000LL) {
-        ESP_LOGW(TAG, "battery below %u mV for %d s, auto fake shutdown",
-                 BATTERY_CRITICAL_LOW_MV, LOW_BATTERY_SHUTDOWN_SEC);
-        s_lowbat_active = false;
-        fake_shutdown_enter();   /* 进入深度休眠，不返回 */
-    }
-#endif
-}
-
-/* ------------------------------------------------------------------ */
-
-/* 守护任务：亮屏且距最近活动超过配置时长 → 自动息屏；
-   同时检查自动伪关机策略（暂停超时/低电压超时，无论屏幕亮暗） */
+/* 守护任务：亮屏且距最近活动超过配置时长 → 自动息屏。
+   （S3 时代的暂停/低电自动伪关机策略已随 S31 迁移移除，见上方说明） */
 static void power_service_task(void *arg)
 {
     (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SVC_CHECK_MS));
 
-        /* 1. 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒） */
+        /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒） */
         if (!s_screen_off) {
             uint32_t timeout_s = config_store_get_screen_off_s();
             if (timeout_s != 0
@@ -200,12 +104,6 @@ static void power_service_task(void *arg)
                 power_service_screen_off();
             }
         }
-
-        /* 2. 暂停超时自动伪关机：与息屏状态无关，暂停过久即关机省电 */
-        power_service_check_pause_shutdown();
-
-        /* 3. 低电压持续超时自动伪关机：与息屏状态/播放状态无关，防过放 */
-        power_service_check_low_battery();
     }
 }
 
@@ -236,7 +134,7 @@ void power_service_init(void)
     /* 4. 订阅触摸活动：按下算一次活动（复用 LVGL indev 轮询，无额外轮询） */
     lvgl_port_register_touch_cb(power_service_touch_cb, NULL);
 
-    /* 5. 守护任务（自动息屏 + 自动关机策略检查）
+    /* 5. 守护任务（自动息屏）
        ⚠ 栈放 **PSRAM**（task_create_psram_stack，失败自动回退内部 RAM）：
        开机末期内部 RAM 已接近耗尽（实测内部空闲仅约 4.5KB、DMA 约 2KB），
        3KB 栈的内部 RAM 分配会失败（"create power service task failed"），
@@ -254,10 +152,8 @@ void power_service_init(void)
     }
 
     inited = true;
-    ESP_LOGI(TAG, "power service ready (auto screen off after %u s, "
-                  "pause shutdown %d min, low battery shutdown %d s)",
-             (unsigned)config_store_get_screen_off_s(),
-             PAUSE_SHUTDOWN_MIN, LOW_BATTERY_SHUTDOWN_SEC);
+    ESP_LOGI(TAG, "power service ready (auto screen off after %u s)",
+             (unsigned)config_store_get_screen_off_s());
 }
 
 /* ============ 息屏/亮屏"重活"（由 deep_worker 大栈任务执行） ============

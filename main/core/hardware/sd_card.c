@@ -13,14 +13,15 @@
 
 static const char *TAG = "sd_card";
 
-/* SD_MMC 引脚（FakePodNano 板载 SD 卡槽，4-bit 模式）。
-   DAT0-3 与 CMD 经 10k 上拉到 3V3，CLK 直连 MCU。 */
-#define SD_MMC_CLK_PIN GPIO_NUM_16
-#define SD_MMC_CMD_PIN GPIO_NUM_17
-#define SD_MMC_D0_PIN  GPIO_NUM_15
-#define SD_MMC_D1_PIN  GPIO_NUM_14
-#define SD_MMC_D2_PIN  GPIO_NUM_21
-#define SD_MMC_D3_PIN  GPIO_NUM_18
+/* SDMMC 引脚（ESP32-S31 / FakePodNano Pro V1，4-bit 模式）。
+   来源：ideas_and_exps/reference_docs/hardware_v1.md §8。
+   S31 的 SDMMC 槽位 0 默认就是这一组 IOMUX 引脚。 */
+#define SD_MMC_CLK_PIN GPIO_NUM_24
+#define SD_MMC_CMD_PIN GPIO_NUM_25
+#define SD_MMC_D0_PIN  GPIO_NUM_20
+#define SD_MMC_D1_PIN  GPIO_NUM_21
+#define SD_MMC_D2_PIN  GPIO_NUM_22
+#define SD_MMC_D3_PIN  GPIO_NUM_23
 
 /* 是否已挂载（避免重复调用时二次挂载报错） */
 static bool s_mounted = false;
@@ -50,7 +51,7 @@ esp_err_t sd_card_init(void)
         return ESP_OK;
     }
 
-    /* SDMMC 主机：slot 1，4-bit，40MHz 高速 */
+    /* SDMMC 主机：S31 默认槽位 0（IOMUX 引脚 20~25），4-bit，40MHz 高速 */
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;   /* 40MHz */
 

@@ -1,8 +1,9 @@
 #include "core/utils/sleep_timer.h"
 
 #include "core/hardware/audio/audio.h"
+#include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
-#include "core/utils/fake_shutdown.h"
+#include "core/utils/power_service.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -80,10 +81,24 @@ static void sleep_timer_task(void *arg)
 
         int64_t remain_us = s_deadline_us - esp_timer_get_time();
         if (remain_us <= 0) {
-            ESP_LOGI(TAG, "sleep timer expired (%u min), enter fake shutdown",
-                     (unsigned)s_minutes);
+            /* S31：真正的关机由 AXP2101 负责（尚未适配），睡眠定时到点改为
+               "暂停播放 + 息屏"——既停止出声，又避免屏幕整夜亮着。
+               AXP2101 适配后可在这里改成调用真正的关机流程。 */
+            ESP_LOGI(TAG, "sleep timer expired (%u min), pause playback and "
+                          "turn screen off", (unsigned)s_minutes);
             s_minutes = 0;
-            fake_shutdown_enter();   /* 只创建关机任务并返回，不阻塞本任务 */
+
+            /* 渐降只写 audio 硬件、不落 NVS；到点先恢复用户原音量，避免
+               "睡眠定时结束后音量停在 0"（下次唤醒播放会没声音） */
+            if (s_fade_active) {
+                s_fade_active = false;
+                audio_set_volume_level(s_fade_origin);
+                ESP_LOGI(TAG, "volume restored to level %u after expiry",
+                         (unsigned)s_fade_origin);
+            }
+
+            player_controller_pause();
+            power_service_screen_off();
 
             /* ⚠ 必须跳过下面的渐降段：到点后 remain_us <= 0，若继续用
                remain_ms 计算渐降档位，负数强转 (uint32_t) 变成巨大值，

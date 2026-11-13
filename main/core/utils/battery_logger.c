@@ -1,190 +1,22 @@
 #include "core/utils/battery_logger.h"
 
-#include <stdio.h>
-
-#include "core/hardware/battery.h"
-#include "core/hardware/sd_card.h"
-#include "core/storage/config_store.h"
-#include "core/utils/task_psram.h"
 #include "esp_log.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char *TAG = "batt_log";
 
-/* 采样间隔（分钟）默认值：开发者选项未设置时用 5 分钟（config_store 的
-   batt_log_min 实际默认值与此一致，此处仅作为读取失败/越界时的兜底）。
-   间隔可在设置 → 关于 → 开发者选项 中调整为 1/2/3/5/10 分钟（NVS
-   持久化，开机生效）。测试/功耗测量用，测试完建议关闭。 */
-#define BATT_LOG_INTERVAL_MIN_DEFAULT 5
-
-/* 每个采样窗口的读数次数与间隔（ms）：10 秒窗口内读 10 次（1s 一次），
-   去掉一个最高/最低值后对剩余 8 个求平均——消除瞬时噪声与 ADC 抖动，
-   比单次读数稳定（10 秒窗口跨过播放负载的瞬时波动）。 */
-#define BATT_LOG_SAMPLE_NUM   10
-#define BATT_LOG_SAMPLE_GAP_MS 1000
-
-/* 日志文件路径（SD 卡根目录，CSV 文本，追加写） */
-#define BATT_LOG_FILE_PATH    "/sdcard/battery_log.txt"
-
-/* 会话分隔行：每次开机（新会话）在文件里追加一行标记，把不同轮测试的
-   数据段隔开。以 # 开头（CSV 注释行）；不带序号/时间——会话先后顺序
-   即文件内出现顺序，按标记行切分即可区分各轮。 */
-#define BATT_LOG_SESSION_MARKER  "# ===== session start ====="
-
-/* 任务参数：Core1 最低优先级（几乎不占 CPU，每 5 分钟才忙 10 秒）。
-   ⚠ 栈 4KB：FATFS 经 VFS 的 fopen/fprintf/fclose 调用链较深，3KB 偏紧，
-   参考 cover_load(6K 解码)/sleep_timer(4K 因 I2C 深链) 的实测，取 4K 稳妥。 */
-#define BATT_LOG_TASK_STACK   (4 * 1024)
-#define BATT_LOG_TASK_PRIO    1
-#define BATT_LOG_TASK_CORE    1
-
-/* 任务使用的采样间隔（分钟）：battery_logger_init 时从 config_store 读取并
-   固化（静态存储，任务创建后不再变化——修改间隔需重启生效的设计使然） */
-static uint32_t s_batt_log_interval_min = BATT_LOG_INTERVAL_MIN_DEFAULT;
-
-/* 写会话分隔行：开机即执行一次（不等首个采样周期——即使本次开机不足一个
-   采样间隔，文件里也留下会话痕迹）。文件不存在时先写表头再写分隔行。 */
-static void battery_logger_write_session_marker(void)
-{
-    FILE *f = fopen(BATT_LOG_FILE_PATH, "a");
-    if (f == NULL) {
-        return;
-    }
-    if (ftell(f) == 0) {
-        /* 空文件（首次写入）：先写表头便于识别与后续分析 */
-        fprintf(f, "elapsed_s,run_time_hms,avg_mv\n");
-    }
-    fprintf(f, BATT_LOG_SESSION_MARKER "\n");
-    fclose(f);
-}
-
-/* 采样日志任务：每间隔唤醒一次 →
-   1. 10 秒窗口采样 N 次电压（间隔 1s），失败读数丢弃；
-   2. 去掉一个最高值 + 一个最低值，剩余求平均；
-   3. "时间戳 + 平均电压"追加写 SD 文件（首次先写表头）。 */
-static void battery_logger_task(void *arg)
-{
-    (void)arg;
-    const uint32_t interval_ms = s_batt_log_interval_min * 60 * 1000;
-    bool sd_missing_warned = false;
-
-    /* 0. 会话开始标记：开机立即写一行分隔行（SD 未挂载时 fopen 失败直接
-           返回，无副作用；文件不存在时顺带写表头） */
-    battery_logger_write_session_marker();
-
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(interval_ms));
-
-        /* SD 卡未挂载（无卡/挂载失败）：跳过本轮写入。
-           ⚠ 采样也不执行——记录必须落盘，空采无意义；首次缺失打一次日志 */
-        if (!sd_card_is_mounted()) {
-            if (!sd_missing_warned) {
-                ESP_LOGW(TAG, "SD card not mounted, skip battery logging "
-                              "(will retry every %u min)",
-                         (unsigned)s_batt_log_interval_min);
-                sd_missing_warned = true;
-            }
-            continue;
-        }
-        sd_missing_warned = false;
-
-        /* 1. 10 秒窗口采样：读取失败（battery_read_voltage_mv 返回 <0）的
-               读数直接丢弃，不参与去极值与平均 */
-        float samples[BATT_LOG_SAMPLE_NUM];
-        int n = 0;
-        for (int i = 0; i < BATT_LOG_SAMPLE_NUM; i++) {
-            float v = battery_read_voltage_mv();
-            if (v >= 0) {
-                samples[n++] = v;
-            }
-            vTaskDelay(pdMS_TO_TICKS(BATT_LOG_SAMPLE_GAP_MS));
-        }
-
-        /* 2. 有效样本太少（<3 个不足以去极值）：本轮放弃，防写入垃圾行 */
-        if (n < 3) {
-            ESP_LOGW(TAG, "only %d valid samples, skip this log entry", n);
-            continue;
-        }
-
-        /* 去掉一个最高值 + 一个最低值后求平均（线性扫描找极值即可） */
-        float sum = 0.0f, vmax = samples[0], vmin = samples[0];
-        for (int i = 0; i < n; i++) {
-            sum += samples[i];
-            if (samples[i] > vmax) {
-                vmax = samples[i];
-            }
-            if (samples[i] < vmin) {
-                vmin = samples[i];
-            }
-        }
-        float avg_mv = (sum - vmax - vmin) / (float)(n - 2);
-
-        /* 3. 时间戳：无 RTC，用开机以来运行时长（esp_timer）。
-               每行 CSV：elapsed_s, HH:MM:SS, 平均电压(mV, 1 位小数) */
-        int64_t elapsed_us = esp_timer_get_time();
-        uint32_t elapsed_s = (uint32_t)(elapsed_us / 1000000LL);
-        uint32_t hh = elapsed_s / 3600;
-        uint32_t mm = (elapsed_s % 3600) / 60;
-        uint32_t ss = elapsed_s % 60;
-
-        FILE *f = fopen(BATT_LOG_FILE_PATH, "a");
-        if (f == NULL) {
-            ESP_LOGE(TAG, "open %s failed", BATT_LOG_FILE_PATH);
-            continue;
-        }
-        if (ftell(f) == 0) {
-            /* 空文件（首次写入）：写一行表头便于识别与后续分析 */
-            fprintf(f, "elapsed_s,run_time_hms,avg_mv\n");
-        }
-        fprintf(f, "%u,%02u:%02u:%02u,%.1f\n",
-                (unsigned)elapsed_s, (unsigned)hh, (unsigned)mm, (unsigned)ss,
-                (double)avg_mv);
-        fclose(f);
-
-        ESP_LOGI(TAG, "log: %u s (%.1f V avg of %d samples) -> %s",
-                 (unsigned)elapsed_s, (double)(avg_mv / 1000.0f), n,
-                 BATT_LOG_FILE_PATH);
-    }
-}
+/* ------------------------------------------------------------------ */
+/* S31 占位实现（AXP2101 尚未适配）                                      */
+/*                                                                     */
+/* S3 旧板：开发者选项开启时建后台任务，按间隔采样 battery_read_voltage_mv() */
+/*         并把"运行时长 + 平均电压"写入 /sdcard/battery_log.txt。         */
+/* S31 新板：电池信息由 AXP2101 提供（电量计/充电状态），battery_read_    */
+/*          voltage_mv() 当前本身也是占位假值，记录假数据没有意义。        */
+/* 因此本函数暂时只打印说明、不建任务；AXP2101 驱动完成后在这里恢复采样     */
+/* 任务即可（config_store 的 battery_log / battery_log_min 开关仍然保留）。*/
+/* ------------------------------------------------------------------ */
 
 void battery_logger_init(void)
 {
-    static bool inited = false;
-    if (inited) {
-        return;
-    }
-
-    /* 开发者选项开关（NVS，默认关）：关闭时不建任务。
-       需在 config_store_init 之后调用（main.c 初始化顺序保证） */
-    if (!config_store_get_battery_log()) {
-        ESP_LOGI(TAG, "battery logger disabled (developer option off, "
-                      "enable in Settings->About->Developer options)");
-        return;
-    }
-
-    /* 采样间隔：开机时从 config_store 读取并固化（NVS 档位 1/2/3/5/10，
-       默认 5；越界时兜底为默认值） */
-    uint32_t interval_min = config_store_get_battery_log_min();
-    if (interval_min < 1 || interval_min > 120) {
-        interval_min = BATT_LOG_INTERVAL_MIN_DEFAULT;
-    }
-    s_batt_log_interval_min = interval_min;
-
-    /* 栈放 PSRAM：4KB 内部栈在开机末期内部 RAM 耗尽时会创建失败
-       （本任务只在采样周期醒来写 SD，无实时性要求） */
-    if (task_create_psram_stack(battery_logger_task, "batt_log",
-                                BATT_LOG_TASK_STACK, NULL,
-                                BATT_LOG_TASK_PRIO, NULL,
-                                BATT_LOG_TASK_CORE) != pdPASS) {
-        ESP_LOGE(TAG, "create battery logger task failed");
-        return;
-    }
-    inited = true;
-    ESP_LOGI(TAG, "battery logger ready: every %u min, %d samples over %d s, "
-                  "log file %s",
-             (unsigned)interval_min, BATT_LOG_SAMPLE_NUM,
-             BATT_LOG_SAMPLE_NUM * BATT_LOG_SAMPLE_GAP_MS / 1000,
-             BATT_LOG_FILE_PATH);
+    ESP_LOGW(TAG, "battery logger disabled on ESP32-S31 "
+                  "(AXP2101 support TBD)");
 }

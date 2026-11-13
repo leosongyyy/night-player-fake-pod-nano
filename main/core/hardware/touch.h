@@ -17,11 +17,13 @@ extern "C" {
 
 #define EXAMPLE_USE_TOUCH               1
 
-// ESP32S3_AMOLED_触摸
-#define EXAMPLE_PIN_NUM_TOUCH_SCL         (GPIO_NUM_2)
-#define EXAMPLE_PIN_NUM_TOUCH_SDA         (GPIO_NUM_3)
-#define EXAMPLE_PIN_NUM_TOUCH_RST         (GPIO_NUM_5)
-#define EXAMPLE_PIN_NUM_TOUCH_INT         (GPIO_NUM_4)
+/* ESP32-S31 / FakePodNano Pro V1 触摸（CST820）：
+   I2C0 与 AXP2101 / PCF85063 / QMI8658 共用 SDA48/SCL47，
+   INT=45（低有效）、RST=46（低有效）。见 hardware_v1.md §3/§4。 */
+#define EXAMPLE_PIN_NUM_TOUCH_SCL         (GPIO_NUM_47)
+#define EXAMPLE_PIN_NUM_TOUCH_SDA         (GPIO_NUM_48)
+#define EXAMPLE_PIN_NUM_TOUCH_RST         (GPIO_NUM_46)
+#define EXAMPLE_PIN_NUM_TOUCH_INT         (GPIO_NUM_45)
 
 /**
  * @brief 初始化 I2C 总线并启动触摸控制器（异步）

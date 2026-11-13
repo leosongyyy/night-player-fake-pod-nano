@@ -6,7 +6,6 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/audio.h"
-#include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 
@@ -21,8 +20,8 @@ static const char *TAG = "app";
 /* 顶部状态栏高度（同时也是通知栏下拉触发区高度），统一见 UI_STATUS_BAR_H */
 #define STATUS_BAR_H  UI_STATUS_BAR_H
 
-/* 状态栏电量/音量刷新周期（ms）：电压 0.01V 精度，每 5 秒更新一次 */
-#define STATUS_BATTERY_REFRESH_MS  5000
+/* 状态栏音量刷新周期（ms）：音量变化本身有配置回调即时刷新，这里只做兜底 */
+#define STATUS_VOLUME_REFRESH_MS  5000
 
 /* 配置变更通知派发周期（ms）：config_store 的 set_xxx 只置"待通知"标志，
    由本文件创建的 lv_timer 在 LVGL 任务里统一派发（原因见 config_store.h
@@ -41,7 +40,6 @@ static const char *const PAGE_NAMES[] = {
 static lv_obj_t *s_status_bar     = NULL;  /* 状态栏容器（透明隐藏时保留事件） */
 static lv_obj_t *page_title_label = NULL;   /* 状态栏中央：当前页面名称 */
 static lv_obj_t *vol_label        = NULL;   /* 状态栏左侧：音量图标+数值（单 label） */
-static lv_obj_t *bat_label        = NULL;   /* 状态栏右侧：电池图标+电压（单 label） */
 
 /* 状态栏图标与数值字体：统一用 LVGL 内置 Montserrat 20。
    - 图标：LVGL 内置字体含 LV_SYMBOL 图标字形（系统精简字体不含 PUA 区图标）；
@@ -57,16 +55,6 @@ static lv_obj_t *bat_label        = NULL;   /* 状态栏右侧：电池图标+�
 static void status_bg_opa_anim_cb(void *var, int32_t value)
 {
     lv_obj_set_style_bg_opa((lv_obj_t *)var, (lv_opa_t)value, 0);
-}
-
-/* 电量图标按百分比分级（对应 LV_SYMBOL_BATTERY_* 五档） */
-static const char *status_battery_icon(float pct)
-{
-    if (pct >= 90.0f) return LV_SYMBOL_BATTERY_FULL;
-    if (pct >= 60.0f) return LV_SYMBOL_BATTERY_3;
-    if (pct >= 40.0f) return LV_SYMBOL_BATTERY_2;
-    if (pct >= 15.0f) return LV_SYMBOL_BATTERY_1;
-    return LV_SYMBOL_BATTERY_EMPTY;
 }
 
 /* 状态栏音量图标固定用"中音量"图标：界面只看后面的数字档位，
@@ -111,33 +99,18 @@ static void config_notify_timer_cb(lv_timer_t *timer)
     config_store_flush_pending(false);
 }
 
-/* 状态栏周期刷新：电量（电池图标按百分比分级 + 电压 0.01V）+ 音量（实时跟随）。
+/* 状态栏周期刷新：音量兜底刷新（S31 无电池电压显示）。
    图标与数值拼接为单个 label（图标 + 空格 + 文本）。
    创建后立即手动调用一次填充初始值。 */
 static void status_refresh_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
 
-    /* 电量：电压精确到 0.01V；图标按电量百分比分级 */
-    float vbat_mv = battery_read_voltage_mv();
-    if (vbat_mv < 0) {
-        lv_label_set_text(bat_label, LV_SYMBOL_BATTERY_EMPTY " --.-- V");
-    } else {
-        float pct = (vbat_mv - BAT_EMPTY_MV) / (float)(BAT_FULL_MV - BAT_EMPTY_MV)
-                    * 100.0f;
-        if (pct < 0) pct = 0;
-        if (pct > 100) pct = 100;
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s %.2f V",
-                 status_battery_icon(pct), vbat_mv / 1000.0f);
-        lv_label_set_text(bat_label, buf);
-    }
-
-    /* 音量：当前音量等级（0~100） */
     status_refresh_volume();
 }
 
-/* 独立顶部状态栏：左=音量（图标+等级）、中=当前页面名称、右=电量（图标+电压）。
+/* 独立顶部状态栏：左=音量（图标+等级）、中=当前页面名称。
+   右侧暂留白（S31 的电池电压显示等 AXP2101 适配后再加）。
    返回状态栏句柄供通知栏挂载拖拽事件。 */
 static lv_obj_t *create_status_bar(void)
 {
@@ -170,15 +143,11 @@ static lv_obj_t *create_status_bar(void)
     lv_obj_set_style_text_color(page_title_label, lv_color_white(), 0);
     lv_obj_align(page_title_label, LV_ALIGN_CENTER, 0, 0);
 
-    /* 右侧：电量（电池图标 + 空格 + 电压，单 label，右对齐） */
-    bat_label = lv_label_create(status);
-    lv_label_set_text(bat_label, LV_SYMBOL_BATTERY_FULL " --.-- V");
-    lv_obj_set_style_text_font(bat_label, STATUS_SMALL_FONT, 0);
-    lv_obj_set_style_text_color(bat_label, lv_color_white(), 0);
-    lv_obj_align(bat_label, LV_ALIGN_RIGHT_MID, -12, 0);
+    /* 右侧：S31 暂无电池电压显示（AXP2101 适配后恢复）。
+       状态栏保留右侧留白，页面标题仍居中。 */
 
-    /* 周期刷新（每 5 秒）+ 立即填充一次初始值 */
-    lv_timer_create(status_refresh_timer_cb, STATUS_BATTERY_REFRESH_MS, NULL);
+    /* 周期刷新（每 5 秒音量兜底）+ 立即填充一次初始值 */
+    lv_timer_create(status_refresh_timer_cb, STATUS_VOLUME_REFRESH_MS, NULL);
     status_refresh_timer_cb(NULL);
 
     /* 订阅配置变更：音量（按键调节等）变化后即时刷新状态栏音量显示。
@@ -248,11 +217,10 @@ void app_status_set_ui_visible(bool visible)
     /* 立即设置前先删除进行中的背景渐变动画，避免动画回调覆盖新值 */
     lv_anim_del(s_status_bar, status_bg_opa_anim_cb);
     if (visible) {
-        /* 恢复：半透明黑背景（75%）+ 显示三个内容 label */
+        /* 恢复：半透明黑背景（75%）+ 显示内容 label */
         lv_obj_set_style_bg_opa(s_status_bar, (lv_opa_t)191, 0);
         lv_obj_clear_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(bat_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         /* 隐藏：背景完全透明 + 内容 label 隐藏。
            ⚠ 不删除状态栏对象、不清 CLICKABLE：通知栏下拉事件挂载在
@@ -260,7 +228,6 @@ void app_status_set_ui_visible(bool visible)
         lv_obj_set_style_bg_opa(s_status_bar, LV_OPA_TRANSP, 0);
         lv_obj_add_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(bat_label, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
