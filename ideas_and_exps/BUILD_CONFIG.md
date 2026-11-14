@@ -47,7 +47,7 @@ sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（配置矩阵 overlay�
 > 设置菜单 → 关于 → 开发者选项（config_store/NVS，**默认关**，开机检查、修改需重启生效），
 > 详见 `main/core/storage/config_store`、`main/core/ui/touch_test`。
 > **S3 时代的电池电压采样日志已整体删除**（S31 由 AXP2101 直接给百分比）；
-> 硬件自检（`CONFIG_HW_SELFTEST`）已于 2026-11-14 按 `FUTURE_PLAN.md` #48 移除。
+> 硬件自检（`CONFIG_HW_SELFTEST`）已于 2026-11-14 按 `DONE_PLANS.md` #52 移除。
 
 ## 3. 构建命令
 

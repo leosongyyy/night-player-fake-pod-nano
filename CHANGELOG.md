@@ -27,7 +27,7 @@
 ### 构建
 1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件 155 → 89、编译单元 1665 → 1235（−25.8%），bt / http / OTA / protocomm / openthread / unity / cmock 全部不再编译。2026-11-14 为「WiFi 对时」重新加入 **esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant**（固件 +约 650KB，仍只占 factory 分区 34%），WiFi 只用于一次性对时，库代码从 IRAM 挪回 Flash、收发缓冲缩减以省内部 RAM（详见 `ideas_and_exps/WIFI_TIME_SYNC.md`）。
 2. 关闭 `MBEDTLS_CERTIFICATE_BUNDLE` 与 `MBEDTLS_PKCS7_C`（本项目不做任何网络/TLS）。
-3. 按 `FUTURE_PLAN.md` #48 移除硬件自检/调试代码：删除 `hw_selftest.c/.h`、`CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT` 及 CMake/main/性能监视里的相关条目；debug 开机不再打印 `HWST summary`。`FUTURE_PLAN.md` #47（虚拟列表滚动性能）同时标记为**暂不实现**（S3 有旧版 IRAM 兜底、S31 性能已足够）。
+3. 按 `DONE_PLANS.md` #52 移除硬件自检/调试代码：删除 `hw_selftest.c/.h`、`CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT` 及 CMake/main/性能监视里的相关条目；debug 开机不再打印 `HWST summary`。`DONE_PLANS.md` #51（虚拟列表滚动性能）同时标记为**暂不实现**（S3 有旧版 IRAM 兜底、S31 性能已足够）。
 
 ### 性能与内存
 1. LVGL 对象（含目录/歌曲两个滚动列表页）全部放回 PSRAM：内部 RAM 稳态 +20.5KB（143.7→163.8KB）、开机完成最大连续块 31.7KB→86KB，为后续接入 WiFi/BT 留出余量；列表快速滚动 24~36fps。串口 `MEM:` 行同时新增 `fps=` 读数，方便以后做 UI 性能对比。
