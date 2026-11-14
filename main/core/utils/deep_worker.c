@@ -13,12 +13,12 @@ static const char *TAG = "deep_worker";
 
 /* 执行器任务参数
    ⚠ 栈 8KB（**不能再加大**）：本任务执行所有"深调用链"（息屏/亮屏的
-   esp_pm_configure + AMOLED 重新初始化 + lv_refr_now 全屏重刷、伪关机
+   esp_pm_configure + AMOLED 重新初始化 + lv_refr_now 全屏重刷、关机
    停外设/渲染提示等），以及设置菜单"重新扫描"的关缓存段
    （player_controller_deinit → playlist_deinit → pldata_munmap →
    esp_partition_munmap：关缓存要求当前任务栈在内部 RAM）。
    ⚠ **栈 12KB（2026-10 TTF 迁移由 8KB 上调）**：本任务要跑 `lv_refr_now`
-   全屏重刷（息屏唤醒）与伪关机提示渲染。TTF 时代这条链包含 FreeType 光栅化
+   全屏重刷（息屏唤醒）与关机提示渲染。TTF 时代这条链包含 FreeType 光栅化
    字形（光栅化器把渲染池放栈上），实测要吃掉近 12KB；**2026-11 已改回位图
    字体（NPF1），不再光栅化**，12KB 继续保留（未重新收紧，余量充足）。
    8KB 会在"息屏唤醒重刷 + 有未缓存字形"时溢出（栈在内部 RAM，溢出会踩着相邻
@@ -28,17 +28,18 @@ static const char *TAG = "deep_worker";
    所以本任务必须在 `app_main` 早期创建（config_store 之后、硬件初始化之前，
    此时内部 RAM 还有约 200KB 空闲/118KB 连续），并且检查 xTaskCreatePinnedToCore
    的返回值（失败时置 s_exec_task=NULL，deep_worker_call 快速失败 + 就地兜底）。
-   ⚠ 优先级 6（沿用原伪关机任务参数）：高于 LVGL(2)/按键(4)，保证息屏/
+   ⚠ 优先级 6（沿用原关机任务参数）：高于 LVGL(2)/按键(4)，保证息屏/
    关机动作不被拖延；低于音频(8)，不会饿死解码。
-   ⚠ 固定 Core0（与原伪关机任务一致；app_main 于 Core0 初始化全部驱动
+   ⚠ 固定 Core0（与原关机任务一致；app_main 于 Core0 初始化全部驱动
    与中断，面板命令/全屏重刷在此核执行与现状等价）。 */
 #define DEEP_WORKER_TASK_STACK  (12 * 1024)
 #define DEEP_WORKER_TASK_PRIO   6
 #define DEEP_WORKER_TASK_CORE   0
 
 /* 单次深调用完成等待超时（ms）：深活最长约 250ms~1s（面板唤醒 120ms +
-   重初始化 + 全屏重刷；伪关机停播等待最长 1s），5s 远超上限。伪关机最终
-   deepsleep：芯片睡眠时调用方任务被冻结，无需返回，超时不可能触发。 */
+   重初始化 + 全屏重刷；关机停播等待最长 1s），5s 远超上限。关机最终
+   由 PMU 断电：断电成功时调用方任务随整机一起消失，无需返回；只有关机
+   失败（PMU 未响应）才会走回来，超时不可能触发。 */
 #define DEEP_WORKER_TIMEOUT_MS  5000
 
 /* 请求/完成信号量 + 投递互斥锁：

@@ -130,7 +130,7 @@ void main_ui_create(void)
      * ⚠ 改这里必须保证"每个像素都有一层不透明背景兜底"，否则没被覆盖的区域
      *   会露出绘制缓冲里的旧帧残影（partial 模式不吃"没画到"这一套）。
      *   当前兜底者是 tabview 的内容容器 cont；全屏覆盖层（设置菜单
-     *   settings_menu、开机流程 boot_flow、伪关机 fake_shutdown）都各自铺了
+     *   settings_menu、开机流程 boot_flow、关机 fake_shutdown）都各自铺了
      *   不透明黑底，所以它们显示时也不依赖 scr 的底色。 */
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_TRANSP, 0);

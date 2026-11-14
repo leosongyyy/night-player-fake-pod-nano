@@ -523,7 +523,7 @@ void lvgl_port_suspend(void)
     /* 1. 冻结 LVGL 时间：记下冻结起点，之后 lv_tick_get() 停在这一刻，
           恢复后动画/定时器从暂停点继续（不会把挂起时长一次性补跑）。
           实现见 lvgl_port_tick_cb —— **不再**去 stop 一个 esp_timer。
-          重复挂起（如息屏后睡眠定时器再走伪关机）时保留最早的起点。 */
+          重复挂起（如息屏后睡眠定时器再走关机）时保留最早的起点。 */
     if (s_tick_pause_start_us < 0) {
         s_tick_pause_start_us = esp_timer_get_time();
     }

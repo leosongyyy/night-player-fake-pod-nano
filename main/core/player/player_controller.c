@@ -540,7 +540,7 @@ static void player_cmd_pause(void)
    ⚠ 实现放在控制器内部（直接读 s_cur_global/s_shuffle_pos/s_dir_name），
    不经过 player_controller_get_status——那样要在栈上拷一份 ~1KB 的状态快照。
    调用者：配置槽位切换前（config_slots_switch，随后 switch_slot 自己落盘）、
-   伪关机保存（player_controller_save_last_position，随后 save_active_slot）。
+   关机保存（player_controller_save_last_position，随后 save_active_slot）。
    ⚠ 本函数不再自己落盘（2026-11 三次收敛）：两个 setter 各写一次整块槽位
    blob 纯属浪费，落盘统一交给调用方的那一次 save_active_slot/switch_slot。 */
 static void player_sync_config(void)
@@ -856,7 +856,7 @@ esp_err_t player_controller_init(void)
     uint32_t last_global = 0;
     bool has_last = config_store_get_last_song(&last_global);
 
-    /* 关机前播放状态记忆（NVS）：false=伪关机前已暂停/停止 → 开机只恢复
+    /* 关机前播放状态记忆（NVS）：false=关机前已暂停/停止 → 开机只恢复
        当前歌曲不自动播放，随后紧跟 CMD_PAUSE 停在暂停态；
        true=关机前在播放（或无记录，默认）→ 开机自动播放（旧行为）。 */
     const bool resume_paused = !config_store_get_was_playing();

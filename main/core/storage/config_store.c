@@ -148,7 +148,7 @@ static bool     s_batt_care = (CONFIG_STORE_BATT_CARE_DEFAULT != 0);
  * “追加写 + 页满 GC/擦除”反复磨损。
  *
  * 做法：拖动中只调 *_deferred（只更新内存 + 置脏），落盘统一由
- * config_store_flush_pending() 在松手/静默 500ms/息屏/伪关机/切槽位时做一次。
+ * config_store_flush_pending() 在松手/静默 500ms/息屏/关机/切槽位时做一次。
  *
  * ⚠ 脏标志只由 LVGL 任务与少数几个任务读写，单字节 bool 原子的即可；
  *   时间戳只在置脏（写入方）与 flush（LVGL 任务）里用，值偏差无害。 */
@@ -1446,7 +1446,7 @@ bool config_store_set_last_song_ram(uint32_t global)
 
 void config_store_set_last_song(uint32_t global)
 {
-    /* 值+有效标志都没变就直接返回（2026-11）：切槽位前/伪关机前的
+    /* 值+有效标志都没变就直接返回（2026-11）：切槽位前/关机前的
        player_controller_sync_config() 会无条件调本函数，若歌曲没变就没有
        必要重写整个槽位 blob（真正必须落盘的那次由
        config_store_switch_slot / save_active_slot 自己完成）。 */

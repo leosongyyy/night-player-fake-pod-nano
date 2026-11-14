@@ -12,8 +12,8 @@
 
 static const char *TAG = "sleep_timer";
 
-/* 任务参数：Core1 低优先级后台任务。到点触发伪关机（内部会等待播放停止
-   并关外设），放独立任务里不影响 LVGL/UI 线程。500ms 周期兼顾到期精度
+/* 任务参数：Core1 低优先级后台任务。到点执行「暂停播放 + 息屏」（不关机；
+   真正的定时关机要等 AXP2101 关机策略接回），放独立任务里不影响 LVGL/UI 线程。500ms 周期兼顾到期精度
    与音量渐降步进（30s 内约 60 次更新，每步约降 1 档）。
    ⚠ 栈需 4096：渐降要直接调 audio_set_volume_level() 走旧版 I2C 驱动写
    CS43131（互斥锁 + 中断路径栈开销大），2048B 曾栈溢出（vApplication
@@ -57,7 +57,7 @@ static volatile uint8_t s_fade_origin = 0;           /* 渐降起点音量（恢
 static uint8_t          s_last_fade_level = 0;       /* 最近一次写入的渐降档位 */
 static volatile bool    s_restore_requested = false; /* 取消/延长定时后请求恢复 */
 
-/* 倒计时任务：到点调用伪关机（不返回）；最后 30 秒执行音量渐降 */
+/* 倒计时任务：到点「暂停播放 + 息屏」（不返回本函数，继续空转）；最后 30 秒执行音量渐降 */
 static void sleep_timer_task(void *arg)
 {
     (void)arg;
@@ -82,9 +82,10 @@ static void sleep_timer_task(void *arg)
 
         int64_t remain_us = s_deadline_us - esp_timer_get_time();
         if (remain_us <= 0) {
-            /* S31：真正的关机由 AXP2101 负责（尚未适配），睡眠定时到点改为
-               "暂停播放 + 息屏"——既停止出声，又避免屏幕整夜亮着。
-               AXP2101 适配后可在这里改成调用真正的关机流程。 */
+            /* S31：AXP2101 软关机（真断电）已经可用，但「定时关机」策略尚未接回，
+               睡眠定时到点暂时只做「暂停播放 + 息屏」——既停止出声，又避免屏幕
+               整夜亮着。接回定时关机时，在下面 pause 之后调用
+               fake_shutdown_enter() 即可。 */
             ESP_LOGI(TAG, "sleep timer expired (%u min), pause playback and "
                           "turn screen off", (unsigned)s_minutes);
             s_minutes = 0;
@@ -248,7 +249,7 @@ uint32_t sleep_timer_get_remaining_s(void)
     }
     int64_t remain = s_deadline_us - esp_timer_get_time();
     if (remain <= 0) {
-        return 0;   /* 已到点（任务即将触发关机），UI 显示 0 即可 */
+        return 0;   /* 已到点（任务即将暂停播放并息屏），UI 显示 0 即可 */
     }
     /* 向上取整到秒，避免显示 14:00 时实际只剩 13:59.9 的误导 */
     return (uint32_t)((remain + 999999) / 1000000);

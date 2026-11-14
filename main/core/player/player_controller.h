@@ -126,7 +126,7 @@ void player_controller_play_song(uint32_t global_idx);
 void player_controller_stop(void);
 
 /**
- * @brief 保存当前播放位置到 NVS（供伪关机/睡眠定时器关机前调用）
+ * @brief 保存当前播放位置到 NVS（供关机/睡眠定时器关机前调用）
  *
  * 记录当前歌曲全局下标 + 当前播放位置（秒），下次开机恢复。同时把
  * "关机前是否在播放"与**整套当前配置**（音量/循环/随机/睡眠时长/EQ/歌曲，
@@ -184,7 +184,7 @@ void player_controller_restore_config(player_loop_mode_t loop, bool shuffle,
  *
  * ⚠ 调用点：core/storage/config_slots 切换槽位前（必须在
  *   config_store_switch_slot 之前，否则存下去的是上一次落盘的旧歌曲）；
- *   伪关机保存播放位置时也走它（player_controller_save_last_position 内部）。
+ *   关机保存播放位置时也走它（player_controller_save_last_position 内部）。
  *   控制器未就绪（重扫/重启途中）时不做任何事，可安全调用。
  */
 void player_controller_sync_config(void);

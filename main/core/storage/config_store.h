@@ -72,7 +72,7 @@ extern "C" {
  *     减少满电存放对电芯的损耗），关闭则写回 4.2V。真正写 PMU 寄存器由
  *     battery_set_health_protection() 完成（本模块只存储）；PMU 每次上电都会
  *     回默认 CV，故 main.c 开机时按本配置重新下发。全局键，不进配置槽位。
- *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
+ *   - 关机前播放状态 was_playing（bool，默认 true）：关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
  *   - EQ 预设选择 eq_name + eq_data（.eq 文件名 + 解析参数，无 EQ 时名字为空：
@@ -104,7 +104,7 @@ extern "C" {
  *      否则存下去的是"上一次落盘的歌曲"，表现为"切走再切回还是原来那首"；
  *   2. 每次 set_xxx：增量存回当前活跃槽位（同一 blob 反复覆盖，NVS 分页复用，
  *      不会无限增长；这样"改完直接长按关机/断电"也不会丢）；
- *   3. 伪关机：player_controller 记完最后播放位置后存回当前槽位。
+ *   3. 关机：player_controller 记完最后播放位置后存回当前槽位。
  * 非切换字段（亮度 / 息屏超时 / ClickWheel / 开发者选项 / 回放增益 / 睡眠
  * 定时时长与开关 / 睡眠清醒感知）**不进槽位**，全局共用一份。
  *
@@ -382,7 +382,7 @@ void config_store_set_brightness(uint8_t brightness);
  * 只 6 页、会被“追加写 + 页满 GC/擦除”反复磨损。
  *
  * 做法：拖动期间只调 *_deferred 版本（只更新内存 + 置脏标志），落盘统一由
- * config_store_flush_pending() 在“松手 / 静默 500ms / 息屏 / 伪关机 / 切槽位”
+ * config_store_flush_pending() 在“松手 / 静默 500ms / 息屏 / 关机 / 切槽位”
  * 时做一次。硬件（DAC 音量、屏幕亮度）仍由调用方每帧实时写，不受影响。
  */
 
@@ -413,7 +413,7 @@ void config_store_set_volume_deferred(uint8_t vol);
  *
  * - force = false：距最后一次修改已静默 ≥ 500ms 才写（保底，由 ui/app.c 的
  *   100ms 定时器周期调用）；
- * - force = true：立刻写（松手 / 息屏 / 伪关机 / 切槽位等必须落盘的时刻）。
+ * - force = true：立刻写（松手 / 息屏 / 关机 / 切槽位等必须落盘的时刻）。
  *
  * 无脏字段时立即返回，不产生任何 flash 操作。
  *
@@ -501,13 +501,13 @@ void config_store_set_batt_care(bool on);
 /** @brief 设置时间显示制式并持久化（true=24h，false=12h；状态栏/下拉栏立即刷新） */
 void config_store_set_time_24h(bool on);
 
-/** @brief 设置关机前播放状态并持久化（由 player_controller 在伪关机保存
+/** @brief 设置关机前播放状态并持久化（由 player_controller 在关机保存
  *          播放位置时一并调用；UI 无展示，不通知回调） */
 void config_store_set_was_playing(bool playing);
 
 /** @brief 保存上次播放歌曲并持久化（由 player_controller 调用）。
  *          ⚠ 只记歌曲下标，不记秒数位置（NightPlayer 机制，见 get_last_song）
- *          ⚠ 值与 valid 标志未变时**直接返回、不写 NVS**：切槽位前/伪关机前的
+ *          ⚠ 值与 valid 标志未变时**直接返回、不写 NVS**：切槽位前/关机前的
  *            player_controller_sync_config() 会无条件调它，歌曲没变就不该重写
  *            槽位 blob（真正必须落盘的那次由 switch_slot / save_active_slot 做） */
 void config_store_set_last_song(uint32_t global);
@@ -587,7 +587,7 @@ void config_store_get_slot_snapshot(uint32_t idx, config_store_slot_snapshot_t *
 /**
  * @brief 把当前内存中的配置存回**当前活跃槽位**（写 NVS）
  *
- * 调用点：切换槽位前、伪关机时（player_controller 保存播放位置之后）。
+ * 调用点：切换槽位前、关机时（player_controller 保存播放位置之后）。
  */
 void config_store_save_active_slot(void);
 

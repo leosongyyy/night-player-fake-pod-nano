@@ -46,9 +46,9 @@ static const char *TAG = "power_service";
 #define PM_CPU_FREQ_OFF_MHZ 80
 
 /* S31 平台说明：S3 时代的"暂停超时自动伪关机"与"低电压自动伪关机"两条策略
-   都依赖 deep sleep 伪关机，而 S31 的关机由 AXP2101 负责（尚未适配），
-   故 2026-11 迁移时整段移除；本模块只保留**自动息屏 / 亮屏**与固定 CPU 频率。
-   后续 AXP2101 适配时，可在这里重新接入真正的关机策略。 */
+   都依赖 deepsleep 伪关机，已随平台迁移整段移除；S31 的关机已交给 AXP2101
+   （`fake_shutdown` 写 `0x10[0]=1` 真断电，由按键 / 睡眠定时器触发）。
+   本模块只保留**自动息屏 / 亮屏**与固定 CPU 频率，不再承担任何关机策略。 */
 
 /* 息屏状态与状态切换互斥锁：screen_off/screen_on 可能来自不同任务（按键
    任务/守护任务），用互斥锁保护状态机与"固定频率、挂起/恢复 LVGL、改亮度"
@@ -124,7 +124,7 @@ void power_service_init(void)
         return;
     }
 
-    /* 1. 初始固定 240MHz（亮屏状态）。
+    /* 1. 初始固定 320MHz（亮屏状态）。
           ⚠ esp_pm_configure 依赖 CONFIG_PM_ENABLE=y（见 sdkconfig.defaults）；
            未开启时返回 ESP_ERR_NOT_SUPPORTED，此处降级：不调频，其余功能正常。 */
     if (power_service_set_cpu_freq(PM_CPU_FREQ_ON_MHZ) != ESP_OK) {
@@ -211,13 +211,13 @@ static void power_service_do_screen_off(void *arg)
              PM_CPU_FREQ_OFF_MHZ);
 }
 
-/* 亮屏重活：240MHz → 持锁唤醒 AMOLED + 全屏重刷 + 恢复亮度 → resume LVGL */
+/* 亮屏重活：320MHz → 持锁唤醒 AMOLED + 全屏重刷 + 恢复亮度 → resume LVGL */
 static void power_service_do_screen_on(void *arg)
 {
     (void)arg;
-    /* 1. 恢复 CPU 频率 240MHz（先升频再恢复显示，避免显示恢复瞬间系统还在低频） */
+    /* 1. 恢复 CPU 频率 320MHz（先升频再恢复显示，避免显示恢复瞬间系统还在低频） */
     if (power_service_set_cpu_freq(PM_CPU_FREQ_ON_MHZ) != ESP_OK) {
-        ESP_LOGW(TAG, "esp_pm_configure(240MHz) failed, freq unchanged");
+        ESP_LOGW(TAG, "esp_pm_configure(320MHz) failed, freq unchanged");
     }
 
     /* 2. 唤醒 AMOLED（SLEEP OUT + 重发完整初始化）并恢复显示：
