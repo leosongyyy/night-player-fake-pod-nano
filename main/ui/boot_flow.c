@@ -34,12 +34,12 @@ static const char *TAG = "boot_flow";
 
 /* 前向声明（各界面函数互相调用，定义顺序有交叉） */
 static void boot_show_no_music(void);
+static void boot_show_scan_failed(void);
 static void boot_enter_normal(void);
 static void boot_show_scanning(void);
 static void boot_progress_timer_cb(lv_timer_t *timer);
 static void boot_scan_task(void *arg);
 static void boot_sleep_toast_timer_cb(lv_timer_t *timer);
-static void start_scan_btn_cb(lv_event_t *e);
 static void clear_scan_data_btn_cb(lv_event_t *e);
 static void reset_position_btn_cb(lv_event_t *e);
 
@@ -76,7 +76,6 @@ typedef enum {
     BOOT_ST_SPLASH,       /* 开机封面（默认封面，屏幕最早点亮的那一屏） */
     BOOT_ST_LOW_BAT,      /* 电量过低且未充电：拒绝启动（停在此屏） */
     BOOT_ST_NO_SD,        /* 未插入 SD 卡（停在此屏） */
-    BOOT_ST_PROMPT_SCAN,  /* 提示扫描，等待用户点击开始扫描 */
     BOOT_ST_SCANNING,     /* 正在扫描（进度每 300ms 更新） */
     BOOT_ST_NO_MUSIC,     /* 扫描后无音乐（停在此屏） */
     BOOT_ST_NORMAL,       /* 进入常规界面 */
@@ -97,6 +96,7 @@ static volatile bool     s_scan_lvgl_locked = false;
 static lv_obj_t   *s_root           = NULL;   /* 开机 UI 根容器（全屏黑底） */
 static lv_obj_t   *s_count_label    = NULL;   /* 扫描进度数字 */
 static lv_obj_t   *s_status_label   = NULL;   /* 可复用的状态/提示文字 */
+static lv_timer_t *s_scan_timer     = NULL;   /* 扫描进度定时器 */
 
 /* ------------------------------------------------------------------ */
 /* 基础 UI 辅助                                                        */
@@ -181,7 +181,7 @@ static lv_obj_t *boot_make_button(lv_obj_t *parent, const char *text,
    实测约 700ms）的耗时全部藏在这张封面背后（实测首次点亮从约 1.9s 提前到
    约 0.7s）。
    ⚠ 本容器会被随后 boot_flow_run() 的任一分支经 boot_root_create() 删除并
-   替换成对应界面（低电/无卡/提示扫描/扫描中/无音乐/常规主界面），因此不需要
+   替换成对应界面（低电/无卡/扫描中/无音乐/扫描失败/常规主界面），因此不需要
    额外的清理入口；也必须保持"整屏不透明"，否则未初始化的面板 RAM 会透出来。 */
 void boot_splash_show(void)
 {
@@ -293,23 +293,7 @@ static void boot_show_no_sd(void)
     display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
 }
 
-/* 3. 有卡但数据无效：提示扫描 + "开始扫描"按钮（无拒绝选项，只能关机） */
-static void boot_show_prompt_scan(void)
-{
-    s_state = BOOT_ST_PROMPT_SCAN;
-    lv_obj_t *root = boot_root_create();
-
-    lv_obj_t *title = boot_make_title(root, "需要扫描音乐");
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -100);
-
-    lv_obj_t *hint = boot_make_hint(root, "内部播放列表数据无效，请扫描 SD 卡");
-    lv_obj_align(hint, LV_ALIGN_CENTER, 0, -30);
-
-    lv_obj_t *btn = boot_make_button(root, "开始扫描", start_scan_btn_cb);
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 130);
-}
-
-/* 4. 扫描进行中：每 300ms 更新已扫描音乐数量；进入写入阶段时由扫描任务
+/* 3. 扫描进行中：每 300ms 更新已扫描音乐数量；进入写入阶段时由扫描任务
       抢住 LVGL 锁并提示"正在写入扫描数据"（见 boot_scan_progress_cb） */
 static void boot_show_scanning(void)
 {
@@ -336,16 +320,29 @@ static void boot_show_scanning(void)
     lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, 130);
 
     /* 每 300ms 更新进度，并检查扫描是否完成以切换界面 */
-    lv_timer_create(boot_progress_timer_cb, BOOT_PROGRESS_TIMER_MS, NULL);
+    s_scan_timer = lv_timer_create(boot_progress_timer_cb, BOOT_PROGRESS_TIMER_MS, NULL);
 
     /* 启动后台扫描任务（32KB 栈，⚠ 必须内部 RAM：扫描会触发 pldata 的
-       munmap/erase 关缓存流程，PSRAM 栈会 assert 崩溃，见上方常量注释） */
+       munmap/erase 关缓存流程，PSRAM 栈会 assert 崩溃，见上方常量注释）。
+       ⚠ IDF 的 xTaskCreatePinnedToCore 栈单位是**字节**，不要再除以 4
+          （历史上按 FreeRTOS 旧 word 语义除过，实际只有 8KB）。 */
     BaseType_t ret = xTaskCreatePinnedToCore(boot_scan_task, "boot_scan",
-                                             BOOT_SCAN_STACK_BYTES / 4u, NULL, 5,
+                                             BOOT_SCAN_STACK_BYTES, NULL, 5,
                                              NULL, 1);
     if (ret != pdPASS) {
+        /* 32KB 连续内部 RAM 分配失败时退回 16KB（历史 8KB 版本已能完成
+           1233 首扫描；16KB 给新增指纹/路径逻辑留余量） */
+        ESP_LOGW(TAG, "32KB scan stack alloc failed, retry 16KB");
+        ret = xTaskCreatePinnedToCore(boot_scan_task, "boot_scan",
+                                      16 * 1024, NULL, 5, NULL, 1);
+    }
+    if (ret != pdPASS) {
         ESP_LOGE(TAG, "create scan task failed");
-        boot_show_no_music();   /* 任务创建失败，当作扫描失败处理 */
+        if (s_scan_timer != NULL) {
+            lv_timer_del(s_scan_timer);
+            s_scan_timer = NULL;
+        }
+        boot_show_scan_failed();   /* 任务创建失败：不要带无效列表进主界面 */
     }
 }
 
@@ -362,6 +359,22 @@ static void boot_show_no_music(void)
     lv_obj_align(hint, LV_ALIGN_CENTER, 0, 40);
 
     lv_obj_t *hint2 = boot_make_hint(root, "请放入音乐后重启设备");
+    lv_obj_align(hint2, LV_ALIGN_CENTER, 0, 100);
+}
+
+/* 扫描/写入失败：停在此屏，避免带着无效播放列表进入主界面（列表会为空） */
+static void boot_show_scan_failed(void)
+{
+    s_state = BOOT_ST_NO_MUSIC;
+    lv_obj_t *root = boot_root_create();
+
+    lv_obj_t *title = boot_make_title(root, "扫描失败");
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -60);
+
+    lv_obj_t *hint = boot_make_hint(root, "无法读取 SD 卡或写入播放列表数据");
+    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 40);
+
+    lv_obj_t *hint2 = boot_make_hint(root, "请检查存储卡后重启设备");
     lv_obj_align(hint2, LV_ALIGN_CENTER, 0, 100);
 }
 
@@ -888,6 +901,13 @@ static void boot_progress_timer_cb(lv_timer_t *timer)
     }
 
     lv_timer_del(timer);   /* 停止本定时器 */
+    s_scan_timer = NULL;
+
+    if (!s_scan_ok) {
+        ESP_LOGE(TAG, "scan task failed, stay on failure screen");
+        boot_show_scan_failed();
+        return;
+    }
 
     if (s_scan_song_count == 0) {
         boot_show_no_music();
@@ -922,14 +942,6 @@ static void boot_sleep_toast_timer_cb(lv_timer_t *timer)
 /* 按钮事件回调（LVGL 任务上下文，已持锁）                              */
 /* ------------------------------------------------------------------ */
 
-/* "开始扫描"：进入扫描界面（界面与后台任务在 boot_show_scanning 中创建） */
-static void start_scan_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    ESP_LOGI(TAG, "start scan button pressed");
-    boot_show_scanning();
-}
-
 /* "清除扫描数据"（failsafe）：擦除 pldata 头部使分区无效，界面停留并提示 */
 static void clear_scan_data_btn_cb(lv_event_t *e)
 {
@@ -960,7 +972,7 @@ static void reset_position_btn_cb(lv_event_t *e)
 /* ------------------------------------------------------------------ */
 
 /* ⚠ 系统字体在 app_main 早期已挂载（NPF1 全字库，mmap 只读）：本流程的所有
-   分支（无卡 / 待扫描 / 扫描 / 常规界面）都用同一份字体，不再有 TTF 时代的
+   分支（无卡 / 自动扫描 / 常规界面）都用同一份字体，不再有 TTF 时代的
    "延迟加载"。
    · 内嵌精简字库仍作为 NPF 挂载失败时的兜底（system_font.c），覆盖全部 UI
      固定文案（见 ideas_and_exps/FontSymbols.md）；
@@ -988,13 +1000,63 @@ void boot_flow_run(void)
         return;
     }
 
-    /* 2. 播放列表数据检查 */
+    /* 2. 播放列表缓存检查：不再只看"头部有效"，还要确认它属于**当前这张卡**
+          且曲库没有增删/改名/换文件。任何一项不匹配都自动重扫，不再要求用户
+          手动点"开始扫描"。 */
+    bool need_scan = false;
+    const char *reason = "";
+
     if (!playlist_store_is_valid()) {
-        ESP_LOGW(TAG, "playlist data invalid, prompt to scan");
-        boot_show_prompt_scan();
+        need_scan = true;
+        reason = "no valid cache";
+    } else {
+        playlist_store_meta_t meta;
+        if (!playlist_store_get_meta(&meta)) {
+            need_scan = true;
+            reason = "cache meta missing";
+        } else if (meta.card_id != sd_card_get_id()) {
+            need_scan = true;
+            reason = "SD card changed";
+            ESP_LOGW(TAG, "SD card changed: cache=%llx now=%llx",
+                     (unsigned long long)meta.card_id,
+                     (unsigned long long)sd_card_get_id());
+            /* 换卡后旧的"上次歌曲下标/随机位置"属于旧卡，清掉以免续播到
+               新卡里完全不同的一首歌；新卡从第一首开始。 */
+            config_store_reset_position();
+        } else {
+            uint64_t sig = 0;
+            uint32_t files = 0;
+            int64_t t0 = esp_timer_get_time();
+            esp_err_t r = playlist_builder_probe_signature(&sig, &files);
+            ESP_LOGI(TAG, "library probe: %s, sig=%llx files=%u in %lld ms",
+                     esp_err_to_name(r), (unsigned long long)sig,
+                     (unsigned)files,
+                     (long long)((esp_timer_get_time() - t0) / 1000));
+            if (r != ESP_OK) {
+                need_scan = true;
+                reason = "library probe failed";
+            } else if (sig != meta.signature || files != meta.file_count) {
+                need_scan = true;
+                reason = "library changed";
+                ESP_LOGW(TAG, "library changed: cache sig=%llx files=%u, "
+                              "now sig=%llx files=%u",
+                         (unsigned long long)meta.signature,
+                         (unsigned)meta.file_count,
+                         (unsigned long long)sig, (unsigned)files);
+            } else {
+                ESP_LOGI(TAG, "playlist cache match: card=%llx files=%u",
+                         (unsigned long long)meta.card_id,
+                         (unsigned)meta.file_count);
+            }
+        }
+    }
+
+    if (need_scan) {
+        ESP_LOGW(TAG, "auto scan required (%s)", reason);
+        boot_show_scanning();
         return;
     }
 
-    /* 3. 有卡 + 数据有效：直接进入常规界面 */
+    /* 3. 缓存与当前卡/曲库一致：直接进入常规界面 */
     boot_enter_normal();
 }

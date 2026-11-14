@@ -51,6 +51,8 @@ typedef struct {
     uint32_t str_len;       /* 字符串池已用长度 */
     uint32_t total_size;    /* 写入分区的总字节数（= 字符串池起点偏移 + 池长度） */
     bool     truncated;     /* 是否因目录/歌曲/字符串池容量被截断 */
+    uint64_t signature;     /* 曲库指纹（音频路径 + .pl 的路径/大小/mtime 之和） */
+    uint32_t file_count;    /* 物理音频文件数（不含 .pl 内引用） */
 } playlist_build_stats_t;
 
 /**
@@ -64,6 +66,20 @@ typedef struct {
 esp_err_t playlist_build_from_sd(playlist_build_stats_t *stats,
                                  playlist_build_progress_cb progress_cb,
                                  void *progress_ctx);
+
+/**
+ * @brief 快速计算当前 SD 卡曲库指纹（不写 flash、不读音频内容）
+ *
+ * 遍历规则与 playlist_build_from_sd 完全一致：音频文件只哈希相对路径，
+ * `.pl` 额外哈希大小与 mtime；各条目哈希相加（顺序无关）。开机时与缓存
+ * 头部记录的指纹比较，即可判断是否新增/删除/改名/换卡。
+ *
+ * @param[out] signature  曲库指纹
+ * @param[out] file_count 物理音频文件数
+ * @return ESP_OK 成功；内存不足/SD 异常返回错误码
+ */
+esp_err_t playlist_builder_probe_signature(uint64_t *signature,
+                                           uint32_t *file_count);
 
 /**
  * @brief 仅扫描并构建到内存（不写回分区），返回 buffer 供内存解析测试

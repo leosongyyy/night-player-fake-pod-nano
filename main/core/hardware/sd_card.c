@@ -101,6 +101,56 @@ bool sd_card_is_mounted(void)
     return s_mounted;
 }
 
+/* CID 字段做 FNV-1a 64 位散列：厂商/型号/序列号/生产日期都参与，
+   避免只取 serial（部分卡 serial 为 0）导致不同卡撞 ID。 */
+uint64_t sd_card_get_id(void)
+{
+    if (!s_mounted || s_card == NULL) {
+        return 0;
+    }
+
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a offset basis */
+    const uint8_t *p;
+    size_t n;
+
+    p = (const uint8_t *)&s_card->cid.mfg_id;
+    n = sizeof(s_card->cid.mfg_id);
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    p = (const uint8_t *)&s_card->cid.oem_id;
+    n = sizeof(s_card->cid.oem_id);
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    /* name 是定长 8 字节，可能没有 NUL，不能按字符串处理 */
+    for (size_t i = 0; i < sizeof(s_card->cid.name); i++) {
+        h ^= (uint8_t)s_card->cid.name[i];
+        h *= 1099511628211ULL;
+    }
+    p = (const uint8_t *)&s_card->cid.revision;
+    n = sizeof(s_card->cid.revision);
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    p = (const uint8_t *)&s_card->cid.serial;
+    n = sizeof(s_card->cid.serial);
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    p = (const uint8_t *)&s_card->cid.date;
+    n = sizeof(s_card->cid.date);
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 esp_err_t sd_card_deinit(void)
 {
     if (!s_mounted) {
