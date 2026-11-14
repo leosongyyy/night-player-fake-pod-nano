@@ -81,10 +81,42 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames);
 void audio_set_replay_gain(uint32_t gain_q16);
 
 /**
- * @brief 停止 PCM 播放（停 I2S + 静音 DAC）
+ * @brief 停止 PCM 播放（先软斜坡静音，再停 I2S）
+ *
+ * ⚠ 顺序是"静音 → 等 30ms → 停时钟"：反过来会在 DAC 仍在输出电平时抽掉
+ *   BCK/LRCK，耳机里会有可闻的"咔哒"声。
+ *
  * @return ESP_OK 成功
  */
 esp_err_t audio_pcm_stop(void);
+
+/**
+ * @brief 优雅关断音频子系统（**关机路径专用**，避免关机爆音）
+ *
+ * 流程：CS43131 pop-free 掉电序列（软斜坡静音 → 150ms → 关耳放 → 关 ASP
+ * → 关晶振 → RESET# 拉低）→ 最后停 I2S 时钟。
+ *
+ * ⚠ 为什么需要它：S31 关机是 AXP2101 "一刀切"断电，若 DAC/耳放还在工作
+ *   状态（带偏置、输出非零），电源轨塌陷会在耳机里炸出一声爆音，关机越快
+ *   越明显。
+ * ⚠ 必须在**停 I2S 之前**调用（软斜坡静音需要时钟）；本函数内部自己按这个
+ *   顺序处理，调用方只需保证没有别的任务还在写 I2S（先 mp3_player_stop 并
+ *   等 IDLE）。
+ * ⚠ 幂等；audio 未初始化（充电界面拔充电器关机等场景）时为空操作。
+ * ⚠ 调用后 DAC 处于复位/掉电态：若随后**没有**真正断电（关机失败），必须
+ *   调 audio_recover_after_failed_shutdown() 把音频重新拉起来。
+ */
+void audio_shutdown(void);
+
+/**
+ * @brief 关机失败（PMU 未响应、设备继续运行）后重新拉起音频
+ *
+ * 重新执行 CS43131 的复位 + 完整配置并恢复原音量；I2S 通道对象仍在，下一次
+ * audio_pcm_start() 会重新配置时钟并 enable。未处于关断态时为空操作。
+ *
+ * @return ESP_OK 成功；其它为 CS43131 重新初始化失败
+ */
+esp_err_t audio_recover_after_failed_shutdown(void);
 
 /** 音量档位：0 = 静音，1~30 线性映射 20%~80%（人耳有效区间线性化） */
 #define AUDIO_VOL_LEVEL_MUTE    0u   /* 静音档：音量寄存器写最小 0xFF */

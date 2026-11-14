@@ -83,13 +83,20 @@ esp_err_t axp2101_power_off(void);   /* 写 0x10[0]=1 */
 1. 显示「正在关机...」（黑底居中一行白字，LVGL 全屏覆盖层，`lv_refr_now` 同步刷出）；
 2. `player_controller_save_last_position()` + `config_store_flush_pending(true)`；
 3. 停止播放并等解码任务退出；
-4. `lvgl_port_suspend()`（停止刷屏/触摸/封面任务）；
-5. `sd_card_deinit()`（FAT 落盘、释放 SDMMC）；
-6. `axp2101_power_off()` → PMU 关掉除 RTCLDO 外所有电源 → 真断电；
-7. 2.5s 仍存活则显示「关机失败，请长按电源键 4 秒」，由 PMU 的 OFFLEVEL 硬件兜底。
+4. **`audio_shutdown()` 优雅关断音频**：CS43131 按数据手册 Example 5-6（PCM Pop-Free
+   Power-Down）关掉——软斜坡静音 → 150ms → 关耳机放大器 → 关 ASP → 恢复默认 →
+   关晶振 → RESET# 拉低，最后才停 I2S 时钟（`cs43131_power_off()` + `audio.c`）；
+5. `lvgl_port_suspend()`（停止刷屏/触摸/封面任务）；
+6. `sd_card_deinit()`（FAT 落盘、释放 SDMMC）；
+7. 补足「正在关机...」的最少可见时长 **0.5s**（`FS_UI_MIN_SHOW_MS`，保存快则补够、
+   保存慢则不再额外等待）；
+8. `axp2101_power_off()` → PMU 关掉除 RTCLDO 外所有电源 → 真断电；
+9. 2.5s 仍存活则显示「关机失败，请长按电源键 4 秒」（并重新拉起音频），由 PMU 的
+   OFFLEVEL 硬件兜底。
 
 ⚠ 顺序不能反：写 `0x10` 前必须完成所有 flash 写；也不能提前 `touch_power_off()`/删 I²C
-总线（PMU 还在 I²C0 上）。⚠ 不再显示 S3 时代的「您现在可以安全断开电源了」黄色面板。
+总线（PMU 还在 I²C0 上）。⚠ **音频关断必须在停 I2S 之前做软斜坡静音**（斜坡需要时钟），
+否则关机快时耳机里会有"啪"的一声爆音。⚠ 不再显示 S3 时代的「您现在可以安全断开电源了」黄色面板。
 
 ---
 

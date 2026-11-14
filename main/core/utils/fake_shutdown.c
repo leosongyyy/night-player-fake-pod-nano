@@ -1,6 +1,7 @@
 #include "core/utils/fake_shutdown.h"
 
 #include "core/fonts/system_font.h"
+#include "core/hardware/audio/audio.h"
 #include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/axp2101.h"
 #include "core/hardware/display.h"
@@ -12,6 +13,7 @@
 #include "core/utils/power_service.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -25,21 +27,34 @@ static const char *TAG = "fake_shutdown";
 /*   1. 显示「正在关机...」（LVGL 全屏覆盖层，同步刷出一帧）；            */
 /*   2. 保存播放现场（歌曲/随机位置/列表名/是否在播）+ NVS 落盘；         */
 /*   3. 停止播放、等解码任务退出；                                      */
-/*   4. 挂起 LVGL（停止刷屏/触摸/封面任务）；                            */
-/*   5. 卸载 SD（FAT 落盘、释放 SDMMC）；                               */
-/*   6. 写 AXP2101 0x10[0]=1，PMU 关掉除 RTCLDO 外所有电源 → 真断电。    */
+/*   4. 优雅关断音频外设（CS43131 pop-free 掉电，防关机爆音）；           */
+/*   5. 挂起 LVGL（停止刷屏/触摸/封面任务）；                            */
+/*   6. 卸载 SD（FAT 落盘、释放 SDMMC）；                               */
+/*   7. 补足提示的最少可见时长（避免"一闪就没"）；                       */
+/*   8. 写 AXP2101 0x10[0]=1，PMU 关掉除 RTCLDO 外所有电源 → 真断电。    */
 /*                                                                     */
 /* ⚠ 顺序不能反：必须在写 0x10 之前完成所有 flash 写（NVS/SD），否则      */
-/*   断电会写坏数据；也不能提前 touch_power_off/删 I2C 总线，否则第 6 步  */
+/*   断电会写坏数据；也不能提前 touch_power_off/删 I2C 总线，否则第 7 步  */
 /*   的 PMU 写寄存器会失败。                                            */
+/* ⚠ 音频必须在 PMU 断电前"轻轻"关掉：PMU 是一刀切切电源，DAC/耳放若仍   */
+/*   在工作状态，电源轨塌陷会在耳机里炸出一声爆音（关机越快越明显）。     */
 /* ⚠ 不显示 S3 时代的「您现在可以安全断开电源了」：真关机不需要用户手动   */
 /*   断电。断电失败（例如 VBUS 供电下 PMU 不响应）时在屏上提示长按 4 秒   */
 /*   由 PMU 硬件强制断电。                                              */
 /* ------------------------------------------------------------------ */
 
 /* 写 0x10 后等断电的时间（ms）：PMU 正常会在几十 ms 内掉电；
-   2.5s 仍存活视为失败（仍在 deep_worker 的 5s 超时以内）。 */
+   2.5s 仍存活视为失败。⚠ 整条关机链必须留在 deep_worker 的 5s 超时以内
+   （最坏情况：停播放 1s + 音频关断 ~0.2s + SD 卸载 ~0.2s + 提示补时 0.5s
+   + 这里 2.5s ≈ 4.4s；加长任何一段都要重算这个预算）。 */
 #define FS_POWER_OFF_WAIT_MS  2500
+
+/* 「正在关机...」的**最少可见时长**（ms，从这一帧刷到屏上开始计时）。
+   保存 NVS（每个 4KB 页 5~20ms）与卸载 SD 的耗时随数据量波动，没有下限时
+   用户会看到关机提示"一闪就没"、有时又停得较久。这里按"补足到 0.5s"处理：
+   保存快的场合补到位，保存本身已超过 0.5s 的则不再额外等待。
+   ⚠ 这就是关机界面的显示时长旋钮：想更久直接调大这个值。 */
+#define FS_UI_MIN_SHOW_MS     500
 
 /* 关机流程互斥标志：长按电源键 / 睡眠定时器 / 低电策略可能同时触发，
    只允许一条流程执行（重复卸载 SD、重复写 NVS 都会出问题）。 */
@@ -91,14 +106,33 @@ static void fake_shutdown_ui_show(const char *msg)
     }
 }
 
+/* 补足「正在关机...」的最少可见时长：shown_us 是这一帧刷到屏上的时刻。
+   用"最少可见时长"而不是末尾固定 sleep——保存快的场合补到 0.5s，保存本身
+   就慢的场合不再额外拖长，用户看到的时长因此稳定（1~2 帧的差异）。 */
+static void fake_shutdown_ui_hold(int64_t shown_us)
+{
+    int64_t elapsed_ms = (esp_timer_get_time() - shown_us) / 1000;
+    if (elapsed_ms < FS_UI_MIN_SHOW_MS) {
+        uint32_t remain_ms = (uint32_t)(FS_UI_MIN_SHOW_MS - elapsed_ms);
+        ESP_LOGI(TAG, "shutdown: path took %d ms, keep message %u ms more",
+                 (int)elapsed_ms, (unsigned)remain_ms);
+        vTaskDelay(pdMS_TO_TICKS(remain_ms));
+    } else {
+        ESP_LOGI(TAG, "shutdown: path already took %d ms (>= %d ms), "
+                      "no extra wait", (int)elapsed_ms, FS_UI_MIN_SHOW_MS);
+    }
+}
+
 /* 关机执行体（deep_worker 任务上下文，**内部 RAM 栈**，可安全写 flash）。
    arg 可传一条自定义提示文案（const char*），NULL 用默认「正在关机...」。 */
 static void fake_shutdown_run(void *arg)
 {
     const char *msg = (arg != NULL) ? (const char *)arg : "正在关机...";
 
-    /* 1. 提示并同步刷出 */
+    /* 1. 提示并同步刷出；记下这一帧真正到屏上的时刻，第 7 步用来补足
+          最少可见时长 */
     fake_shutdown_ui_show(msg);
+    const int64_t t_shown_us = esp_timer_get_time();
     ESP_LOGI(TAG, "shutdown: UI shown \"%s\", saving data", msg);
 
     /* 2. 保存现场：先存播放位置（内部会写一次配置槽位 blob），再补写
@@ -120,17 +154,27 @@ static void fake_shutdown_run(void *arg)
         }
     }
 
-    /* 4. 挂起 LVGL：停止刷屏/触摸轮询/封面任务，保证卸载 SD 时没有别的
+    /* 4. 优雅关断音频外设：CS43131 按手册 pop-free 掉电序列关掉（软斜坡
+          静音 → 150ms → 关耳放 → 关 ASP → 关晶振 → RESET# 拉低），最后
+          才停 I2S 时钟。没在播放时 DAC/耳放同样是上电状态，所以这步不能
+          只依赖上一步的"停播放"。 */
+    audio_shutdown();
+
+    /* 5. 挂起 LVGL：停止刷屏/触摸轮询/封面任务，保证卸载 SD 时没有别的
           任务还在读卡；屏幕保留最后一帧「正在关机...」。 */
     lvgl_port_suspend();
 
-    /* 5. 卸载 SD（FAT 落盘 + 释放 SDMMC 主机） */
+    /* 6. 卸载 SD（FAT 落盘 + 释放 SDMMC 主机） */
     esp_err_t sd_err = sd_card_deinit();
     if (sd_err != ESP_OK) {
         ESP_LOGW(TAG, "sd_card_deinit failed: %s", esp_err_to_name(sd_err));
     }
 
-    /* 6. 发送 PMU 软关机命令：0x10[0]=1，PMU 关掉除 RTCLDO 外所有电源。
+    /* 7. 补足关机提示的最少可见时长（保存快 → 补够 0.5s；保存慢 → 不额外
+          等待）。放在 PMU 断电之前：所有 flash 写都已完成，不影响落盘顺序。 */
+    fake_shutdown_ui_hold(t_shown_us);
+
+    /* 8. 发送 PMU 软关机命令：0x10[0]=1，PMU 关掉除 RTCLDO 外所有电源。
           ⚠ 此时不能再调用 touch_power_off()/删 I2C 总线——PMU 还在 I²C0 上。 */
     ESP_LOGW(TAG, "shutdown: sending PMU power-off (0x10[0]=1)");
     esp_err_t err = axp2101_power_off();
@@ -138,7 +182,7 @@ static void fake_shutdown_run(void *arg)
         ESP_LOGE(TAG, "PMU power-off write failed: %s", esp_err_to_name(err));
     }
 
-    /* 7. PMU 正常会在几十 ms 内断电；仍存活说明关机失败，恢复 LVGL 并把
+    /* 9. PMU 正常会在几十 ms 内断电；仍存活说明关机失败，恢复 LVGL 并把
           失败原因显示出来，用户可长按电源键 4 秒由 PMU 硬件强制断电。 */
     vTaskDelay(pdMS_TO_TICKS(FS_POWER_OFF_WAIT_MS));
     ESP_LOGE(TAG, "PMU power-off did not cut power (write %s); still running",
@@ -146,6 +190,10 @@ static void fake_shutdown_run(void *arg)
 
     lvgl_port_resume();
     fake_shutdown_ui_show("关机失败，请长按电源键 4 秒");
+
+    /* 关机失败：设备会继续运行，必须把刚被"优雅关掉"的音频重新拉起来，
+       否则出现"机器还开着但完全没声音"的假故障 */
+    audio_recover_after_failed_shutdown();
 
     /* 允许用户再次长按重试（例如拔掉 USB 后再试一次） */
     s_shutting_down = false;

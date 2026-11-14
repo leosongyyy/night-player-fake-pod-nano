@@ -40,6 +40,14 @@ static const char *TAG = "audio";
 static i2s_chan_handle_t tx_chan = NULL;
 static bool i2s_enabled = false;   /* I2S 通道是否已 enable（避免重复 disable 警告） */
 
+/* audio_shutdown() 之后为 true：DAC 已掉电，音量/静音/写 I2S 都不应再发生 */
+static bool s_shutdown = false;
+
+/* 停 PCM 前留给软斜坡静音的时间（ms）：DAC 的 PCM 音量是渐变静音，
+   抽掉 I2S 时钟前先让它降下去，避免"咔哒"声。30ms 足够斜坡走完大半，
+   又不会让切歌/停止明显变慢（关机路径另有更完整的 150ms，见 audio_shutdown） */
+#define AUDIO_STOP_MUTE_WAIT_MS  30
+
 static audio_fs_t cur_fs = AUDIO_FS_48000;
 static uint8_t volume_level = AUDIO_VOL_LEVEL_DEFAULT;
 
@@ -249,12 +257,67 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames)
 
 esp_err_t audio_pcm_stop(void)
 {
+    /* 先软斜坡静音，再停时钟：旧顺序（先 i2s_disable 再 mute）会在 DAC 仍有
+       输出电平时抽掉 BCK/LRCK，耳机里出现可闻的"咔哒"声 */
+    cs43131_set_mute(true);
+    if (i2s_enabled) {
+        vTaskDelay(pdMS_TO_TICKS(AUDIO_STOP_MUTE_WAIT_MS));
+        i2s_channel_disable(tx_chan);
+        i2s_enabled = false;
+    }
+    return ESP_OK;
+}
+
+/* 停 I2S 时钟（幂等；调用方须确保 DAC 已静音/掉电，否则会有咔哒声） */
+static void audio_i2s_stop(void)
+{
     if (i2s_enabled) {
         i2s_channel_disable(tx_chan);
         i2s_enabled = false;
     }
-    cs43131_set_mute(true);   /* 停止后静音 DAC */
-    return ESP_OK;
+}
+
+void audio_shutdown(void)
+{
+    if (s_shutdown) {
+        return;
+    }
+    s_shutdown = true;
+
+    ESP_LOGI(TAG, "audio shutdown: pop-free DAC power down");
+
+    /* 1. CS43131 pop-free 掉电：软斜坡静音 → 150ms → 关耳放 → 关 ASP →
+          恢复默认 → 关晶振 → RESET# 拉低。
+          ⚠ **必须在停 I2S 之前**：软斜坡是数字音量渐变，需要 MCLK/ASP 时钟
+          在跑；先停时钟再静音等于没有斜坡，反而更容易爆音。 */
+    esp_err_t ret = cs43131_power_off();
+    if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "cs43131 power off failed: %s", esp_err_to_name(ret));
+    }
+
+    /* 2. 最后停 I2S 时钟（DAC 已在复位态，抽掉时钟不会出声） */
+    audio_i2s_stop();
+
+    ESP_LOGI(TAG, "audio shutdown done");
+}
+
+esp_err_t audio_recover_after_failed_shutdown(void)
+{
+    if (!s_shutdown) {
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "shutdown aborted: re-initializing CS43131 / audio");
+
+    /* CS43131 被 RESET# 复位过：重新走一遍复位 + 完整配置（音量寄存器不在
+       配置序列里，随后单独恢复）。I2S 通道对象仍在，下一次 audio_pcm_start()
+       会重新配置时钟并 enable，此处无需处理。 */
+    esp_err_t ret = cs43131_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "audio recover failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    s_shutdown = false;
+    return audio_set_volume_level(volume_level);
 }
 
 void audio_set_replay_gain(uint32_t gain_q16)

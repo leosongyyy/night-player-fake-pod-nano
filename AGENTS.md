@@ -245,7 +245,9 @@ main/
       global_style.h/.c     # 全局 UI 风格/动画统一样式（跑马灯：起始延迟 + 滚动 N 轮 + 轮间停顿，参数在头文件宏里，**不进 Kconfig**；v9 的 lv_label 已原生认动画模板里的轮数，只需维护模板 + lv_obj_set_style_anim；⚠ 改跑马灯文本必须用 global_style_marquee_set_text()——裸 lv_label_set_text 即使内容相同也会重建动画，会表现为"重绑列表时跑马灯全被打回起点"，见 MARQUEE_STYLE.md 与 DONE_PLANS #40；另有**label 登记表**：滚动期间统一暂停跑马灯（停手 250 ms 恢复），且"被滚动暂停(marquee_off)"与"被抑制(no_marquee，非当前页)"是两个正交状态——上层主动切 CLIP 时必须调 set_suppressed()，登记项靠 LV_EVENT_DELETE 摘除、**绝不用 lv_obj_is_valid()**，见 MARQUEE_STYLE.md §9）
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
-      fake_shutdown.h/.c        # 关机（名字保留；实际走 AXP2101 软关机真断电：显示「正在关机...」→存数据→PMU 0x10[0]=1）
+      fake_shutdown.h/.c        # 关机（名字保留；实际走 AXP2101 软关机真断电：显示「正在关机...」→存数据→
+                                #   停播放→**优雅关断音频（CS43131 pop-free 掉电，防爆音）**→挂起 LVGL→卸 SD→
+                                #   补足提示最少可见 0.5s（FS_UI_MIN_SHOW_MS）→PMU 0x10[0]=1）
       sleep_timer.h/.c          # 睡眠定时器（到点音量渐降后交给 fake_shutdown 走 AXP2101 真关机；清醒感知加时；
                                 #   开机自动开启判定 sleep_timer_boot_autostart_min：
                                 #   总是关闭 / 按时间段（RTC 小时落在 start~end，支持跨零点）/
@@ -369,7 +371,7 @@ patches/
   - 🆕 **2026-11 S31 复测：路径B 默认关闭**（`CONFIG_UI_LVGL_PIN_HOT_OBJECTS=n`，对象全部走 PSRAM）。S31 上 `LVGL_INTERNAL_RESERVE`(40KB) 很早就触发，路径B 实际只钉得进 **20.8KB**（不是 S3 的 82.8KB），关掉后：内部 RAM 稳态 **147,175 → 167,707 B（+20.5KB）**、开机完成最大连续块 **31,744 → 86,016 B（+53KB）**；歌曲列表快速滚动 **24~36fps**，真机确认可接受。详见 `ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md`；`MEM:` 行现在末尾带 `fps=`（由 `lvgl_port_get_refr_count()` 统计，静止时 0 属正常）。
 - **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。**「写 flash 与 PSRAM 的关系」已做完整审计，见 `ideas_and_exps/FLASH_WRITE_VS_PSRAM.md`**——要点：① 写 flash 期间两颗核都被停住、只屏蔽"非 IRAM"中断，所以**不会**与 LVGL 渲染并发，被冻结的核恢复后数据完好；② 真正的两条硬约束是"PSRAM 栈任务不许直接写 flash"（有断言）与"IRAM ISR 不许碰任何 PSRAM 数据 / `lv_*` / 播放列表与字体 mmap"（**无断言，靠纪律**；LVGL 对象搬进 PSRAM 后这条从"不规范"升级为"必崩"）；③ 全项目 NVS 写入口唯一（`config_store.c`）、调用栈全在内部 RAM；PSRAM 栈任务的关缓存段全部委托 deep_worker；④ PSRAM 缓冲写 flash 由 `esp_flash_write` 的 32B 栈弹跳兜住（能用，但慢）。
 - 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 320MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
-- **低电保护（S31，按电量百分比，2026-11 接回）**：`boot_flow` 在开机流程最前面判「电量 < 2% 且未充电」→ 只显示「电量过低，请充电」，**5 秒后直接写 AXP2101 `0x10[0]=1` 断电**（不停在此屏、不走 fake_shutdown）；`power_service` 每秒判「电量 < 5% 且未充电**持续** 60 秒」→ `fake_shutdown_enter()` 真关机。两处都不在充电中 / VBUS 在位时触发，读数不可用（percent=0xFF）时不动作。S3 的"息屏暂停超时自动关机"**未接回**；S3 的按电压（<3.45V）判据随分压 ADC 删除。
+- **低电保护（S31，按电量百分比，2026-11 接回）**：`boot_flow` 在开机流程最前面判「电量 < 2% 且未充电」→ 只显示「电量过低，请充电」，**5 秒后直接写 AXP2101 `0x10[0]=1` 断电**（不停在此屏、不走 fake_shutdown；此时 CS43131 通常尚未初始化，不需要优雅关断音频）；`power_service` 每秒判「电量 < 5% 且未充电**持续** 60 秒」→ `fake_shutdown_enter()` 真关机。两处都不在充电中 / VBUS 在位时触发，读数不可用（percent=0xFF）时不动作。S3 的"息屏暂停超时自动关机"**未接回**；S3 的按电压（<3.45V）判据随分压 ADC 删除。
 - 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep；关机走 PMU 软关机（真断电）。
 
 ### 关键技术要点与踩坑记录（务必遵守）

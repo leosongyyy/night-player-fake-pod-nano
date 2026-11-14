@@ -72,6 +72,37 @@ esp_err_t cs43131_set_mute(bool mute);
 uint32_t cs43131_get_sample_rate(void);
 
 /**
+ * @brief 优雅掉电（关机路径专用，避免耳机爆音）
+ *
+ * 按数据手册 **Example 5-6「PCM Pop-Free Power-Down Sequence（External
+ * VCPFILT 模式）」** 执行，与上电用的 Example 5-5 / 本项目
+ * cs43131_apply_full_config() 成对：
+ *
+ *   1. pop-free 掉电设置（0x010010=0x99、0x080046=0x21）；
+ *   2. PCM 双声道静音（0x090003 |= 0x03，该寄存器配了 PCM_RAMP_DOWN
+ *      软斜坡，音量是渐降而不是阶跃）；
+ *   3. **等 150ms** 让软斜坡走完（手册要求；这期间 ASP/MCLK 时钟必须还在，
+ *      所以调用方不要先停 I2S，见 audio_shutdown()）；
+ *   4. 关耳机放大器（PDN_HP）并等其掉电；
+ *   5. 关 ASP 数据路径（PDN_ASP）；
+ *   6. 恢复手册要求的默认值（0x080046=0x20、0x010010=0x00，取消静音）；
+ *   7. 关晶振（PDN_XTAL），最后把 RESET# 拉低 —— 芯片回到出厂
+ *      "全部电源域掉电"态（0x020000=0xFE），PMU 随后切断整机电源时
+ *      已经没有任何带偏置的模拟电路，是最安静的状态。
+ *
+ * ⚠ 手册第 4/6 步是"等 PDN_DONE 中断"，但寄存器级掉电（晶振仍开）时
+ *   PDN_DONE 永不触发（见 cs43131_reset_for_sleep 注释），故改用固定延时兜底。
+ * ⚠ 调用后 s_ready=false，音量/静音等接口一律返回 ESP_ERR_NOT_FOUND；
+ *   若随后并没有真正断电（关机失败），必须重新 cs43131_init() 才能再用
+ *   （audio 层封装成 audio_recover_after_failed_shutdown()）。
+ * ⚠ 幂等：未探测到设备（audio 未初始化 / 初始化失败）时直接返回
+ *   ESP_ERR_NOT_FOUND，不产生任何 I²C 流量。
+ *
+ * @return ESP_OK 成功；ESP_ERR_NOT_FOUND 设备不可用（无需掉电）
+ */
+esp_err_t cs43131_power_off(void);
+
+/**
  * @brief 深度休眠前复位 CS43131（RESET# 拉低硬件复位，供 deepsleep 使用）
  *
  * 直接拉低 GPIO41：芯片回到出厂默认态（0x020000=0xFE，全部电源域含晶振

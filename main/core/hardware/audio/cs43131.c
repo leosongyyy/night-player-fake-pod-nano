@@ -47,7 +47,8 @@ static const char *TAG = "cs43131";
 #define REG_ASP_CH1_SIZE   0x05000A  /* ASP 通道 1 尺寸与使能 */
 #define REG_ASP_CH2_SIZE   0x05000B  /* ASP 通道 2 尺寸与使能 */
 #define REG_HP_OUT_CTL1    0x080000  /* 耳机输出控制 1（OUT_FS 满幅电压） */
-#define REG_HP_CTL         0x080032  /* 耳机控制（pop-free 配套） */
+#define REG_HP_CTL         0x080032  /* 耳机控制（上电 pop-free 配套） */
+#define REG_HP_PDN_CTL     0x080046  /* 耳机控制（**掉电** pop-free 配套，手册 Example 5-6） */
 #define REG_PCM_FILTER     0x090000  /* PCM 滤波器选择 */
 #define REG_PCM_VOL_B      0x090001  /* PCM 音量 B */
 #define REG_PCM_VOL_A      0x090002  /* PCM 音量 A */
@@ -58,6 +59,16 @@ static const char *TAG = "cs43131";
 
 /* 0x010006 系统时钟源：Direct XTAL + 24.576MHz（MCLK_SRC_SEL=00, MCLK_INT=0） */
 #define MCLK_DIRECT_24576   0x00
+
+/* PCM 静音控制 0x090003 的 MUTE_A/MUTE_B 位（置 1 = 该声道静音） */
+#define PCM_MUTE_BOTH       0x03
+
+/* 掉电序列各步等待（手册 Example 5-6：静音后 150ms 等软斜坡走完；
+   PDN_HP 后等放大器掉电——手册是等 PDN_DONE 中断，但寄存器级掉电
+   （晶振仍开）该中断永不触发，故用固定延时兜底；关晶振后留 2ms 稳定） */
+#define CS43131_PDN_MUTE_WAIT_MS  150
+#define CS43131_PDN_HP_WAIT_MS     20
+#define CS43131_PDN_XTAL_WAIT_MS    2
 
 /* ASP 采样率编码（0x01000B，ASP_SPRATE） */
 #define ASP_RATE_32000      0x00
@@ -170,6 +181,18 @@ static esp_err_t cs43131_power_up_domain(uint8_t pdn_bits)
         return ret;
     }
     reg = (uint8_t)(reg & ~pdn_bits);
+    return cs43131_write_reg(REG_PWR_CTL, reg);
+}
+
+/* 掉电指定电源域（读-改-写，置对应 PDN 位 = 该域掉电） */
+static esp_err_t cs43131_power_down_domain(uint8_t pdn_bits)
+{
+    uint8_t reg = 0;
+    esp_err_t ret = cs43131_read_reg(REG_PWR_CTL, &reg);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    reg = (uint8_t)(reg | pdn_bits);
     return cs43131_write_reg(REG_PWR_CTL, reg);
 }
 
@@ -466,6 +489,69 @@ esp_err_t cs43131_reset_for_sleep(void)
     gpio_set_level(CS43131_RST_PIN, 0);
     vTaskDelay(pdMS_TO_TICKS(12));   /* 等待复位稳定（手册 tPUD 1.5ms 以上） */
     ESP_LOGI(TAG, "CS43131 hardware reset for deep sleep (all power domains off)");
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* 优雅掉电（关机路径专用）                                              */
+/*                                                                     */
+/* 背景：S31 走 AXP2101 软关机（真断电），PMU 是"一刀切"关掉所有电源轨。   */
+/* 若 DAC/耳放此时仍在工作（耳机放大器带偏置、输出电平非零），电源轨塌陷  */
+/* 会在耳机里炸出一声爆音——关机越快越明显。                              */
+/* 本函数按手册 Example 5-6（PCM Pop-Free Power-Down Sequence，External    */
+/* VCPFILT 模式）把芯片"轻轻"关掉，与上电用的 Example 5-5 成对。           */
+/* ⚠ 时序要求：第 2~3 步的软斜坡静音需要 MCLK/ASP 时钟在跑，**不能先停  */
+/*   I2S**（调用方见 audio_shutdown()）。                                */
+/* ------------------------------------------------------------------ */
+
+esp_err_t cs43131_power_off(void)
+{
+    if (!s_ready) {
+        return ESP_ERR_NOT_FOUND;   /* audio 未初始化 / 初始化失败：无需掉电 */
+    }
+    ESP_LOGI(TAG, "pop-free power down: mute -> HP -> ASP -> XTAL -> RESET");
+
+    /* 1. pop-free 掉电设置（手册 Example 5-6 step 1） */
+    cs43131_write_reg(REG_POP_FREE, 0x99);
+    cs43131_write_reg(REG_HP_PDN_CTL, 0x21);
+
+    /* 2. PCM 双声道静音：0x090003 已配 0xEC（含 PCM_RAMP_DOWN 软斜坡），
+          置 MUTE_A/B 后音量是渐降到底的，不会产生阶跃 */
+    uint8_t mute_ctl = 0;
+    if (cs43131_read_reg(REG_PCM_MUTE_CTL, &mute_ctl) == ESP_OK) {
+        cs43131_write_reg(REG_PCM_MUTE_CTL, (uint8_t)(mute_ctl | PCM_MUTE_BOTH));
+    }
+
+    /* 3. 等软斜坡走完（手册 150ms） */
+    vTaskDelay(pdMS_TO_TICKS(CS43131_PDN_MUTE_WAIT_MS));
+
+    /* 4. 关耳机放大器，等它真正掉电 */
+    cs43131_power_down_domain(CS43131_PWR_HP);
+    vTaskDelay(pdMS_TO_TICKS(CS43131_PDN_HP_WAIT_MS));
+
+    /* 5. 关 ASP 数据路径 */
+    cs43131_power_down_domain(CS43131_PWR_ASP);
+
+    /* 6. 恢复手册要求的默认值：此时 HP 已关，取消静音位不会出声 */
+    if (cs43131_read_reg(REG_PCM_MUTE_CTL, &mute_ctl) == ESP_OK) {
+        cs43131_write_reg(REG_PCM_MUTE_CTL, (uint8_t)(mute_ctl & ~PCM_MUTE_BOTH));
+    }
+    cs43131_write_reg(REG_HP_PDN_CTL, 0x20);
+    cs43131_write_reg(REG_POP_FREE, 0x00);
+
+    /* 7. 关晶振，最后拉低 RESET#：芯片回到出厂"全部电源域掉电"态
+          （0x020000=0xFE），PMU 随后断电时已没有带偏置的模拟电路 */
+    cs43131_power_down_domain(CS43131_PWR_XTAL);
+    vTaskDelay(pdMS_TO_TICKS(CS43131_PDN_XTAL_WAIT_MS));
+    gpio_reset_pin(CS43131_RST_PIN);
+    gpio_set_direction(CS43131_RST_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CS43131_RST_PIN, 0);
+
+    /* 8. 标记不可用：之后的音量/静音接口直接返回 NOT_FOUND。真正断电前
+          若关机流程失败，必须重新 cs43131_init() 才能再用（见 audio 层
+          audio_recover_after_failed_shutdown()） */
+    s_ready = false;
+    ESP_LOGI(TAG, "CS43131 powered off (all power domains off, RESET held low)");
     return ESP_OK;
 }
 
