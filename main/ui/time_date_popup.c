@@ -54,6 +54,14 @@ static lv_obj_t *s_time_sec = NULL;
 static lv_obj_t *s_tz_root = NULL;
 static lv_obj_t *s_tz_roller = NULL;
 
+/* 小时区间弹窗（滚动选 开始/结束 小时，两者不可相同） */
+static lv_obj_t *s_range_root = NULL;
+static lv_obj_t *s_range_start = NULL;
+static lv_obj_t *s_range_end = NULL;
+static lv_obj_t *s_range_title_lbl = NULL;
+static time_date_hour_range_cb_t s_range_cb = NULL;
+static char s_hour_opts[24 * 6];   /* "00:00".."23:00"：每项 5 字符 + 换行 */
+
 static void (*s_refresh_cb)(void) = NULL;
 
 /* 年/月/日滚轮的选项字符串（静态存储：roller 不复制字符串） */
@@ -195,6 +203,17 @@ static void options_init(void)
 
     for (size_t i = 0; i < TZ_COUNT; i++) {
         snprintf(s_tz_opts[i], sizeof(s_tz_opts[i]), "%s", TZ_TABLE[i].label);
+    }
+
+    /* 小时档位（00:00 ~ 23:00）：小时区间弹窗的两个滚轮共用一份字符串 */
+    s_hour_opts[0] = '\0';
+    for (int h = 0; h < 24; h++) {
+        char tmp[8];
+        snprintf(tmp, sizeof(tmp), "%02d:00", h);
+        strcat(s_hour_opts, tmp);
+        if (h < 23) {
+            strcat(s_hour_opts, "\n");
+        }
     }
 
     s_opts_ready = true;
@@ -766,6 +785,92 @@ void time_date_popup_show_tz(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* 小时区间弹窗（睡眠定时器 → 时间段：开始 / 结束两个滚轮）              */
+/* ------------------------------------------------------------------ */
+
+static void range_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    popup_hide(s_range_root);
+}
+
+/* 保存：两个滚轮都只选整点，**相等时拒绝保存**（时间段不可为空），
+   弹 Toast 且保持弹窗，让用户继续调 */
+static void range_save_cb(lv_event_t *e)
+{
+    (void)e;
+    uint8_t start = (uint8_t)lv_roller_get_selected(s_range_start);
+    uint8_t end = (uint8_t)lv_roller_get_selected(s_range_end);
+    if (start == end) {
+        ui_toast_show("开始和结束时间不能相同");
+        return;
+    }
+    if (s_range_cb != NULL) {
+        s_range_cb(start, end);
+    }
+    popup_hide(s_range_root);
+    ESP_LOGI(TAG, "hour range saved: %02u:00 -> %02u:00", (unsigned)start,
+             (unsigned)end);
+}
+
+static void range_popup_create(void)
+{
+    options_init();
+    s_range_root = popup_root_create();
+    lv_obj_add_event_cb(s_range_root, popup_bg_cb, LV_EVENT_CLICKED, s_range_root);
+
+    lv_obj_t *panel = panel_create(s_range_root, "时间段设置",
+                                   TD_PANEL_PAD * 2 + TD_TITLE_H + TD_GAP
+                                   + TD_ROLLER_COL_H + TD_GAP + TD_BTN_H);
+    s_range_title_lbl = lv_obj_get_child(panel, 0);
+
+    lv_obj_t *rollers = lv_obj_create(panel);
+    lv_obj_set_size(rollers, TD_PANEL_W - TD_PANEL_PAD * 2, TD_ROLLER_COL_H);
+    lv_obj_set_style_bg_opa(rollers, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(rollers, 0, 0);
+    lv_obj_set_style_pad_all(rollers, 0, 0);
+    lv_obj_set_style_pad_column(rollers, 8, 0);
+    lv_obj_clear_flag(rollers, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(rollers, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_flex_flow(rollers, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(rollers, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER);
+
+    const int col_w = (TD_PANEL_W - TD_PANEL_PAD * 2 - 8) / 2;
+    s_range_start = roller_column_create(rollers, "开始", s_hour_opts, col_w);
+    s_range_end = roller_column_create(rollers, "结束", s_hour_opts, col_w);
+
+    lv_obj_t *btns = button_row_create(panel);
+    action_button_create(btns, "取消", false, range_cancel_cb, NULL);
+    action_button_create(btns, "保存", true, range_save_cb, NULL);
+}
+
+void time_date_popup_show_hour_range(const char *title, uint8_t start_hour,
+                                     uint8_t end_hour,
+                                     time_date_hour_range_cb_t on_save)
+{
+    options_init();
+    if (s_range_root == NULL) {
+        range_popup_create();
+    }
+    s_range_cb = on_save;
+    if (title != NULL && s_range_title_lbl != NULL) {
+        lv_label_set_text(s_range_title_lbl, title);
+    }
+    if (start_hour > 23) {
+        start_hour = 0;
+    }
+    if (end_hour > 23) {
+        end_hour = 0;
+    }
+    lv_roller_set_selected(s_range_start, start_hour, LV_ANIM_OFF);
+    lv_roller_set_selected(s_range_end, end_hour, LV_ANIM_OFF);
+    popup_show(s_range_root);
+    ESP_LOGI(TAG, "hour range popup shown (%02u:00 -> %02u:00)",
+             (unsigned)start_hour, (unsigned)end_hour);
+}
+
+/* ------------------------------------------------------------------ */
 /* 对外状态接口                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -785,5 +890,6 @@ bool time_date_popup_any_visible(void)
 {
     return (s_date_root != NULL && !lv_obj_has_flag(s_date_root, LV_OBJ_FLAG_HIDDEN))
         || (s_time_root != NULL && !lv_obj_has_flag(s_time_root, LV_OBJ_FLAG_HIDDEN))
-        || (s_tz_root != NULL && !lv_obj_has_flag(s_tz_root, LV_OBJ_FLAG_HIDDEN));
+        || (s_tz_root != NULL && !lv_obj_has_flag(s_tz_root, LV_OBJ_FLAG_HIDDEN))
+        || (s_range_root != NULL && !lv_obj_has_flag(s_range_root, LV_OBJ_FLAG_HIDDEN));
 }

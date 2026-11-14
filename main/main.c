@@ -208,22 +208,25 @@ void app_main(void)
     sleep_timer_init();
     mem_trace_log("13-sleep_timer");
 
-    // 开机默认开启睡眠定时（config_store 的 sleep_def_on，默认关）：
-    // 开启时用默认时长（sleep_default_min，默认 45 分钟）自动启动定时。
+    // 开机自动开启睡眠定时（config_store 的 sleep_auto，默认"总是关闭"）：
+    // 三档 —— 总是关闭 / 按时间段（当前时刻落在时间段内才开）/ 总是开启。
     // 判定收敛到 sleep_timer_boot_autostart_min（与 boot_flow 的"定时已开启"
     // Toast 提醒共用同一判定，见 FUTURE_PLAN 第 27 点）。
-    // ⚠ 设置里**关闭**"开机默认开启"时，开机一律不启动定时——全局记忆的
-    //   定时时长（sleep_default_min）只是"下次开启时用的默认档位"，不是开机
-    //   就要生效的指令。历史 bug：这里曾在 else 分支按记忆时长恢复定时，
+    // ⚠ 模式为"总是关闭"或"按时间段但当前不在区间内"时，开机一律不启动定时——
+    //   全局记忆的定时时长（sleep_default_min）只是"下次开启时用的默认档位"，
+    //   不是开机就要生效的指令。历史 bug：这里曾在 else 分支按记忆时长恢复定时，
     //   导致关掉开关后每次开机定时器照样自动开启。
-    //   睡眠定时与配置槽位互相独立（时长/开关都是全局键，切槽位不重开表）。
+    //   睡眠定时与配置槽位互相独立（时长/模式/时间段都是全局键，切槽位不重开表）。
     uint32_t boot_sleep_min = sleep_timer_boot_autostart_min();
     if (boot_sleep_min > 0) {
         sleep_timer_set(boot_sleep_min);
         ESP_LOGI(TAG, "boot: sleep timer auto started (%u min)",
                  (unsigned)boot_sleep_min);
     } else {
-        ESP_LOGI(TAG, "boot: sleep timer off (开机默认开启已关闭)");
+        ESP_LOGI(TAG, "boot: sleep timer off (auto mode=%d, range=%02u-%02u)",
+                 (int)config_store_get_sleep_auto_mode(),
+                 (unsigned)config_store_get_sleep_range_start_hour(),
+                 (unsigned)config_store_get_sleep_range_end_hour());
     }
 
     // 按键分发（S31 单键：亮屏=音量-；息屏=亮屏+切歌）。

@@ -25,13 +25,20 @@ extern "C" {
  *     由 player_controller 在切歌/暂停/关机时保存，开机恢复随机序列现场
  *   - 睡眠定时的默认时长 sleep_default_min（分钟，默认 45）：**只是"开启时用的
  *     档位"**，本身不代表定时已开启
- *   - 开机默认开启睡眠定时 sleep_def_on（bool，默认关）：睡眠定时的总开关——
- *     为开时开机自动用默认时长开启睡眠定时器（在 main.c 的 sleep_timer_init
- *     之后应用）；为关时开机不启动定时。开启时进入主界面会弹 Toast 提醒
- *     "定时已开启"（boot_flow，见 FUTURE_PLAN 第 27 点）。
- *     ⚠ 睡眠定时的**时长与开关都与配置槽位互相独立**（2026-11 调整）：两者都是
- *     全局键，切换 SAVE1~SAVE4 既不改变也不重新开表（定时只在用户主动操作时
- *     才变：设置页/通知栏开关、开机自动开启）。
+ *   - 睡眠定时开机自动开启模式 sleep_auto（uint8 枚举，默认 0=总是关闭）：
+ *     - 0 = 总是关闭：开机一律不自动开启定时；
+ *     - 1 = 按时间段：开机时若当前时刻落在 sleep_range_start/end 小时内则开启；
+ *     - 2 = 总是开启：每次开机都用默认时长开启定时。
+ *     判定统一收敛在 `sleep_timer_boot_autostart_min()`（main.c 启动定时、
+ *     boot_flow 弹"定时已开启"Toast 共用同一判定，见 FUTURE_PLAN 第 27 点）。
+ *     ⚠ 睡眠定时的**时长/模式/时间段/清醒感知都与配置槽位互相独立**（2026-11）：
+ *     全是全局键，切换 SAVE1~SAVE4 既不改变也不重新开表（定时只在用户主动
+ *     操作或开机判定时才变）。
+ *   - 睡眠定时时间段 sleep_range_start / sleep_range_end（小时 0~23，默认
+ *     22 / 6）：仅在「按时间段」模式下生效，两者**不可相同**（相同视为非法，
+ *     判定时不自动开启；UI 的滚轮弹窗在保存时就会拦下）。区间为左闭右开，
+ *     支持跨零点：start < end 时是 [start, end)，start > end 时是
+ *     [start, 24) ∪ [0, end)（例：22 → 6 表示 22:00~05:59）。
  *   - 睡眠定时清醒感知 sleep_awake（bool，默认开）：睡眠定时开启期间，切歌/
  *     播放控制/点歌等用户动作按 NightPlayer 算法折算加时（见 core/utils/
  *     sleep_timer；音量调节不再加时）
@@ -122,7 +129,9 @@ extern "C" {
 #define CONFIG_STORE_BRIGHTNESS_MIN     16u  /* 亮度下限（0~255 总量程）：防止屏幕完全看不清 */
 #define CONFIG_STORE_LOOP_DEFAULT       2u   /* PLAYER_LOOP_LIST */
 #define CONFIG_STORE_SLEEP_DEFAULT_MIN  45u
-#define CONFIG_STORE_SLEEP_DEF_ON_DEFAULT 0u  /* 开机默认不自动开启睡眠定时 */
+#define CONFIG_STORE_SLEEP_AUTO_OFF_DEFAULT 0u  /* 开机默认不自动开启睡眠定时 */
+#define CONFIG_STORE_SLEEP_RANGE_START_DEFAULT 22u  /* 时间段默认 22:00 */
+#define CONFIG_STORE_SLEEP_RANGE_END_DEFAULT    6u  /* 时间段默认到 06:00（跨零点） */
 #define CONFIG_STORE_SLEEP_AWAKE_DEFAULT 1u   /* 睡眠清醒感知默认开启（NightPlayer 行为） */
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
 /* 时区（UTC 偏移，单位分钟）：默认 +480 = UTC+8（北京时间）。
@@ -149,6 +158,19 @@ typedef enum {
     CONFIG_STORE_CW_SPEED_TURBO  = 2,  /* 极速：圈数 × 0.50 */
     CONFIG_STORE_CW_SPEED_COUNT  = 3,
 } config_store_cw_speed_t;
+
+/**
+ * 睡眠定时「开机自动开启」模式（NVS 键 sleepauto）
+ *
+ * 取代原来的布尔开关 sleep_def_on（旧键仍会在首次升级时读取一次做迁移：
+ * 老值为 1 → 总是开启，0 → 总是关闭）。
+ */
+typedef enum {
+    CONFIG_STORE_SLEEP_AUTO_OFF   = 0,  /* 总是关闭：开机不自动开启定时 */
+    CONFIG_STORE_SLEEP_AUTO_RANGE = 1,  /* 按时间段：开机时在时间段内才开启 */
+    CONFIG_STORE_SLEEP_AUTO_ALWAYS = 2, /* 总是开启：每次开机都开启 */
+    CONFIG_STORE_SLEEP_AUTO_COUNT = 3,
+} config_store_sleep_auto_t;
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
 #define CONFIG_STORE_TIME_24H_DEFAULT     1u  /* 时间显示默认 24 小时制 */
@@ -245,11 +267,17 @@ bool config_store_get_shuffle(void);
  */
 bool config_store_get_shuffle_pos(uint64_t *pos);
 
-/** @brief 睡眠定时的默认时长（分钟，0=无默认）。全局一份，与配置槽位无关；是否自动开启由 sleep_def_on 决定 */
+/** @brief 睡眠定时的默认时长（分钟，0=无默认）。全局一份，与配置槽位无关；是否自动开启由 sleep_auto 决定 */
 uint32_t config_store_get_sleep_default_min(void);
 
-/** @brief 总开关：开机默认是否开启睡眠定时器（true=开机/切槽位自动用默认时长开启） */
-bool config_store_get_sleep_def_on(void);
+/** @brief 睡眠定时「开机自动开启」模式（总是关闭 / 按时间段 / 总是开启） */
+config_store_sleep_auto_t config_store_get_sleep_auto_mode(void);
+
+/** @brief 睡眠定时时间段-开始小时（0~23；仅「按时间段」模式生效） */
+uint8_t config_store_get_sleep_range_start_hour(void);
+
+/** @brief 睡眠定时时间段-结束小时（0~23；左闭右开，可与开始小时构成跨零点区间） */
+uint8_t config_store_get_sleep_range_end_hour(void);
 
 /** @brief 睡眠定时清醒感知开关（true=切歌/调音量等动作按 NightPlayer 算法加时） */
 bool config_store_get_sleep_awake(void);
@@ -402,8 +430,16 @@ void config_store_set_shuffle_pos(uint64_t pos);
  */
 void config_store_set_sleep_default_min(uint32_t minutes);
 
-/** @brief 设置开机默认开启睡眠定时器并持久化（全局键，同样不进槽位） */
-void config_store_set_sleep_def_on(bool on);
+/** @brief 设置睡眠定时「开机自动开启」模式并持久化（全局键，同样不进槽位） */
+void config_store_set_sleep_auto_mode(config_store_sleep_auto_t mode);
+
+/**
+ * @brief 设置睡眠定时时间段的开始/结束小时并持久化
+ *
+ * 自动收敛：参数钳到 0~23；两者相等时把结束小时改为 (start + 1) % 24
+ * （时间段不可为空，与 UI 弹窗的"不可相同"校验一致）。
+ */
+void config_store_set_sleep_range_hours(uint8_t start_hour, uint8_t end_hour);
 
 /** @brief 设置睡眠清醒感知开关并持久化 */
 void config_store_set_sleep_awake(bool on);

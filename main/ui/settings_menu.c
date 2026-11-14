@@ -82,7 +82,8 @@ static bool      s_visible         = false; /* 菜单当前是否显示 */
 static lv_point_t s_bg_press_point = { 0, 0 };
 
 /* 根页面行的右侧状态文字（开关状态/当前档位） */
-static lv_obj_t *s_sleep_def_on_status = NULL;   /* 睡眠定时器（开机默认开启） */
+static lv_obj_t *s_sleep_auto_status   = NULL;   /* 睡眠定时器（自动开启模式） */
+static lv_obj_t *s_sleep_range_status  = NULL;   /* 睡眠定时器（时间段） */
 static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
 static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
 static lv_obj_t *s_rescan_count_status = NULL;   /* 重新扫描（当前歌曲总数，
@@ -353,12 +354,33 @@ static void time_date_tick_cb(lv_timer_t *timer)
     menu_refresh_time_date();
 }
 
+/* 睡眠定时「开机自动开启」三档的显示文字（下标 = config_store_sleep_auto_t） */
+static const char *const SLEEP_AUTO_TXT[] = {
+    "总是关闭", "按时间段", "总是开启",
+};
+
+/* 时间段显示："22:00 - 06:00"（跨零点也照原样显示，不额外解释） */
+static void sleep_range_format(char *buf, size_t size)
+{
+    snprintf(buf, size, "%02u:00 - %02u:00",
+             (unsigned)config_store_get_sleep_range_start_hour(),
+             (unsigned)config_store_get_sleep_range_end_hour());
+}
+
 /* 刷新根页面各行的状态文字（打开菜单/开关切换后调用） */
 static void menu_refresh_root(void)
 {
-    if (s_sleep_def_on_status != NULL) {
-        lv_label_set_text(s_sleep_def_on_status,
-                          config_store_get_sleep_def_on() ? "开" : "关");
+    if (s_sleep_auto_status != NULL) {
+        uint8_t mode = (uint8_t)config_store_get_sleep_auto_mode();
+        if (mode >= CONFIG_STORE_SLEEP_AUTO_COUNT) {
+            mode = CONFIG_STORE_SLEEP_AUTO_OFF;
+        }
+        lv_label_set_text(s_sleep_auto_status, SLEEP_AUTO_TXT[mode]);
+    }
+    if (s_sleep_range_status != NULL) {
+        char buf[24];
+        sleep_range_format(buf, sizeof(buf));
+        lv_label_set_text(s_sleep_range_status, buf);
     }
     if (s_awake_status != NULL) {
         lv_label_set_text(s_awake_status,
@@ -406,14 +428,36 @@ static void menu_refresh_screen_off_sel(void)
 /* 交互事件                                                             */
 /* ------------------------------------------------------------------ */
 
-/* 睡眠定时器（开机默认开启）开关：点击切换并持久化 */
-static void sleep_def_on_row_cb(lv_event_t *e)
+/* 睡眠定时器「开机自动开启」：点击在 三档之间循环
+   总是关闭 → 按时间段 → 总是开启 → 总是关闭…
+   （只是下次开机的判定；不会立刻启动/关闭当前定时） */
+static void sleep_auto_row_cb(lv_event_t *e)
 {
     (void)e;
-    bool on = !config_store_get_sleep_def_on();
-    config_store_set_sleep_def_on(on);
-    ESP_LOGI(TAG, "sleep def on -> %d", (int)on);
+    uint8_t mode = (uint8_t)config_store_get_sleep_auto_mode();
+    mode = (uint8_t)((mode + 1) % CONFIG_STORE_SLEEP_AUTO_COUNT);
+    config_store_set_sleep_auto_mode((config_store_sleep_auto_t)mode);
+    ESP_LOGI(TAG, "sleep auto mode -> %u", (unsigned)mode);
     menu_refresh_root();
+}
+
+/* 时间段选择回调（滚轮弹窗保存）：写配置并刷新本页状态文字 */
+static void sleep_range_saved_cb(uint8_t start_hour, uint8_t end_hour)
+{
+    config_store_set_sleep_range_hours(start_hour, end_hour);
+    ESP_LOGI(TAG, "sleep range -> %02u:00 - %02u:00", (unsigned)start_hour,
+             (unsigned)end_hour);
+    menu_refresh_root();
+}
+
+/* 睡眠定时器「时间段」：打开 开始/结束 小时滚轮弹窗 */
+static void sleep_range_row_cb(lv_event_t *e)
+{
+    (void)e;
+    time_date_popup_show_hour_range("睡眠时间段",
+                                    config_store_get_sleep_range_start_hour(),
+                                    config_store_get_sleep_range_end_hour(),
+                                    sleep_range_saved_cb);
 }
 
 /* 清醒感知开关：点击切换并持久化 */
@@ -841,11 +885,17 @@ static lv_obj_t *sleep_page_build(void)
     lv_obj_t *sleep_page = lv_menu_page_create(s_menu, (char *)"睡眠定时器");
     page_style_apply(sleep_page);
 
-    /* 开机默认开启：开关 */
+    /* 开机自动开启：点击在 总是关闭 / 按时间段 / 总是开启 之间循环 */
     lv_obj_t *sleep_toggle = menu_row_create(sleep_page, NULL,
-                                             "开机默认开启", &s_sleep_def_on_status);
+                                             "开机自动开启", &s_sleep_auto_status);
     lv_obj_add_flag(sleep_toggle, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(sleep_toggle, sleep_def_on_row_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(sleep_toggle, sleep_auto_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 时间段：开始/结束小时滚轮弹窗（仅「按时间段」模式生效，支持跨零点） */
+    lv_obj_t *range_row = menu_row_create(sleep_page, NULL,
+                                          "时间段", &s_sleep_range_status);
+    lv_obj_add_flag(range_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(range_row, sleep_range_row_cb, LV_EVENT_CLICKED, NULL);
 
     /* 睡眠清醒感知：开关（睡眠定时器的子功能，一并收进本子菜单） */
     lv_obj_t *awake_toggle = menu_row_create(sleep_page, NULL,
@@ -861,17 +911,9 @@ static lv_obj_t *sleep_page_build(void)
        拆成多张卡片后，每帧只有与失效区域相交的卡片重绘，滚动明显顺畅。
        ⚠ 后续给本菜单加说明文字时，请沿用"一段一卡"，不要写回单个长标签。 */
     menu_note_row_create(sleep_page,
-        "功能说明：\n"
-        "开启「开机默认开启」后，每次开机会自动开启睡眠定时器，并在进入主界面时"
-        "弹出提示提醒您（不需要时可在播放设置页长按睡眠定时格子关闭）。");
-    menu_note_row_create(sleep_page,
         "开启清醒感知后，若在睡眠定时器期间进行操作，剩余时间会按照一定比例增加，"
         "让您在入梦前音乐不断；倒计时即将结束时，音量会逐渐减小，让音乐自然淡出。");
-    menu_note_row_create(sleep_page,
-        "睡眠定时到点后，播放器只进入休眠状态（所有外设关闭，低功耗待机，"
-        "同时按下两个按键即可唤醒），这是硬件的限制。"
-        "如果要彻底关机省电，请在第二天早上长按 3 秒上键手动关机。");
-    menu_refresh_root();   /* 本页两行的开关状态 */
+    menu_refresh_root();   /* 本页三行的状态文字 */
     s_sleep_page = sleep_page;
     ESP_LOGI(TAG, "sleep timer page built");
     return sleep_page;

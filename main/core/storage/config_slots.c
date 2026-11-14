@@ -55,9 +55,11 @@ void config_slots_switch(uint32_t idx)
     /* 6. 睡眠定时：**不属于配置槽位**（2026-11 起时长与开关都是全局键），
           切槽位既不改变它的时长/开关，也不重新开表——正在跑的定时继续跑，
           没开的定时不会因为切配置被打开。需要调整只在设置页/通知栏操作。 */
-    ESP_LOGI(TAG, "sleep timer untouched by slot switch (def_on=%d, %u min, "
-                  "active=%d)",
-             (int)config_store_get_sleep_def_on(),
+    ESP_LOGI(TAG, "sleep timer untouched by slot switch (auto=%d %02u-%02u, "
+                  "%u min, active=%d)",
+             (int)config_store_get_sleep_auto_mode(),
+             (unsigned)config_store_get_sleep_range_start_hour(),
+             (unsigned)config_store_get_sleep_range_end_hour(),
              (unsigned)config_store_get_sleep_default_min(),
              (int)sleep_timer_is_active());
 

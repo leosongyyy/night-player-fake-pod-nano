@@ -30,10 +30,10 @@ extern "C" {
  * 仅切歌/播放控制/点歌等"听觉上仍在活动"的动作算用户动作）。
  *
  * 注意：定时到点进入 deepsleep 后系统重启，本模块状态不保留；开机默认
- * 无定时（关闭）。开机是否自动开启由 config_store 的 sleep_def_on 控制
- * （判定见 sleep_timer_boot_autostart_min）；开机自动开启时，进入主界面
- * 后由 boot_flow 弹 Toast 提醒用户"定时已开启"，便于用户主动关闭
- * （见 ideas_and_exps/FUTURE_PLAN.md 第 27 点）。
+ * 无定时（关闭）。开机是否自动开启由 config_store 的 sleep_auto 决定
+ * （总是关闭 / 按时间段 / 总是开启，判定见 sleep_timer_boot_autostart_min）；
+ * 开机自动开启时，进入主界面后由 boot_flow 弹 Toast 提醒用户"定时已开启"，
+ * 便于用户主动关闭（见 ideas_and_exps/FUTURE_PLAN.md 第 27 点）。
  */
 
 /**
@@ -44,10 +44,15 @@ void sleep_timer_init(void);
 /**
  * @brief 开机默认应自动开启的睡眠定时分钟数（纯查询，无副作用）
  *
- * 读取 config_store 的 sleep_def_on（开机默认开启，默认关）与
+ * 读取 config_store 的 sleep_auto 模式、时间段（start/end 小时）与
  * sleep_default_min（默认时长，默认 45 分钟）：
- *   - 开关关闭 → 0（开机不自动开启）；
- *   - 开关开启但默认时长为 0 → 0；
+ *   - 总是关闭（OFF）→ 0（开机不自动开启）；
+ *   - 按时间段（RANGE）→ 当前 RTC 小时落在 [start, end) 内才继续判定
+ *     （支持跨零点：start > end 时视为 [start, 24) ∪ [0, end)，
+ *     例如 22 → 6 表示 22:00~05:59；start == end 为非法区间，不开启）；
+ *     不在时间段内 → 0；RTC 不可用 → 0（无法判断，保守不开启）；
+ *   - 总是开启（ALWAYS）→ 继续判定；
+ *   - 以上任一"继续判定"分支若默认时长为 0 → 0；
  *   - 否则返回默认时长（>0）。
  *
  * 两处调用方共用本函数，保证判定一致：
@@ -55,9 +60,10 @@ void sleep_timer_init(void);
  *   - boot_flow 进入主界面后按返回值弹 Toast 提醒用户"定时已开启"
  *     （见 ideas_and_exps/FUTURE_PLAN.md 第 27 点）。
  *
- * ⚠ 开关关闭时，**任何自动路径都不得启动定时**：开机不启动（main.c）；
- *   切换配置槽位也完全不动定时（睡眠定时与配置槽位互相独立，时长/开关都是
- *   全局配置，见 config_slots.c）。记忆的时长只是"下次开启时用的默认档位"。
+ * ⚠ 模式为"总是关闭"时，**任何自动路径都不得启动定时**：开机不启动
+ *   （main.c）；切换配置槽位也完全不动定时（睡眠定时与配置槽位互相独立，
+ *   时长/模式/时间段都是全局配置，见 config_slots.c）。记忆的时长只是
+ *   "下次开启时用的默认档位"。
  *
  * @return >0 = 开机应自动开启该分钟数的定时；0 = 不自动开启
  */

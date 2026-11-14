@@ -20,7 +20,10 @@ static const char *TAG = "config_store";
 #define KEY_SHUFFLE_POS_LO   "shuf_pos_lo"
 #define KEY_SHUFFLE_POS_VAL  "shuf_pos_val"
 #define KEY_SLEEP_DEFAULT    "sleepdef"
-#define KEY_SLEEP_DEF_ON     "sleepdefon"
+#define KEY_SLEEP_DEF_ON     "sleepdefon"   /* 旧版布尔开关（只读，用于迁移） */
+#define KEY_SLEEP_AUTO       "sleepauto"    /* 开机自动开启模式（0/1/2） */
+#define KEY_SLEEP_RANGE_S    "slprange_s"   /* 时间段开始小时（0~23） */
+#define KEY_SLEEP_RANGE_E    "slprange_e"   /* 时间段结束小时（0~23） */
 #define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
 #define KEY_TZ_OFFSET        "tzoff"    /* 时区 UTC 偏移（分钟 + 1440 编码为 u32） */
@@ -103,10 +106,13 @@ static config_live_t s_live = {
 static uint8_t  s_brightness  = CONFIG_STORE_BRIGHTNESS_DEFAULT;
 /* 睡眠定时（2026-11 起与配置槽位**互相独立**，全局只有一份）：
    - s_sleep_default_min：记忆的定时时长（分钟，0=无默认），是"开启时用的档位"；
-   - s_sleep_def_on：开机默认开启的总开关。
-   两者都不进槽位 blob，切换 SAVE1~SAVE4 不会改变睡眠定时的时长/开关。 */
+   - s_sleep_auto：开机自动开启模式（总是关闭 / 按时间段 / 总是开启）；
+   - s_sleep_range_start/end：时间段的小时（仅"按时间段"模式生效，可跨零点）。
+   这些都不进槽位 blob，切换 SAVE1~SAVE4 不会改变睡眠定时的设置。 */
 static uint32_t s_sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
-static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
+static config_store_sleep_auto_t s_sleep_auto = (config_store_sleep_auto_t)CONFIG_STORE_SLEEP_AUTO_OFF_DEFAULT;
+static uint8_t  s_sleep_range_start = CONFIG_STORE_SLEEP_RANGE_START_DEFAULT;
+static uint8_t  s_sleep_range_end   = CONFIG_STORE_SLEEP_RANGE_END_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;   /* 息屏超时：全局键
                                                                      screenoff，与配置槽位无关 */
@@ -640,12 +646,38 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SLEEP_DEFAULT, &s_sleep_default_min) != ESP_OK) {
         s_sleep_default_min = CONFIG_STORE_SLEEP_DEFAULT_MIN;
     }
-    uint8_t sleep_def_on = 0;
-    if (nvs_get_u8(s_nvs, KEY_SLEEP_DEF_ON, &sleep_def_on) != ESP_OK) {
-        s_sleep_def_on = (CONFIG_STORE_SLEEP_DEF_ON_DEFAULT != 0);
+    /* 睡眠定时：开机自动开启模式 + 时间段（全局键）。
+       兼容旧版本：没有 sleepauto 键时读旧的布尔开关 sleepdefon 做一次性迁移
+       （1 → 总是开启，0 → 总是关闭）；新键存在后旧键不再参与判定。 */
+    uint8_t sleep_auto = 0;
+    if (nvs_get_u8(s_nvs, KEY_SLEEP_AUTO, &sleep_auto) != ESP_OK) {
+        uint8_t legacy_on = 0;
+        if (nvs_get_u8(s_nvs, KEY_SLEEP_DEF_ON, &legacy_on) != ESP_OK) {
+            s_sleep_auto = (config_store_sleep_auto_t)CONFIG_STORE_SLEEP_AUTO_OFF_DEFAULT;
+        } else {
+            s_sleep_auto = legacy_on ? CONFIG_STORE_SLEEP_AUTO_ALWAYS
+                                     : CONFIG_STORE_SLEEP_AUTO_OFF;
+        }
+    } else if (sleep_auto >= CONFIG_STORE_SLEEP_AUTO_COUNT) {
+        s_sleep_auto = CONFIG_STORE_SLEEP_AUTO_OFF;   /* 脏数据钳回默认 */
     } else {
-        s_sleep_def_on = (sleep_def_on != 0);
+        s_sleep_auto = (config_store_sleep_auto_t)sleep_auto;
     }
+    uint8_t range_start = (uint8_t)CONFIG_STORE_SLEEP_RANGE_START_DEFAULT;
+    if (nvs_get_u8(s_nvs, KEY_SLEEP_RANGE_S, &range_start) != ESP_OK || range_start > 23) {
+        range_start = (uint8_t)CONFIG_STORE_SLEEP_RANGE_START_DEFAULT;
+    }
+    uint8_t range_end = (uint8_t)CONFIG_STORE_SLEEP_RANGE_END_DEFAULT;
+    if (nvs_get_u8(s_nvs, KEY_SLEEP_RANGE_E, &range_end) != ESP_OK || range_end > 23) {
+        range_end = (uint8_t)CONFIG_STORE_SLEEP_RANGE_END_DEFAULT;
+    }
+    if (range_start == range_end) {
+        /* 非法（时间段不可为空）：收敛到合法默认区间 */
+        range_start = (uint8_t)CONFIG_STORE_SLEEP_RANGE_START_DEFAULT;
+        range_end   = (uint8_t)CONFIG_STORE_SLEEP_RANGE_END_DEFAULT;
+    }
+    s_sleep_range_start = range_start;
+    s_sleep_range_end   = range_end;
     uint8_t sleep_awake = 1;
     if (nvs_get_u8(s_nvs, KEY_SLEEP_AWAKE, &sleep_awake) != ESP_OK) {
         s_sleep_awake = (CONFIG_STORE_SLEEP_AWAKE_DEFAULT != 0);
@@ -754,13 +786,14 @@ void config_store_init(void)
 
     s_inited = true;
     ESP_LOGI(TAG, "config loaded: vol=%u bright=%u loop=%u shuffle=%d "
-                  "sleep_def=%u min def_on=%d awake=%d screen_off=%u s "
+                  "sleep_def=%u min auto=%d range=%02u-%02u awake=%d screen_off=%u s "
                   "clkwheel=%d(rev=%d spd=%d) "
                   "touch_test=%d was_playing=%d last=%s(global=%u) shuf_pos=%s eq=%s(%u bands) slot=%u(%s)",
              (unsigned)s_live.volume, (unsigned)s_brightness,
              (unsigned)s_live.loop_mode,
              (int)s_live.shuffle, (unsigned)s_sleep_default_min,
-             (int)s_sleep_def_on,
+             (int)s_sleep_auto,
+             (unsigned)s_sleep_range_start, (unsigned)s_sleep_range_end,
              (int)s_sleep_awake, (unsigned)s_screen_off,
              (int)s_click_wheel, (int)s_cw_reverse, (unsigned)s_cw_speed,
              (int)s_touch_test,
@@ -982,9 +1015,19 @@ uint32_t config_store_get_sleep_default_min(void)
     return s_sleep_default_min;
 }
 
-bool config_store_get_sleep_def_on(void)
+config_store_sleep_auto_t config_store_get_sleep_auto_mode(void)
 {
-    return s_sleep_def_on;
+    return s_sleep_auto;
+}
+
+uint8_t config_store_get_sleep_range_start_hour(void)
+{
+    return s_sleep_range_start;
+}
+
+uint8_t config_store_get_sleep_range_end_hour(void)
+{
+    return s_sleep_range_end;
 }
 
 bool config_store_get_sleep_awake(void)
@@ -1202,13 +1245,38 @@ void config_store_set_sleep_default_min(uint32_t minutes)
     config_notify();
 }
 
-void config_store_set_sleep_def_on(bool on)
+void config_store_set_sleep_auto_mode(config_store_sleep_auto_t mode)
 {
-    if (on == s_sleep_def_on) {
+    if (mode >= CONFIG_STORE_SLEEP_AUTO_COUNT) {
+        mode = CONFIG_STORE_SLEEP_AUTO_OFF;
+    }
+    if (mode == s_sleep_auto) {
         return;
     }
-    s_sleep_def_on = on;
-    cfg_write_u8(KEY_SLEEP_DEF_ON, on ? 1 : 0);
+    s_sleep_auto = mode;
+    cfg_write_u8(KEY_SLEEP_AUTO, (uint8_t)mode);
+    config_notify();
+}
+
+void config_store_set_sleep_range_hours(uint8_t start_hour, uint8_t end_hour)
+{
+    if (start_hour > 23) {
+        start_hour = 23;
+    }
+    if (end_hour > 23) {
+        end_hour = 23;
+    }
+    if (start_hour == end_hour) {
+        /* 时间段不可为空：结束小时后移一小时（允许跨零点，如 23 → 0） */
+        end_hour = (uint8_t)((start_hour + 1) % 24);
+    }
+    if (start_hour == s_sleep_range_start && end_hour == s_sleep_range_end) {
+        return;
+    }
+    s_sleep_range_start = start_hour;
+    s_sleep_range_end = end_hour;
+    cfg_write_u8(KEY_SLEEP_RANGE_S, start_hour);
+    cfg_write_u8(KEY_SLEEP_RANGE_E, end_hour);
     config_notify();
 }
 

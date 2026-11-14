@@ -244,7 +244,10 @@ main/
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
       fake_shutdown.h/.c        # 关机（名字保留；实际走 AXP2101 软关机真断电：显示「正在关机...」→存数据→PMU 0x10[0]=1）
-      sleep_timer.h/.c          # 睡眠定时器（到点音量渐降后触发普通伪关机；清醒感知加时）
+      sleep_timer.h/.c          # 睡眠定时器（到点音量渐降后触发普通伪关机；清醒感知加时；
+                                #   开机自动开启判定 sleep_timer_boot_autostart_min：
+                                #   总是关闭 / 按时间段（RTC 小时落在 start~end，支持跨零点）/
+                                #   总是开启，三档与时间段存 config_store 的 sleepauto/slprange_*）
       power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏
       deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/伪关机深调用链唯一执行者
       task_psram.h/.c           # PSRAM 栈任务创建助手（task_create_psram_stack，失败自动回退内部 RAM）

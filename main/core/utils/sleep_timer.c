@@ -1,6 +1,7 @@
 #include "core/utils/sleep_timer.h"
 
 #include "core/hardware/audio/audio.h"
+#include "core/hardware/rtc.h"
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/utils/power_service.h"
@@ -173,13 +174,43 @@ void sleep_timer_release_task(void)
     ESP_LOGI(TAG, "sleep timer task released (freeing internal RAM for rescan)");
 }
 
+/* 当前时刻（RTC 本地墙钟小时）是否落在自动开启的时间段内。
+   区间语义：左闭右开、支持跨零点——
+     - start < end：hour ∈ [start, end)（如 22 → 23 表示 22:00~22:59）
+     - start > end：hour ∈ [start, 24) ∪ [0, end)（如 22 → 6 表示 22:00~05:59）
+     - start == end：非法（空区间），一律不匹配
+   RTC 不可用/时间非法时无法判断，保守返回 false（不自动开启）。 */
+static bool sleep_range_matches_now(void)
+{
+    uint8_t start = config_store_get_sleep_range_start_hour();
+    uint8_t end   = config_store_get_sleep_range_end_hour();
+    if (start == end || start > 23 || end > 23) {
+        return false;
+    }
+    rtc_time_t t;
+    if (!rtc_is_ready() || rtc_get_time(&t) != ESP_OK || !rtc_time_is_sane(&t)) {
+        ESP_LOGW(TAG, "sleep range: RTC unavailable, skip auto start");
+        return false;
+    }
+    bool in = (start < end) ? (t.hour >= start && t.hour < end)
+                            : (t.hour >= start || t.hour < end);
+    ESP_LOGI(TAG, "sleep range: now %02u:xx, window %02u -> %02u, %s",
+             (unsigned)t.hour, (unsigned)start, (unsigned)end,
+             in ? "inside" : "outside");
+    return in;
+}
+
 /* 开机默认应自动开启的分钟数（纯查询，无副作用）：config_store 的
-   sleep_def_on + sleep_default_min 组合判定，main.c（真正启动定时）与
-   boot_flow（弹 Toast 提醒）共用，保证两处判定一致。 */
+   sleep_auto 模式 + 时间段 + sleep_default_min 组合判定，main.c（真正
+   启动定时）与 boot_flow（弹 Toast 提醒）共用，保证两处判定一致。 */
 uint32_t sleep_timer_boot_autostart_min(void)
 {
-    if (!config_store_get_sleep_def_on()) {
-        return 0;                        /* 未开启"开机默认开启" */
+    config_store_sleep_auto_t mode = config_store_get_sleep_auto_mode();
+    if (mode == CONFIG_STORE_SLEEP_AUTO_OFF) {
+        return 0;                        /* 总是关闭：开机不自动开启 */
+    }
+    if (mode == CONFIG_STORE_SLEEP_AUTO_RANGE && !sleep_range_matches_now()) {
+        return 0;                        /* 按时间段：当前不在时间段内 */
     }
     uint32_t minutes = config_store_get_sleep_default_min();
     if (minutes == 0) {
