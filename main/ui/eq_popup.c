@@ -2,7 +2,9 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/eq.h"
+#include "core/hardware/bt/bt_service.h"
 #include "core/hardware/display.h"
+#include "core/storage/bt_store.h"
 #include "core/storage/config_store.h"
 #include "ui/toast.h"
 
@@ -10,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "lvgl.h"
 
@@ -45,12 +48,24 @@ static const char *TAG = "eq_popup";
 static lv_obj_t *s_root   = NULL;  /* 全屏遮罩（点击空白关闭） */
 static lv_obj_t *s_panel  = NULL;  /* 中央面板 */
 static lv_obj_t *s_list   = NULL;  /* 选项行容器（可滚动） */
-static lv_obj_t *s_anchor = NULL;  /* 挂载页面（settings_page 的 tab 页） */
 
-/* 本次打开时扫描到的 .eq 文件名（弹窗存活期间有效；行 user_data 指向这里） */
-static char s_files[EQ_POPUP_MAX_FILES][EQ_FILE_NAME_MAX];
+/* 目标设备下标：-1 = 全局 EQ（config_store），≥0 = 蓝牙设备 EQ（bt_store） */
+static int   s_dev_idx = -1;
+
+/* 本次打开时扫描到的 .eq 文件名（弹窗存活期间有效；行 user_data 指向这里）。
+   ⚠ 24×64B=1.5KB，放 PSRAM（内部 RAM 要留给蓝牙控制器），首次打开时分配。 */
+static char (*s_files)[EQ_FILE_NAME_MAX] = NULL;
 static int  s_file_count = 0;
 static bool s_visible = false;
+
+/* 关闭弹窗（不切换显示状态），供行回调复用 */
+static void eq_popup_hide_internal(void)
+{
+    if (s_root != NULL) {
+        lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_visible = false;
+}
 
 /* ------------------------------------------------------------------ */
 /* 行交互                                                             */
@@ -64,12 +79,40 @@ static void eq_popup_row_cb(lv_event_t *e)
     }
     intptr_t idx = (intptr_t)lv_event_get_user_data(e);
 
+    /* 蓝牙设备目标（2026-11）：写设备记录；只有"当前连接设备"立即生效 */
+    if (s_dev_idx >= 0) {
+        if (idx == 0) {
+            bt_store_set_eq(s_dev_idx, NULL, NULL);
+            bt_service_apply_device_eq(s_dev_idx);
+            ui_toast_show("设备 EQ 已关闭");
+            eq_popup_hide_internal();
+            return;
+        }
+        if (idx - 1 >= s_file_count) {
+            return;
+        }
+        const char *name = s_files[idx - 1];
+        eq_preset_t preset;
+        int rc = eq_parse_named(name, &preset);
+        if (rc == EQ_PARSE_OK) {
+            bt_store_set_eq(s_dev_idx, name, &preset);
+            bt_service_apply_device_eq(s_dev_idx);
+            ui_toast_show("已应用设备 EQ");
+            ESP_LOGI(TAG, "device %d EQ applied: %s (%u bands)", s_dev_idx, name,
+                     (unsigned)preset.band_count);
+            eq_popup_hide_internal();
+        } else {
+            ui_toast_show("EQ 文件内容无效");
+        }
+        return;
+    }
+
     /* 关闭 EQ */
     if (idx == 0) {
         eq_apply(NULL);
         config_store_set_eq(NULL, NULL);   /* 持久化清除（通知设置页刷新） */
         ui_toast_show("EQ 已关闭");
-        eq_popup_toggle(s_anchor);   /* 关闭弹窗 */
+        eq_popup_hide_internal();   /* 关闭弹窗 */
         return;
     }
 
@@ -86,7 +129,7 @@ static void eq_popup_row_cb(lv_event_t *e)
         ui_toast_show("已应用 EQ");
         ESP_LOGI(TAG, "EQ preset applied: %s (%u bands)", name,
                  (unsigned)preset.band_count);
-        eq_popup_toggle(s_anchor);   /* 关闭弹窗 */
+        eq_popup_hide_internal();   /* 关闭弹窗 */
     } else {
         /* 解析失败：Toast 说明原因（FUTURE_PLAN 第 10 点），弹窗保持打开
            供用户改选其它预设 */
@@ -111,7 +154,7 @@ static void eq_popup_bg_cb(lv_event_t *e)
         return;
     }
     if (lv_event_get_target(e) == s_root) {
-        eq_popup_toggle(s_anchor);
+        eq_popup_hide_internal();
     }
 }
 
@@ -164,6 +207,22 @@ static void eq_popup_row_add(lv_obj_t *list, const char *text, bool hl,
 /* 重建列表内容并按内容调整面板尺寸（每次打开弹窗前调用） */
 static void eq_popup_rebuild(void)
 {
+    /* 文件名表按需分配到 PSRAM（失败回退内部 RAM；再失败就不列文件） */
+    if (s_files == NULL) {
+        s_files = heap_caps_malloc(
+            sizeof(char[EQ_POPUP_MAX_FILES][EQ_FILE_NAME_MAX]),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_files == NULL) {
+            s_files = heap_caps_malloc(
+                sizeof(char[EQ_POPUP_MAX_FILES][EQ_FILE_NAME_MAX]),
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+        if (s_files == NULL) {
+            ESP_LOGE(TAG, "alloc eq file table failed");
+            return;
+        }
+    }
+
     /* 重新扫描 .musicfx 目录下的 .eq 文件 */
     s_file_count = eq_scan_files(s_files, EQ_POPUP_MAX_FILES);
     if (s_file_count >= EQ_POPUP_MAX_FILES) {
@@ -171,9 +230,16 @@ static void eq_popup_rebuild(void)
                  (int)EQ_POPUP_MAX_FILES);
     }
 
-    /* 当前生效文件名（高亮用） */
+    /* 当前生效文件名（高亮用）：全局 EQ 或蓝牙设备 EQ */
     char cur_name[EQ_FILE_NAME_MAX] = "";
-    config_store_get_eq(cur_name, sizeof(cur_name), NULL);
+    if (s_dev_idx >= 0) {
+        bt_device_t d;
+        if (bt_store_get(s_dev_idx, &d) && d.eq_valid) {
+            snprintf(cur_name, sizeof(cur_name), "%s", d.eq_name);
+        }
+    } else {
+        config_store_get_eq(cur_name, sizeof(cur_name), NULL);
+    }
 
     /* 清空旧行 */
     lv_obj_clean(s_list);
@@ -213,18 +279,17 @@ static void eq_popup_rebuild(void)
 /* 对外接口                                                            */
 /* ------------------------------------------------------------------ */
 
-void eq_popup_toggle(lv_obj_t *anchor_page)
+static void eq_popup_show(lv_obj_t *anchor_page, int dev_idx)
 {
-    /* 首次调用：懒创建弹窗对象（挂在 anchor 页上） */
-    if (s_root == NULL) {
-        if (anchor_page == NULL) {
-            return;
-        }
-        s_anchor = anchor_page;
+    (void)anchor_page;        /* 兼容参数（弹窗固定挂 lv_layer_top） */
+    s_dev_idx = dev_idx;
 
+    /* 首次调用：懒创建弹窗对象。固定挂在 lv_layer_top()：设置页 EQ 与
+       蓝牙设备 EQ 共用同一个弹窗，锚点页面切走/重建都不会影响它。 */
+    if (s_root == NULL) {
         /* 全屏遮罩：半透明黑，点击空白关闭（点击面板区域不冒泡误关，
            见 eq_popup_bg_cb 的 target 判断） */
-        s_root = lv_obj_create(s_anchor);
+        s_root = lv_obj_create(lv_layer_top());
         lv_obj_set_pos(s_root, 0, 0);
         lv_obj_set_size(s_root, EQ_POPUP_SCREEN_W, EQ_POPUP_SCREEN_H);
         lv_obj_set_style_bg_color(s_root, lv_color_black(), 0);
@@ -270,8 +335,7 @@ void eq_popup_toggle(lv_obj_t *anchor_page)
 
     /* 切换显示状态 */
     if (s_visible) {
-        lv_obj_add_flag(s_root, LV_OBJ_FLAG_HIDDEN);
-        s_visible = false;
+        eq_popup_hide_internal();
         ESP_LOGI(TAG, "popup hidden");
         return;
     }
@@ -279,8 +343,19 @@ void eq_popup_toggle(lv_obj_t *anchor_page)
     /* 打开：重新扫描并重建列表（用户可能新拷贝了 .eq 文件） */
     eq_popup_rebuild();
     lv_obj_clear_flag(s_root, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_root);
     s_visible = true;
-    ESP_LOGI(TAG, "popup shown (%d eq files)", s_file_count);
+    ESP_LOGI(TAG, "popup shown (dev=%d, %d eq files)", s_dev_idx, s_file_count);
+}
+
+void eq_popup_toggle(lv_obj_t *anchor_page)
+{
+    eq_popup_show(anchor_page, -1);
+}
+
+void eq_popup_toggle_for_device(lv_obj_t *anchor_page, int dev_idx)
+{
+    eq_popup_show(anchor_page, dev_idx < 0 ? -1 : dev_idx);
 }
 
 bool eq_popup_is_visible(void)

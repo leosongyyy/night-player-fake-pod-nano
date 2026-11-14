@@ -5,6 +5,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/utils/power_service.h"
+#include "core/utils/quiet_mode.h"
 #include "core/utils/fake_shutdown.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -100,6 +101,15 @@ static void sleep_timer_task(void *arg)
                 audio_set_volume_level(s_fade_origin);
                 ESP_LOGI(TAG, "volume restored to level %u after expiry",
                          (unsigned)s_fade_origin);
+            }
+
+            /* 安静模式（2026-11）：当前连接的蓝牙设备若开启了"定时关机不断电、
+               只保留蓝牙"，则进入伪关机而不是真断电（避免耳机断连提示音/闪灯）。
+               条件不满足（未连蓝牙/设备开关关闭）才走正常关机。 */
+            if (quiet_mode_try_enter()) {
+                ESP_LOGW(TAG, "sleep timer expired -> quiet mode (BT kept alive)");
+                s_minutes = 0;
+                continue;
             }
 
             fake_shutdown_enter();

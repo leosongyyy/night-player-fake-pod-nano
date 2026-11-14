@@ -169,10 +169,15 @@ CONFIG_LV_USE_PERF_MONITOR=y
 #     进 .flash.text，再由 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y 启动时拷进 PSRAM
 #     执行（IDF 原文：PSRAM 比 flash 快），所以是"IRAM→PSRAM"而非"→慢速 flash"。
 #   · 开启时若配合下面的颜色格式裁剪，IRAM 开销可从 82.8KB 压到约 44KB。
-# 【2026-10-16 定稿】保留 blend 在 IRAM：真机实测关掉它内部 RAM 虽多 83KB，
-# 但 blend 会退到 PSRAM 执行；既然裁格式已把 LVGL 的 IRAM 开销从 82.8KB
-# 压到 25.3KB、内部 RAM 也从 23.5KB 升到 82.3KB，就没必要再牺牲 blend 速度。
-CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
+# 【2026-11 改定】关闭：把 blend 等 FAST_MEM 代码移出 IRAM（→ .flash.text，
+# 再由 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y 拷进 PSRAM 执行）。
+# 原因：接入经典蓝牙后，BT 控制器初始化需要一大块**内部 RAM 连续池**
+# （实测 21KB 空闲时 orca_ems_env_init 直接失败并 panic），而 S31 上
+# IRAM 与内部 DRAM 是同一块 SRAM 的两个别名——blend 占的 IRAM 会逐字节
+# 从内部堆里扣掉。裁完颜色格式后 LVGL 的 FAST_MEM 约 25KB，关掉它换回
+# 约 25KB 内部 RAM；代价是真机帧率约 -1~2fps（S3 实测，S31 观感接近），
+# 换来蓝牙可用，值得。
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n
 #
 # 颜色格式裁剪：LVGL 9 默认打开全部 10 种格式，每种一份独立混合实现。本机屏幕
 # 是 RGB565，实测真正用到的是：RGB565（屏幕/绘制缓冲/JPEG 封面）、ARGB8888
@@ -266,3 +271,56 @@ CONFIG_LV_DRAW_BUF_ALIGN=64
 CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y
 CONFIG_BOOTLOADER_SKIP_VALIDATE_ALWAYS=y
 CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+
+# ===========================================================================
+# 经典蓝牙音频（2026-11）：A2DP Source（SBC）+ AVRCP CT（含绝对音量）
+# ===========================================================================
+# 用途：把本机当蓝牙音源，向蓝牙耳机/音箱推送 SBC。只做 **Classic BR/EDR**，
+# 不需要 BLE（关闭 BLE 能省下控制器/host 的 RAM 与 Flash）。
+#
+# ⚠ S31 的控制器走 porting_btdm（CONFIG_BT_DUAL_MODE_ARCH 默认 y），
+#   因此模式选项叫 BTDM_CTRL_MODE_*；选 BR_EDR_ONLY 后 BT_BLE_ENABLED 会被
+#   Kconfig 自动关掉（它 depends on !BTDM_CTRL_MODE_BR_EDR_ONLY）。
+# ⚠ BT 栈任务固定在 Core1（与 MP3 解码/输出同核）：UI（LVGL）在 Core0，
+#   蓝牙事件（A2DP 回调/AVRCP）不能抢占刷屏；Core1 上解码任务优先级更高，
+#   蓝牙协议栈任务只在有包时醒来，两边可以共存。
+# ⚠ A2DP 用**内部 SBC 编码器**（BT_A2DP_USE_EXTERNAL_CODEC 保持默认 n）：
+#   应用侧只需按协商采样率喂 PCM（core/hardware/audio/bt_audio.c），
+#   编码由协议栈完成——比外置编码器省一份 PCM 缓冲与胶水代码。
+# ⚠ 任务栈 4KB：A2DP 数据回调里只做 ringbuf 拷贝，不做重采样/编码；
+#   保险起见从默认 3KB 提到 4KB。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BT_BLE_ENABLED=n
+# ⚠ 核绑定要用 choice 符号：直接写 CONFIG_BT_CTRL_PINNED_TO_CORE=1 会被
+#   Kconfig 的 choice 默认值覆盖回 0（实测）。BT 控制器/host 都放 Core1。
+CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_1=y
+CONFIG_BT_BLUEDROID_PINNED_TO_CORE_1=y
+CONFIG_BT_CTRL_TASK_STACK_SIZE=4096
+CONFIG_BT_BTC_TASK_STACK_SIZE=4096
+CONFIG_BT_BTU_TASK_STACK_SIZE=4096
+# 关闭用不到的 Classic profile，减小固件体积（HFP 会额外拉入 SCO 编解码）
+CONFIG_BT_HFP_ENABLE=n
+CONFIG_BT_HFP_AG_ENABLE=n
+CONFIG_BT_HFP_CLIENT_ENABLE=n
+CONFIG_BT_SPP_ENABLED=n
+# AVRCP 只做 CT 的绝对音量，不需要封面传输（Cover Art 会拉进 OBEX）
+CONFIG_BT_AVRCP_CT_COVER_ART_ENABLED=n
+# 不需要对象推送（OPP），关掉 GOEP client
+CONFIG_BT_GOEPC_ENABLED=n
+# 只连接 1 副耳机：host 的 ACL 连接数降到 2（默认 4），省一点 RAM
+CONFIG_BT_ACL_CONNECTIONS=2
+# ⚠ 抑制 Bluedroid L2CAP 的拥塞错误刷屏：高码率/高 MTU 耳机（如 ZYFDroid_EarFun）
+#   下 l2c_link_check_send_pkts 会在拥塞回调上下文里被递归调用，每次打一行
+#   "l2cab is_cong_cback_context"，实测 300+ 行/秒，把 UART 占满并拖慢 Core1 的
+#   BT 编码/数据回调，息屏播放会明显卡顿。该行只是协议栈内部的拥塞提示，不丢
+#   音频数据；这里把 L2CAP trace 关掉（其它 BT 层日志仍保留）。
+CONFIG_BT_LOG_L2CAP_TRACE_LEVEL_NONE=y
+# Bluedroid host 的动态分配优先走 PSRAM（控制器 DMA/HCI 缓冲仍由控制器内部
+# 分配）：开机不启动蓝牙时无影响；启动后能显著减轻内部 RAM 压力。
+# ⚠ 只影响 host（协议栈/profile/队列），不影响控制器实时缓冲；
+#   若真机出现 BT 栈异常再关掉它。
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y

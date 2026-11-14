@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/hardware/audio/eq.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -144,6 +145,61 @@ audio_fs_t audio_get_fs(void);
 
 /** @brief 当前音量档位（0~30） */
 uint8_t audio_get_volume_level(void);
+
+/* ------------------------------------------------------------------ */
+/* 蓝牙输出（2026-11，经典蓝牙 A2DP）                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @brief 音量档位 → 百分比（1 档 = 35%，30 档 = 85%，线性）
+ *
+ * 供蓝牙绝对音量换算复用，保证 DAC / 蓝牙两条路径的音量曲线一致。
+ */
+uint8_t audio_volume_level_to_percent(uint8_t level);
+
+/**
+ * @brief 进入"蓝牙设备配置优先"模式（连接成功时由 bt_service 调用）
+ *
+ * 连接期间：音量取该设备记忆的档位、EQ 用该设备的预设（**优先于配置槽位**），
+ * 且不写 config_store（避免把设备音量污染到全局配置）。
+ *
+ * @param volume 设备记忆的音量档位（0~30）
+ * @param eq     设备 EQ 预设（NULL 或 band_count=0 = 无 EQ）
+ */
+void audio_bt_profile_enter(uint8_t volume, const eq_preset_t *eq);
+
+/** @brief 退出设备配置优先模式（断开时调用）：恢复配置槽位的音量与 EQ */
+void audio_bt_profile_leave(void);
+
+/** @brief 当前是否处于蓝牙设备配置优先模式 */
+bool audio_bt_profile_active(void);
+
+/**
+ * @brief 把音频输出切到蓝牙（连接成功 / A2DP 就绪）
+ *
+ * 动作：静音 DAC、停 I2S、启动蓝牙重采样缓冲、把 EQ 系数切到蓝牙输出
+ * 采样率、按"绝对音量/软件音量"重新应用当前音量。正在播放时会自动请求
+ * A2DP 起流（由 bt_service 处理）。
+ *
+ * @param out_fs 蓝牙输出采样率（48000 / 44100）
+ */
+void audio_bt_output_enable(uint32_t out_fs);
+
+/** @brief 把音频输出切回 DAC（断开 / 关闭蓝牙）：重新配置 I2S + CS43131 */
+void audio_bt_output_disable(void);
+
+/** @brief A2DP 协商出的采样率变化（耳机只支持 44.1k 时） */
+void audio_bt_set_out_fs(uint32_t out_fs);
+
+/** @brief 绝对音量能力变化后重新应用音量（软件增益 ↔ 绝对音量切换） */
+void audio_bt_refresh_volume(void);
+
+/**
+ * @brief 耳机侧改了音量（AVRCP 音量变化通知）：同步本机档位但不回发命令
+ *
+ * @param level 0~30
+ */
+void audio_volume_from_remote(uint8_t level);
 
 #ifdef __cplusplus
 }

@@ -3,9 +3,11 @@
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/battery.h"
+#include "core/hardware/bt/bt_service.h"
 #include "core/hardware/display.h"
 #include "core/hardware/rtc.h"
 #include "core/player/player_controller.h"
+#include "core/storage/bt_store.h"
 #include "core/storage/config_store.h"
 #include "core/storage/playlist.h"
 #include "core/storage/playlist_store.h"
@@ -14,6 +16,7 @@
 #include "core/utils/deep_worker.h"
 #include "core/utils/sleep_timer.h"
 #include "core/utils/task_psram.h"
+#include "ui/bt_settings.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/now_playing.h"
@@ -94,6 +97,7 @@ static bool      s_visible         = false; /* 菜单当前是否显示 */
 static lv_point_t s_bg_press_point = { 0, 0 };
 
 /* 根页面行的右侧状态文字（开关状态/当前档位） */
+static lv_obj_t *s_bt_status = NULL;             /* 蓝牙：关 / 开 / 已连接设备名 */
 static lv_obj_t *s_sleep_auto_status   = NULL;   /* 睡眠定时器（自动开启模式） */
 static lv_obj_t *s_sleep_range_status  = NULL;   /* 睡眠定时器（时间段） */
 static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
@@ -497,6 +501,16 @@ static void menu_refresh_root(void)
     if (s_cw_speed_status != NULL) {
         lv_label_set_text(s_cw_speed_status,
                           CW_SPEED_TXT[config_store_get_click_wheel_speed()]);
+    }
+    /* 蓝牙：关 / 开 / 已连接设备名 */
+    if (s_bt_status != NULL) {
+        if (!bt_service_is_enabled()) {
+            lv_label_set_text(s_bt_status, "关");
+        } else if (bt_service_is_connected()) {
+            lv_label_set_text(s_bt_status, bt_service_connected_name());
+        } else {
+            lv_label_set_text(s_bt_status, "开");
+        }
     }
     menu_refresh_time_date();
 }
@@ -1034,6 +1048,14 @@ static lv_obj_t *lazy_row_create(lv_obj_t *parent, const char *icon,
     return row;
 }
 
+/* 蓝牙入口行：打开独立的全屏蓝牙设置页（ui/bt_settings，挂在 lv_layer_top；
+   设置菜单保留在下层，返回后回到菜单）。 */
+static void bt_row_cb(lv_event_t *e)
+{
+    (void)e;
+    bt_settings_show();
+}
+
 /* 根页面：8 个功能行（睡眠定时器 / 显示设置 / 虚拟 ClickWheel /
    时间与日期 / 电源选项 / 按键帮助 / 关于 / 重新扫描），全部为子页入口
    （子页懒加载，见上）。
@@ -1047,6 +1069,12 @@ static void root_page_build(void)
     page_style_apply(s_root_page);
 
     /* 入口行：点击时才构建对应子页 */
+    /* 蓝牙（2026-11）：独立全屏页（开关 / 已保存设备 / 配对 / 设备详情），
+       右侧状态显示 关 / 开 / 已连接设备名 */
+    lv_obj_t *bt_row = menu_row_create(s_root_page, LV_SYMBOL_BLUETOOTH,
+                                       "蓝牙", &s_bt_status);
+    lv_obj_add_flag(bt_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(bt_row, bt_row_cb, LV_EVENT_CLICKED, NULL);
     lazy_row_create(s_root_page, LV_SYMBOL_POWER, "睡眠定时器",
                     NULL, sleep_page_build);
     /* 2026-11：原「屏幕自动息屏」独立入口收进「显示设置」，同页还放

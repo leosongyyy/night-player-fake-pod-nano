@@ -45,6 +45,9 @@ static const char *TAG = "power_service";
    esp_pm_configure 会返回错误（本模块只告警、保持原频率），息屏功能不受影响。 */
 #define PM_CPU_FREQ_ON_MHZ  320
 #define PM_CPU_FREQ_OFF_MHZ 80
+/* 蓝牙音频播放时的熄屏频率：重采样 + EQ + SBC 编码在 80MHz 下余量不足，
+ * 160MHz 实测足够（SBC 编码由协议栈内部完成，重采样是主要开销） */
+#define PM_CPU_FREQ_OFF_BT_MHZ 160
 
 /* 低电自动关机（S31，2026-11 接回）：电量 < 5% 且**未在充电**持续 60 秒 →
    与上键长按同一条 PMU 真关机流程。
@@ -76,6 +79,34 @@ static volatile int64_t s_last_activity_us = 0;
 /* "保持亮屏"抑制标志（网络对时等长流程）：true 时跳过无操作自动息屏检查。
    只影响自动息屏，手动/按键息屏照常。 */
 static volatile bool s_hold_awake = false;
+
+/* 播放线程的性能需求位掩码（见 power_perf_req_t）：非 0 时熄屏用 160MHz 而不是 80MHz。
+   s_quiet=true 表示处于静音伪关机（安静模式）：强制 80MHz，且跳过低电/自动息屏策略。 */
+static volatile uint32_t s_perf_mask = 0;
+static volatile bool s_quiet = false;
+
+static esp_err_t power_service_set_cpu_freq(int mhz);
+
+/* 目标频率：安静模式 80；息屏时按性能需求 80/160；亮屏 320 */
+static int power_service_target_freq_mhz(void)
+{
+    if (s_quiet) {
+        return PM_CPU_FREQ_OFF_MHZ;
+    }
+    if (s_screen_off) {
+        return (s_perf_mask != 0) ? PM_CPU_FREQ_OFF_BT_MHZ : PM_CPU_FREQ_OFF_MHZ;
+    }
+    return PM_CPU_FREQ_ON_MHZ;
+}
+
+/* 按当前状态应用固定频率（失败只告警，保持原频率） */
+static void power_service_apply_freq(void)
+{
+    int mhz = power_service_target_freq_mhz();
+    if (power_service_set_cpu_freq(mhz) != ESP_OK) {
+        ESP_LOGW(TAG, "esp_pm_configure(%dMHz) failed, freq unchanged", mhz);
+    }
+}
 
 /* 固定 CPU 频率（esp_pm_configure 强制 max=min=目标值）：
    返回 ESP_OK 成功；CONFIG_PM_ENABLE 未开启时返回 ESP_ERR_NOT_SUPPORTED，
@@ -120,7 +151,8 @@ static void power_service_task(void *arg)
            条件一旦断开（插上充电器/电量回升/读数不可用）立即清零，
            保证是"持续低电"才关，不被瞬时抖动误触发。
            ⚠ 息屏播放中同样生效：电池过放比"夜里被关机"更不可接受。 */
-        const bool low = (battery_read_info(&binfo) == ESP_OK)
+        const bool low = !s_quiet
+                         && (battery_read_info(&binfo) == ESP_OK)
                          && binfo.available && binfo.percent != 0xFF
                          && binfo.percent < LOW_BAT_SHUTDOWN_PERCENT
                          && !binfo.vbus_present && !binfo.charging;
@@ -138,7 +170,7 @@ static void power_service_task(void *arg)
 
         /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒）；被 hold_awake
            抑制时（网络对时/长流程）跳过，避免进度界面中途黑屏 */
-        if (!s_screen_off && !s_hold_awake) {
+        if (!s_screen_off && !s_hold_awake && !s_quiet) {
             uint32_t timeout_s = config_store_get_screen_off_s();
             if (timeout_s != 0
                     && esp_timer_get_time() - s_last_activity_us
@@ -160,13 +192,11 @@ void power_service_init(void)
 
     /* 1. 初始固定 320MHz（亮屏状态）。
           ⚠ esp_pm_configure 依赖 CONFIG_PM_ENABLE=y（见 sdkconfig.defaults）；
-           未开启时返回 ESP_ERR_NOT_SUPPORTED，此处降级：不调频，其余功能正常。 */
-    if (power_service_set_cpu_freq(PM_CPU_FREQ_ON_MHZ) != ESP_OK) {
-        ESP_LOGW(TAG, "esp_pm_configure failed (CONFIG_PM_ENABLE off?), freq fixed at boot value");
-    } else {
-        ESP_LOGI(TAG, "esp_pm ready: screen on=%d MHz, screen off=%d MHz (fixed)",
-                 PM_CPU_FREQ_ON_MHZ, PM_CPU_FREQ_OFF_MHZ);
-    }
+            未开启时返回 ESP_ERR_NOT_SUPPORTED，此处降级：不调频，其余功能正常。 */
+    power_service_apply_freq();
+    ESP_LOGI(TAG, "esp_pm ready: screen on=%d MHz, screen off=%d MHz "
+                  "(+%d MHz when BT audio), fixed",
+             PM_CPU_FREQ_ON_MHZ, PM_CPU_FREQ_OFF_MHZ, PM_CPU_FREQ_OFF_BT_MHZ);
 
     /* 2. 状态互斥锁 */
     s_mux = xSemaphoreCreateMutex();
@@ -209,7 +239,7 @@ void power_service_init(void)
    deep_worker_call 失败（未初始化/卡死超时）时由调用方就地兜底执行，
    保证屏幕与 LVGL 状态始终一致。 */
 
-/* 息屏重活：AMOLED 休眠 → 挂起 LVGL → 固定 80MHz */
+/* 息屏重活：AMOLED 休眠 → 挂起 LVGL → 固定 80/160MHz（蓝牙音频时 160） */
 static void power_service_do_screen_off(void *arg)
 {
     /* 0. 息屏前把"延迟落盘"的亮度/音量写进 NVS：LVGL 任务马上要被挂起，
@@ -236,13 +266,11 @@ static void power_service_do_screen_off(void *arg)
           唤醒时重新初始化并全屏重刷。 */
     lvgl_port_suspend();
 
-    /* 3. 固定 CPU 频率 80MHz（省电）。⚠ 若 MP3 解码卡顿，可改 PM_CPU_FREQ_OFF_MHZ=160 */
-    if (power_service_set_cpu_freq(PM_CPU_FREQ_OFF_MHZ) != ESP_OK) {
-        ESP_LOGW(TAG, "esp_pm_configure(80MHz) failed, freq unchanged");
-    }
+    /* 3. 固定 CPU 频率：普通 80MHz，蓝牙音频流进行中 160MHz（性能需求） */
+    power_service_apply_freq();
 
     ESP_LOGI(TAG, "screen off: AMOLED sleep in, LVGL suspended, CPU fixed %d MHz",
-             PM_CPU_FREQ_OFF_MHZ);
+             power_service_target_freq_mhz());
 }
 
 /* 亮屏重活：320MHz → 持锁唤醒 AMOLED + 全屏重刷 + 恢复亮度 → resume LVGL */
@@ -250,9 +278,7 @@ static void power_service_do_screen_on(void *arg)
 {
     (void)arg;
     /* 1. 恢复 CPU 频率 320MHz（先升频再恢复显示，避免显示恢复瞬间系统还在低频） */
-    if (power_service_set_cpu_freq(PM_CPU_FREQ_ON_MHZ) != ESP_OK) {
-        ESP_LOGW(TAG, "esp_pm_configure(320MHz) failed, freq unchanged");
-    }
+    power_service_apply_freq();
 
     /* 2. 唤醒 AMOLED（SLEEP OUT + 重发完整初始化）并恢复显示：
           ⚠ 必须先于 LVGL resume——休眠中/刚唤醒的面板不能接收刷屏数据；
@@ -355,4 +381,41 @@ uint32_t power_service_get_idle_sec(void)
         idle_us = 0;
     }
     return (uint32_t)(idle_us / 1000000);
+}
+
+void power_service_perf_set(power_perf_req_t req, bool on)
+{
+    if (req < 0 || req >= POWER_PERF_COUNT) {
+        return;
+    }
+    static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+    const uint32_t bit = 1u << (unsigned)req;
+    uint32_t before;
+    taskENTER_CRITICAL(&mux);
+    before = s_perf_mask;
+    if (on) {
+        s_perf_mask |= bit;
+    } else {
+        s_perf_mask &= ~bit;
+    }
+    uint32_t after = s_perf_mask;
+    taskEXIT_CRITICAL(&mux);
+
+    if (before != after && s_screen_off) {
+        /* 熄屏播放中流开始/结束：立即调频（80 ↔ 160MHz） */
+        power_service_apply_freq();
+        ESP_LOGI(TAG, "perf req %d -> %d, screen-off freq now %d MHz",
+                 (int)req, (int)on, power_service_target_freq_mhz());
+    }
+}
+
+void power_service_set_quiet_mode(bool on)
+{
+    if (s_quiet == on) {
+        return;
+    }
+    s_quiet = on;
+    power_service_apply_freq();
+    ESP_LOGI(TAG, "quiet mode %s (freq fixed %d MHz)", on ? "on" : "off",
+             power_service_target_freq_mhz());
 }

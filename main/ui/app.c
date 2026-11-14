@@ -9,6 +9,7 @@
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/display.h"
+#include "core/storage/bt_store.h"
 #include "core/storage/config_store.h"
 
 #include <stdint.h>
@@ -77,7 +78,9 @@ static void status_bg_opa_anim_cb(void *var, int32_t value)
    约 3 秒后它自己回到时间（见 ui/clock_display.h） */
 static void status_show_volume_temp(void)
 {
-    s_last_volume = config_store_get_volume();
+    /* ⚠ 数据源用 audio 的当前档位而不是 config_store：蓝牙连接期间音量是
+       "该设备记忆的档位"（优先级高于配置槽位），二者会不同 */
+    s_last_volume = audio_get_volume_level();
     char buf[16];
     snprintf(buf, sizeof(buf), VOLUME_ICON_FIXED " %u",
              (unsigned)s_last_volume);
@@ -91,7 +94,7 @@ static void status_show_volume_temp(void)
 static void app_config_changed_cb(void *ctx)
 {
     (void)ctx;
-    if (config_store_get_volume() != s_last_volume) {
+    if (audio_get_volume_level() != s_last_volume) {
         status_show_volume_temp();
         return;
     }
@@ -108,6 +111,12 @@ static void config_notify_timer_cb(lv_timer_t *timer)
     (void)timer;
     config_store_notify_dispatch();
     config_store_flush_pending(false);
+    /* 蓝牙设备音量是"延迟落盘"的，与全局音量共用这个 100ms 定时器 */
+    bt_store_flush_pending(false);
+    /* 蓝牙设备音量 / 耳机侧调音量不会走 config_store 的通知，这里轮询兜底 */
+    if (audio_get_volume_level() != s_last_volume) {
+        status_show_volume_temp();
+    }
 }
 
 /* 刷新右侧电池百分比：图标随电量/充电状态变化，≤20% 黄、≤10% 红；
@@ -183,7 +192,7 @@ static lv_obj_t *create_status_bar(void)
     /* 周期刷新：只剩 5 秒电池兜底（时间的 1 秒刷新由 clock_display 自带，
        音量只在变化时临时显示约 3 秒）。创建后立即填充一次初始值 */
     lv_timer_create(status_refresh_timer_cb, STATUS_BATTERY_REFRESH_MS, NULL);
-    s_last_volume = config_store_get_volume();
+    s_last_volume = audio_get_volume_level();
     status_refresh_battery();
 
     /* 订阅配置变更：音量（按键/滑块调节）变化后左侧临时改显音量约 3 秒；

@@ -34,7 +34,7 @@
     1. `patches/lvgl_fast_mem_decl/` —— 修复 LVGL 把 `LV_ATTRIBUTE_FAST_MEM` 同时放在声明与定义上、与 IDF 6.1 的 `IRAM_ATTR`（带 `__COUNTER__` 的唯一子段）冲突导致的 `-Werror=attributes`（上游 lvgl PR #10737，9.6 仍未合入），补丁只去掉**声明**上的属性、不动定义，故函数仍进 IRAM、零性能损失；
     2. `patches/esp_lcd_touch_deps/` —— 给托管组件 `espressif/esp_lcd_touch` 补显式 `PRIV_REQUIRES esp_driver_gpio`（它调一堆 `gpio_*` 却只写 `REQUIRES "driver" "esp_lcd"`，靠 `esp_lcd` 转发才编过）。
     **属自定义写法，勿当无用代码清理**（详见 IDF6_MIGRATION.md §4.1 与 §9.2）。仓库内 `components/` 下的本地组件**直接改各自的 CMakeLists.txt**，不走补丁。
-  - ⚠ **构建只编译 `COMPONENTS` 白名单里的组件**（2026-11 加入，见根 `CMakeLists.txt`）：IDF 默认会编 `COMPONENT_DIRS` 下**全部**组件（本工程 155 个），白名单把它裁到 **89 个 / 1235 个编译单元（−25.8%）**，bt / http / OTA / protocomm / openthread / unity / cmock 都不再编译。**2026-11 起为「WiFi 对时」把 `esp_wifi` / `esp_netif` / `esp_event` / `lwip` / `wpa_supplicant` 重新加入白名单**（固件因此增大约 650KB，仍只占 factory 分区 ~34%）。**新增任何组件依赖（新 `#include` 了某个 IDF 组件的头文件）必须同步把该组件加进白名单**，否则编译报"找不到头文件"；仓库自带的 4 个本地组件（AMOLED + 3 个触摸）也必须显式列着——它们的头文件 main 并不通过 `REQUIRES` 引用。完整说明与实测数据见 `ideas_and_exps/MBEDTLS_BUILD_AUDIT.md` §9。
+  - ⚠ **构建只编译 `COMPONENTS` 白名单里的组件**（2026-11 加入，见根 `CMakeLists.txt`）：IDF 默认会编 `COMPONENT_DIRS` 下**全部**组件（本工程 155 个），白名单把它裁到 **约 90 个**（2026-11 起 `bt` 与本地 `esp-dsp` 重新加入，见 `BLUETOOTH_AUDIO.md`），http / OTA / protocomm / openthread / unity / cmock 都不再编译。**2026-11 起为「WiFi 对时」把 `esp_wifi` / `esp_netif` / `esp_event` / `lwip` / `wpa_supplicant` 重新加入白名单**（固件因此增大约 650KB，仍只占 factory 分区 ~34%）。**新增任何组件依赖（新 `#include` 了某个 IDF 组件的头文件）必须同步把该组件加进白名单**，否则编译报"找不到头文件"；仓库自带的 4 个本地组件（AMOLED + 3 个触摸）也必须显式列着——它们的头文件 main 并不通过 `REQUIRES` 引用。完整说明与实测数据见 `ideas_and_exps/MBEDTLS_BUILD_AUDIT.md` §9。
 - LVGL **9.4.0**（managed component，`lvgl/lvgl`；2026-10 由 8.4.0 升级，迁移全过程与踩坑见 `ideas_and_exps/LVGL9_MIGRATION.md`）
 - 系统字体 = **font 分区里的 `spiffs/system.npf`（NPF1 预烘焙位图全字库：Droid Sans Fallback 24px/bpp2，AOSP Apache-2.0，34,461 码位，4.44MiB）+ 运行时 `esp_partition_mmap` 直读**（2026-11 从 TTF/FreeType 改回位图，与 `legacy_s3` 同一份镜像/同一套生成工具；格式、生成与实测见 **`ideas_and_exps/NPF_FONT.md`**，调研见 `BINFONT_RESEARCH.md`。⚠ 字体镜像**不在固件里**：刷完固件要用 esptool **手动刷一遍字体分区**（一条命令，刷入/校验/换字体流程见 **`ideas_and_exps/FONT_FLASH.md`**），换字体 = 用 `tools/font` 重新烘焙 NPF + 重刷，不改代码/Kconfig；另可用 `tools/make_full_firmware.py` 生成**含字体的全量固件**（单文件烧 0x0，同时清空 nvs/pldata，见 **`ideas_and_exps/FULL_FIRMWARE.md`**））
 - 构建/烧录通过 **`idfc.exe`**（客户端-服务器架构）完成，详见下方"idfc 使用说明"。**下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，把它放到 PATH 中的某个目录（本机为 `C:\Users\ZYFDroid\ProgramFiles\bin\idfc.exe`），随后**在项目目录里直接用 `idfc <子命令>` 调用**（不需要写 `.\idfc.exe`，项目里也不再自带这个 exe）。
@@ -42,7 +42,7 @@
 
 **3. 参考资料**
 
-- `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动、**spi_flash（IDF 组件 fork，带 S31 分支预测补丁，见下方构建配置）**）。~~i2c_bsp~~ 已于 2026-11 迁移 IDF 6.1 时删除（全工程零引用的死代码）
+- `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动、**esp-dsp 1.4.12（vendored，蓝牙重采样用，CMakeLists 已裁剪为只编 ANSI dotprod）**、**spi_flash（IDF 组件 fork，带 S31 分支预测补丁，见下方构建配置）**）。~~i2c_bsp~~ 已于 2026-11 迁移 IDF 6.1 时删除（全工程零引用的死代码）
 - `patches/`：**构建期补丁文件**（托管组件用，当前两组：`lvgl_fast_mem_decl/`、`esp_lcd_touch_deps/`，见上方 IDF 6.1 条目）
 - `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_touch、esp_jpeg、cmake_utilities、chmorgan__esp-libhelix-mp3）。⚠ `esp_lcd_sh8601` 已于 2026-11 从 `main/idf_component.yml` 删除（本项目显示驱动是本地组件 `esp_lcd_qspi_amoled`，零代码引用它）
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）
@@ -140,7 +140,7 @@ idfc help --all            # 全部命令与参数
 **6. 构建配置**
 
 - `main/Kconfig.projbuild`：应用配置项（menuconfig）。配置项目请阅读该文件获得配置项的详细信息。常用配置组合均已使用 debug / release 两套构建配置切换。
-- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.release`）：esp32s31、QIO 16MB Flash、自定义分区表、16MB Octal PSRAM（200MHz，含 XIP 指令/只读数据）、320MHz、64B 数据缓存线、FreeRTOS 1000Hz、**LVGL 9：`CONFIG_LV_DEF_REFR_PERIOD=16`（16ms；显示刷新与 indev 轮询在 v9 合并为这一个周期）、`CONFIG_LV_USE_CUSTOM_MALLOC=y`（LVGL 对象堆走 `core/ui/lvgl_mem.c` 进 PSRAM，见"关键技术要点"；该文件另有"热点对象窗口"接口，但 2026-11 S31 起由 `CONFIG_UI_LVGL_PIN_HOT_OBJECTS`（默认 n）控制，两个滚动列表页的对象也走 PSRAM，见 `IRAM_OBJECTS_PSRAM_S31.md`）、`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（blend 留在 IRAM；关掉可再省 83KB 内部 RAM、代价约 2fps）、裁掉 6 种用不到的颜色格式（`XRGB8888` / `ARGB8888_PREMULTIPLIED` / `L8` / `AL88` / `A8` / `I1`，保留 `RGB565`+`ARGB8888`+`RGB565A8`+`RGB888`；LVGL 的 IRAM 占用 82.8→25.3KB）、关 `CONFIG_LV_BUILD_EXAMPLES` / `LV_BUILD_DEMOS`（examples 下 250 个 .c 编了也会被 `--gc-sections` 全丢，纯省全量编译时间）、`CONFIG_LV_USE_CLIB_STRING=y`、`CONFIG_LV_USE_SYSMON=y`+`CONFIG_LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下，SYSMON 默认 n，不显式打开会被 Kconfig 静默丢弃）、字体 12/16/20/24/28/32/48 + 默认 18**、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、**字体固定为位图（无构建期开关）：不再有 `CONFIG_LV_USE_FREETYPE` / `LV_FREETYPE_*` 与 `espressif/freetype` 依赖（2026-11 从 TTF/FreeType 改回位图时整段删除）；系统字体走 font 分区的 `spiffs/system.npf`（NPF1 位图全字库，**字体镜像不在固件里——刷完固件要用 esptool 手动刷入**，没有 Kconfig 选项），20px 小字体用内嵌 `system_smaller_font`，NPF 挂载失败回退内嵌 `system_global_font_lite`；`CONFIG_LV_FONT_FMT_TXT_LARGE=y` 必须保持（NPF 的 glyph_dsc 是 LARGE 布局）**、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384`（TTF 迁移时由 8192 上调，见 `FontSystem.md` §5；改回位图后其实可回落，本次为稳妥保留）等
+- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.release`）：esp32s31、QIO 16MB Flash、自定义分区表、16MB Octal PSRAM（200MHz，含 XIP 指令/只读数据）、320MHz、64B 数据缓存线、FreeRTOS 1000Hz、**LVGL 9：`CONFIG_LV_DEF_REFR_PERIOD=16`（16ms；显示刷新与 indev 轮询在 v9 合并为这一个周期）、`CONFIG_LV_USE_CUSTOM_MALLOC=y`（LVGL 对象堆走 `core/ui/lvgl_mem.c` 进 PSRAM，见"关键技术要点"；该文件另有"热点对象窗口"接口，但 2026-11 S31 起由 `CONFIG_UI_LVGL_PIN_HOT_OBJECTS`（默认 n）控制，两个滚动列表页的对象也走 PSRAM，见 `IRAM_OBJECTS_PSRAM_S31.md`）、**`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`（2026-11 蓝牙接入后从 y 改为 n：blend 等移出 IRAM、经 PSRAM 取指执行，换回约 27KB 内部 RAM，帧率仍 61fps；详见 BLUETOOTH_AUDIO.md §4）**、裁掉 6 种用不到的颜色格式（`XRGB8888` / `ARGB8888_PREMULTIPLIED` / `L8` / `AL88` / `A8` / `I1`，保留 `RGB565`+`ARGB8888`+`RGB565A8`+`RGB888`；LVGL 的 IRAM 占用 82.8→25.3KB）、关 `CONFIG_LV_BUILD_EXAMPLES` / `LV_BUILD_DEMOS`（examples 下 250 个 .c 编了也会被 `--gc-sections` 全丢，纯省全量编译时间）、`CONFIG_LV_USE_CLIB_STRING=y`、`CONFIG_LV_USE_SYSMON=y`+`CONFIG_LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下，SYSMON 默认 n，不显式打开会被 Kconfig 静默丢弃）、字体 12/16/20/24/28/32/48 + 默认 18**、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、**字体固定为位图（无构建期开关）：不再有 `CONFIG_LV_USE_FREETYPE` / `LV_FREETYPE_*` 与 `espressif/freetype` 依赖（2026-11 从 TTF/FreeType 改回位图时整段删除）；系统字体走 font 分区的 `spiffs/system.npf`（NPF1 位图全字库，**字体镜像不在固件里——刷完固件要用 esptool 手动刷入**，没有 Kconfig 选项），20px 小字体用内嵌 `system_smaller_font`，NPF 挂载失败回退内嵌 `system_global_font_lite`；`CONFIG_LV_FONT_FMT_TXT_LARGE=y` 必须保持（NPF 的 glyph_dsc 是 LARGE 布局）**、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384`（TTF 迁移时由 8192 上调，见 `FontSystem.md` §5；改回位图后其实可回落，本次为稳妥保留）等
   - ⚠ v8 的 `LV_COLOR_16_SWAP` / `LV_COLOR_SCREEN_TRANSP` / `LV_DISP_DEF_REFR_PERIOD` / `LV_INDEV_DEF_READ_PERIOD` / `LV_USE_LARGE_COORD` 在 v9 已删除或改名，逐项对照表见 `ideas_and_exps/LVGL9_MIGRATION.md` §2
 - **版本管理：配置事实源只有 `sdkconfig.defaults*`、`idfc_buildconfig.json` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<variant>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。每套构建类型持有自己的 sdkconfig（`-D SDKCONFIG=build/<variant>/sdkconfig` 指定）；`fullclean` 只清当前构建目录。改配置的正确姿势：改 `sdkconfig.defaults*` / `idfc_buildconfig.json` / `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
 - ⚠ **ESP32-S31 + IDF 6.1 的 flash cache 竞态（IDFGH-18107 / espressif/esp-idf#18948）**：一颗核 suspend cache 做 flash 操作时，另一核在 `spi_flash_op_block_func` 自旋里的分支预测器仍会投机取指到 flash，偶发 `Cache error` panic（本机表现为开机第一次读 NVS 时重启）。**这不是 BOYA flash 颗粒问题**（BOYA 驱动与通用驱动实现相同，已回退 `CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP`）。本地 IDF 6.1.0 快照不含上游修复，因此仓库内 **fork 了 `components/spi_flash/`**，在 `cache_utils.c` 的 flash 操作窗口内关闭/恢复分支预测。**不要删除该目录**；升级 IDF 时若上游已合入 `esp_cpu_branch_prediction_disable()` 修复，再删掉本地 fork。完整调查、芯片对比与 DIY 换 flash 兼容性见 **`ideas_and_exps/S31_FLASH_CACHE_RACE.md`**。
@@ -154,12 +154,13 @@ idfc help --all            # 全部命令与参数
 
 > 本项目目标：为成品开源播放器 **FakePodNano Pro**（ESP32-S31 + CO5300 AMOLED + CS43131 + 触摸；初代 S3 版见 `legacy_s3` 分支）开发**更好用、专注于音乐播放**的第三方固件，替代/改进原厂固件的使用体验。
 
-**项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、电池百分比显示、**双键按键映射、PMU 软关机与低电保护（开机 <2% / 使用中 <5%·60s）**均已实现。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
+**项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、电池百分比显示、**双键按键映射、PMU 软关机与低电保护（开机 <2% / 使用中 <5%·60s）**、**经典蓝牙音频（A2DP Source / SBC + AVRCP，2026-11）**均已实现。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
 
 > 关于 `FUTURE_PLAN.md` 和 `DONE_PLAN.md`: 这两个文件主要存储较大型的需求和修复内容，以及其完成情况。日常小需求和调整无需记录在内。只有在 FUTURE_PLAN.md 中出现过的内容才可以移动到 DONE_PLAN.md 中。若在进行小需求时踩到了坑导致变成了大型研究，建议单开一个文件进行记录（例如 IRAM_DMA_AUDIT.md）
 
 **当前实现状态：**
 - 播放核心：本地 MP3 播放（Helix 解码，实测 5000+ 首大曲库），按**文件夹**组织、支持 **`.pl` 文本歌单**；**循环模式**（全部/列表/单曲）+ **顺序/随机**；**无限确定性随机播放**（分块 + 确定性洗牌，断点续播）；回放增益；**EQ 均衡器**（10 段浮点 PeakEQ + 预增益，NightPlayer 兼容 `.eq` 文件）；**封面/歌曲信息**（`.npd` 元数据 + JPEG 封面解码）
+- **经典蓝牙音频（2026-11）**：A2DP Source（SBC，**48kHz 优先、44.1kHz 兜底**，实际以 `A2DP audio cfg` 上报为准）+ AVRCP CT 绝对音量；**EQ 在重采样之后**（重采样用 esp-dsp 的 `dsps_dotprod_f32` 多相 FIR）；最多 5 个设备，各自记忆音量/EQ/安静模式并**优先于配置槽位**；控制中心蓝牙开关（长按弹**快速面板**：设备列表连接/断开 + 设置入口，点另一台自动断开当前再连目标、失败不回退）、设置菜单 →「蓝牙」页（开关/配对/删除，点设备进**详情页**）；**已配对耳机开机可主动回连**（空闲保持 page scan、不可发现；主机不主动回连）；睡眠定时到点可进入**只保留蓝牙的安静模式**（12h / 电量 15% / 蓝牙断开 → 断电，长按电源键重启）；蓝牙音频流开始时熄屏 CPU 从 80MHz 提到 160MHz。详见 **`ideas_and_exps/BLUETOOTH_AUDIO.md`**
 - 硬件层：AMOLED 显示（QSPI，CO5300 460×460 单款配置、窗口 X 偏移 10，**全黑启动防开机白屏闪烁**）、触摸（CST820，I²C0 0x15，原始 460×460 坐标 + ×29/30 校准，**异步初始化不阻塞开机**）、电池（**AXP2101**：真实电压 + E-Gauge 电量计 + 充放电状态，融合后显示百分比；S3 的分压 ADC 与电池日志已删除）、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
 - LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（16ms，即 `CONFIG_LV_DEF_REFR_PERIOD`；x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
@@ -189,14 +190,19 @@ main/
       sd_card.h/.c          # SD 卡驱动（SDMMC 4-bit + FAT/exFAT 挂载 /sdcard）
       pldata.h/.c           # 播放列表数据结构分区（4MB）驱动：esp_partition_mmap 内存映射只读
       audio/
-        audio.h/.c          # 音频播放 API（I2S 主机 + CS43131 DAC + PCM 流写 + 回放增益 + 统一浮点路径）
+        audio.h/.c          # 音频播放 API（I2S 主机 + CS43131 DAC + PCM 流写 + 回放增益 + 统一浮点路径；
+                            #   2026-11 起含输出路由：蓝牙优先、DAC 静音/回退、设备音量/EQ 优先）
         cs43131.h/.c        # CS43131 DAC 驱动（I2C 控制、24.576MHz 直通 MCLK、ASP 从机 I2S、音量）
         mp3_player.h/.c     # MP3 解码播放（Helix + 跳 ID3v2 + 写 I2S，Core1 后台任务）
         eq.h/.c             # EQ 均衡器（10 段浮点 PeakEQ + 预增益，.eq 文件解析/NVS 持久化/DSP 线程安全）
-    player/                 # 播放引擎（应用层）
-      player_controller.h/.c  # 播放控制器（Core0 独立后台服务：位置维护/播放控制/循环/随机/坏曲事件）
-      shuffle_player.h/.c     # 无限确定性随机播放列表（分块 + 确定性洗牌）
+        bt_audio.h/.c       # 蓝牙输出链路：重采样→EQ(蓝牙 fs)→回放增益/软件音量→int16 ringbuf→SBC；
+                            #   绝对音量/流控回调、PCM ringbuf（PSRAM）
+        resampler.h/.c      # 多相窗函数 sinc 重采样（esp-dsp dsps_dotprod_f32；含 resampler_selftest）
+      bt/
+        bt_service.h/.c     # 经典蓝牙服务：控制器/Bluedroid、GAP 扫描配对、A2DP Source、AVRCP CT
+                            #   （绝对音量探测/音量变化）、bt_svc 命令任务（Core1）
     storage/                # 播放器数据持久化
+      bt_store.h/.c         # 蓝牙设备表（最多 5 个：名称/MAC/音量/EQ/安静模式；NVS namespace "btdev"）
       config_store.h/.c     # 用户配置存储（NVS：音量/亮度/循环/随机/睡眠/息屏超时/EQ/上次位置等）。
                             # ⚠ 内含**配置槽位层**（SAVE1~SAVE4，2026-11）：音量/循环/随机+随机位置/
                             #   睡眠定时时长/EQ/当前歌曲+列表名 属于"当前配置"，随活跃槽位整体切换；应用侧
@@ -253,6 +259,8 @@ main/
                                 #   总是关闭 / 按时间段（RTC 小时落在 start~end，支持跨零点）/
                                 #   总是开启，三档与时间段存 config_store 的 sleepauto/slprange_*）
       power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏 + 低电自动关机（<5%·60s）
+                                #   2026-11 起含性能需求（蓝牙音频熄屏 160MHz）与安静模式开关
+      quiet_mode.h/.c           # 安静模式（蓝牙伪关机）：停播/关屏/关外设、保留蓝牙；12h/15%/断开断电；长按重启
       deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/关机深调用链唯一执行者
       task_psram.h/.c           # PSRAM 栈任务创建助手（task_create_psram_stack，失败自动回退内部 RAM）
   ui/                       # 应用 UI
@@ -280,7 +288,11 @@ main/
     time_sync_ui.h/.c       # 「WiFi对时」全屏进度界面：黑底 + 进度条 + 取消；起内部 RAM 栈
                             #   任务跑 core/network/wifi_time_sync，进度经 lvgl_port_lock 回写；
                             #   期间 power_service_set_hold_awake(true) 抑制自动息屏
-    notification_panel.h/.c # 下拉控制中心（电量百分比/亮度/音量竖条/睡眠开关/设置入口，LVGL 事件驱动）
+    notification_panel.h/.c # 下拉控制中心（电量百分比/亮度/音量竖条/**蓝牙开关（长按快速面板）**/设置入口，LVGL 事件驱动）
+    bt_settings.h/.c        # 完整蓝牙设置页（lv_menu，与设置菜单同规格）：开关/设备列表（点击进详情）/配对/
+                            #   设备详情（连接/断开/EQ/安静模式/删除）
+    bt_quick_panel.h/.c     # 控制中心长按蓝牙按钮弹出的快速面板：设备列表点击连接/断开 + 「蓝牙设置」入口
+                            #   （点遮罩关闭，状态 500ms 轮询 bt_service/bt_store）
     key_handler.h/.c        # 按键分发（S3 映射：亮屏 UP/DOWN=音量±1、DOWN 长按=-10、UP 长按=关机、双键=息屏；息屏 UP=播放暂停、DOWN=下一曲、DOWN 长按=上一曲、双键=亮屏）
     player_ticker.h/.c      # 播放器状态轮询刷新 + 坏曲事件 toast 拉取
     eq_popup.h/.c           # EQ 预设选择弹窗（列出 .musicfx 下 .eq 文件）
@@ -355,13 +367,14 @@ patches/
 - 动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL）固定在 Core0**、**播放解码/封面解码固定在 Core1**，二者分核互不抢占。
 - **深链执行器 deep_worker**（`core/utils/deep_worker.h/.c`：常驻任务，栈 **12KB**（2026-10 TTF 迁移由 8KB 上调：息屏唤醒的 `lv_refr_now` 全屏重刷会光栅化字形，见 `FontSystem.md` §5）、prio 6、Core0，信号量驱动）：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）、关机（停外设 + 提示渲染 + 写 AXP2101 `0x10[0]=1` 真断电）、以及**需要内部栈的关缓存段**（如"重新扫描"的 playlist munmap/擦头）统一委托它串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递；勿回到"在小任务里直接跑深链"（历史爆栈记录）。⚠ **栈 12KB 且必须在 `app_main` 早期初始化**（config_store 之后、硬件初始化之前）：内部 RAM 开机末期碎片化（最大连续块约 8.6KB），放到 boot_flow 之后再创建会失败；历史上曾因把这种大栈任务挪到开机末期 + 未检查 `xTaskCreatePinnedToCore` 返回值而**静默失败** → 任务不存在 → 每次深调用等满 5s 超时（按键息屏/亮屏延迟 5 秒）。现已检查返回值并加 `s_exec_task == NULL` 快速失败（就地兜底执行）+ 超时时 dump 全部任务状态。⚠ **该"早期创建"约束也正是 12KB 能分配成功的前提**（早期内部 RAM 还有 ~200KB 空闲/118KB 连续；实测创建成功、HWM 余 11.5KB）。
 - Core0：`LVGL`（lvgl_port_task）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0` 及系统 esp_timer 任务/ISR（sdkconfig 固定 CPU0）与全部驱动中断（app_main 于 Core0 初始化）。
-- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）。
+- Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`、**`bt_svc`（经典蓝牙命令/协议栈操作任务，6KB 内部栈；控制器与 Bluedroid 任务也 pin 在 Core1）**；`boot_scan`/`rescan`（仅重扫场景）。
 - 不固定：`touch_init`（开机一次性自删）、`mem_monitor`（性能监视，CONFIG_PERFORMANCE_MONITOR 控制）、`pmu_irq`（PMU 电源键事件，PSRAM 栈，仅 CONFIG_PMU_KEY_IRQ）。
 - 任务栈大小已在各创建处按 mem_monitor 高水位实测收紧（LVGL **20KB**（LVGL 9 迁移 6→12KB，TTF 迁移再 12→20KB，见下）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、deep_worker **12KB**（TTF 迁移由 8KB 上调）、cover_load 6KB、rescan 4KB、mp3_play 8K/out 4K、player_ctrl 4KB；另有主任务 **16KB**（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`，TTF 迁移由 8KB 上调，只在 app_main 期间占用、返回后释放））。⚠ 调栈前先看 HWM 且**必须覆盖目标路径实测**（如自动息屏/亮屏后才打印的读数），勿只信亮屏态读数。
 - ⚠ **LVGL 任务栈必须留在内部 RAM，当前 20KB**：v9 的绘制管线（draw task / layer / 各混合函数层层下探）比 8.4 深得多，**6KB 会在"首次渲染设置页"这种重页面时溢出** —— 实测现象是从主界面滑到第 4 页（播放设置）必定 `A stack overflow in task LVGL has been detected` 并 panic 重启；改 12KB 后位图字体时代实测高水位 5532B。**2026-10 TTF 迁移时**因为 FreeType 光栅化器把渲染池放栈上，12KB 实测只剩 172 字节，才上调到 20KB（实测余 ~8.3KB）；**2026-11 改回位图（NPF1）后不再光栅化**，20KB 继续保留（余量约 8KB，未重新收紧——位图 bpp2→A8 展开与绘制管线仍吃栈，且内部 RAM 目前够用）。若将来内部 RAM 吃紧，可按 `mem_monitor` 的 stk 行实测后回落到 12KB。凡是**可能同步渲染 LVGL** 的任务都按 ≥12KB 栈预算：目前是主任务 / LVGL / deep_worker 三个。
 - **⚠ 内部 RAM 紧张：非实时任务栈一律走 PSRAM**（`core/utils/task_psram.h` 的 `task_create_psram_stack`，失败自动回退内部 RAM）。实测开机末期内部 RAM 仅剩约 4~5KB、DMA 约 2KB、最大连续块约 8KB，内部栈会创建失败——历史症状：`create power service task failed`（自动息屏/低电关机全失效）、重新扫描提示"无法分配栈内存"、performance_monitor 的 mem_monitor/cpu_coll 起不来。已迁到 PSRAM 的任务：`mem_monitor`/`cpu_coll0`/`cpu_coll1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`（常驻净省约 12KB）。**保持内部 RAM 的任务**：`LVGL`（每帧刷屏）、`mp3_play`/`mp3_out`（实时解码输出）、`button_svc`（按键中断触发，要求低延迟）、`player_ctrl`/`deep_worker`/`sleep_timer`（交互与深链主路径）、`boot_scan`（扫描要擦写播放列表分区）。新建任务时默认用 `task_create_psram_stack`。
 - **⚠ 内部 RAM 最大的单项消耗曾是 debug 的堆毒化（现已默认关闭）**：实测 `CONFIG_HEAP_POISONING_COMPREHENSIVE=y` 多占约 **26KB** 内部 RAM，并把最大连续块从 31.7KB 压到 14.8KB（该模式给每个分配加带调用栈的元数据头且禁止空闲块合并，LVGL 的小对象把它放大成碎片）——这正是"release 从未出现、debug 才出现"内部 RAM 问题的原因，不是版本差异而是配置差异。**2026-09 debug 已改为 `CONFIG_HEAP_POISONING_DISABLED=y`；2026-09-10 又把唯一仍开着它的 releasecandidate 一并改为 `DISABLED`**——实测 RC 开毒化时比 debug 少 18~28KB 内部 RAM、最大连续块被压到 2.8KB（DMA 仅剩 955B/连续 80B），这正是"只有 releasecandidate 才出现"内部 RAM 问题的原因。⚠ **不要重新打开**；需要抓堆破坏/悬垂对象崩溃时，按该文件内注释临时改回 Comprehensive 再构建。实测数据、失败链条与修复验证见 `ideas_and_exps/IRAM_DMA_AUDIT.md`。
 - **⚠ LVGL 绘制缓冲是最大的 DMA 内存消费者**：`EXAMPLE_LVGL_BUF_HEIGHT = V_RES/10`（460/10=46 行 → 每块 460×46×2B ≈ 41KB，双缓冲 ≈ 83KB **DMA**；2026-09-10 起已回到此值，前提是 RC 堆毒化关闭——实测 DMA 稳态 **19.4KB / 最大连续块 17.4KB**，SD 读无失败）。实测 DMA 池分布（V_RES/20 那次测量）：启动 263KB → display 后 246KB → audio 后 233KB → SD 后 227KB → **LVGL 后 171KB（绘制缓冲吃掉约 55KB）** → 开机完成 45KB（**这 126KB 的真凶是 `app_ui_create()` 的 LVGL 控件对象约 105KB/+1795 个分配块，不是封面**——封面链路的 .npd/JPEG/像素缓冲全在 PSRAM，见 `IRAM_DMA_AUDIT.md`）。⚠ 原为 V_RES/10（双缓冲 ≈ 83KB DMA），会把 DMA 池压到不足 3KB，导致 SD 卡每次读的 `sdmmc_cmd: allocate_dma_buf: not enough mem`（512B 都分配不到）→ 切歌被误判"坏曲"并自动跳过；该问题在 releasecandidate 上尤其严重（其堆毒化再吃掉 18~28KB）；2026-09-10 关闭毒化后 `V_RES/10` 已稳定运行（DMA 稳态 19.4KB、内部最大连续块 17.4KB、SD 读无失败、睡眠定时器正常）。**调这个值前同时看三项：帧率 + DMA 余量 + 内部 RAM 最大连续块（后者须 ≥4KB：SD 读要 512B、内部任务栈要 4KB）**。（调大→帧率高但 SD 可能失败，调小→SD 安全但滚动掉帧，实测 V_RES/20 约 20fps、V_RES/12 接近原 30fps）。⚠ 缓冲**必须** `MALLOC_CAP_DMA`：非 DMA 缓冲会触发 SPI 驱动的 bounce 缓冲分配（`setup_dma_priv_buffer`），同样从 DMA 池取内存，失败则刷屏阻塞 → 任务看门狗复位。详见 `ideas_and_exps/PSRAM_TASK_STACK.md` 第 4 节。
+- 🆕 **2026-11 经典蓝牙接入后的内存调整（务必保持）**：BT 控制器 + Bluedroid 常驻会吃掉约 **13KB 内部 DMA 池**，首版直接把 DMA 压到 31B、SD 读全部失败（所有歌判"坏曲"）。为此：① `LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`（+27KB）；② 绘制缓冲 `V_RES/10 → V_RES/16`（+33KB DMA，帧率约 25fps）；③ mp3 `out_buf`/`stereo_buf`、`audio.c` 的 `silence_flush`、`eq_popup` 文件名表、BT 扫描表/命令队列全部改为 PSRAM。实测 BT 已启动时开机完成内部 RAM 约 **49KB**、DMA 约 **17KB**，SD 读/播放正常。**不要把这些改回内部 RAM，也不要恢复 `V_RES/10` 或 `FAST_MEM_USE_IRAM=y`**，否则 BT 控制器初始化会因内部连续池不足失败。详见 `ideas_and_exps/BLUETOOTH_AUDIO.md` §4。
 - 🆕 **LVGL 9 迁移后 DMA/内部 RAM 的格局已改变**：`app_ui_create()` 那批控件对象**不再占内部 RAM**（v9 的 `LV_USE_CUSTOM_MALLOC` + `core/ui/lvgl_mem.c` 把 LVGL 对象堆整体搬到 PSRAM）。因此上面这段"对象吃 105KB 内部 RAM"的历史描述**只适用于 LVGL 8.4 时代**。
 - 🆕 **2026-10-16 IRAM 审计（`ideas_and_exps/IRAM_AUDIT_LVGL9.md`）后的当前格局**：先记住一条硬件事实——**ESP32-S3 上 IRAM(0x4037xxxx) 与内部 DRAM(0x3FC8xxxx) 是同一块 SRAM 的两个别名**（`heap/port/esp32s3/memory_layout.c` 的 `soc_memory_regions` 成对给出配对地址），`.iram0.text` 里超出前 16KB 的**每一字节都从内部 DRAM 堆里扣**（map 里的 `.dram0.dummy` 就是它）。所以"代码进 IRAM"与"对象放 PSRAM"是在同一个池子里对冲——这正是"对象都搬去 PSRAM 了、可用内部 RAM 却不见涨"的原因。
   - **IRAM 代码**：166.4KB → **108.9KB**（裁掉 6 种用不到的颜色格式，其中 LVGL 部分 82.8→25.3KB；`LV_ATTRIBUTE_FAST_MEM_USE_IRAM` 保持 y）。

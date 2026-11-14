@@ -22,18 +22,25 @@
 
 5. 睡眠定时器的「开机自动开启」由布尔开关改为**三档：总是关闭 / 按时间段 / 总是开启**，并新增**时间段**设置（开始/结束小时滚轮，只能选整点、两者不可相同、支持跨零点如 22:00-06:00）。选「按时间段」时，只有开机时刻落在时间段内才会自动开启睡眠定时器；旧版本的开关状态会在升级后一次性迁移（开 → 总是开启）。
 
+6. **经典蓝牙音频（A2DP Source / SBC + AVRCP）**：可把本机当蓝牙音源连接耳机/音箱（最多保存 5 个设备），**SBC 48kHz 优先、44.1kHz 兜底**（真机实际以协议栈 `A2DP audio cfg` 上报的 44.1k 为准）；输出链路为「解码 → **重采样（esp-dsp 多相 FIR）→ EQ（按蓝牙采样率）** → 回放增益/软件音量 → SBC」。每个设备独立记忆**音量、EQ、安静模式**，连接期间优先于配置槽位，断开自动恢复。支持 AVRCP 绝对音量（耳机支持则直接发 0~127，不支持则本机软件衰减），耳机侧调音量会同步回本机；**蓝牙音量映射与 DAC 的 CS43131 特调曲线解耦**：绝对音量走线性满范围 1..127，软件音量走线性 1/30..1.0（真机反馈 1 档偏大后调整）。控制中心原「睡眠定时」圆钮改为**蓝牙开关**（点击开/关，**长按弹出快速面板**：设备列表点击连接/断开 + 「蓝牙设置」入口）；设置菜单新增「蓝牙」页（开关、设备列表、配对、**点击设备进入详情页**（连接/断开、EQ、安静模式、删除））。**点另一台设备会自动断开当前设备再连目标，失败保持断开、不回退旧设备**（5s 切换超时保护）。新增**安静模式**（绑定到具体设备、默认关）：睡眠定时到点后不真正断电，只停播/关屏/关 DAC/卸 SD、**保留蓝牙连接**；超过 12 小时、电量 <15% 或蓝牙断开时自动断电，长按电源键重启恢复。**已配对耳机开机后可主动回连**（空闲态保持 page scan、不对外可发现；主机仍不主动回连）。蓝牙音频流开始时熄屏 CPU 频率从 80MHz 提到 160MHz。详见 `ideas_and_exps/BLUETOOTH_AUDIO.md`。
+
 ### Bug 修复
 1. **拖动控制中心的亮度/音量竖条一顿一顿**：`config_store` 的变更通知是 100ms 延迟派发的，竖条本身也被限速成 10Hz（手指 30Hz 移动、进度条 10Hz 跳格）。改为拖动时立即刷新本面板控件，延迟派发只负责其它模块同步。
 2. **关掉「开机默认开启睡眠定时器」后每次开机定时器仍会自动开启**（切一次配置槽位也会）：根因是"睡眠定时时长"被当成配置槽位字段，两条自动路径把"记忆的时长"当成了"恢复定时的指令"。现时长与开关都改为纯全局配置，切换 SAVE1~SAVE4 完全不碰睡眠定时。槽位 blob 布局未变，升级不丢槽位。
 3. **偶发开机 panic（Cache error，发生在 NVS 初始化）**：根因不是 BOYA flash 颗粒，而是 ESP32-S31 双核分支预测器 / cache 竞态（espressif/esp-idf#18948 / IDFGH-18107）：flash 操作 suspend cache 期间，另一核的分支预测器仍会投机取指到 flash。IDF 6.1.0 快照不含上游修复，现把 `spi_flash` 组件复制进 `components/spi_flash/` 并在 `cache_utils.c` 的 flash 操作窗口内关闭/恢复分支预测（详见 `ideas_and_exps/S31_FLASH_CACHE_RACE.md`）。BOYA 专用驱动已回退，开机日志的 generic driver 提示属正常。
+4. **蓝牙首次连接要等约 5 秒才出声，并触发 `task_wdt: IDLE1` 看门狗**：重采样器 `build_coeffs()` 用双精度 `sin/cos` 逐系数生成（48k→44.1k 共 4704 个），S31 上双精度是软件模拟，一次约 5 秒、占满 Core1 饿死 IDLE1。改为 float + 每相位一次 `sinf/cosf` 起点、内层旋转递推，实测约 **80ms**（debug），连接→出声约 170ms，看门狗不再触发；系数与旧版逐点对比最大误差 3e-6。详见 `ideas_and_exps/BLUETOOTH_AUDIO.md` §3。
+5. **熄屏日志固定打印 "CPU fixed 80 MHz"**：蓝牙音频流下实际是 160MHz，改为按 `power_service_target_freq_mhz()` 打印真实目标频率。
+6. **多副耳机轮流回连时的连接状态串扰**：第二副已配对耳机在已连接状态下被拒绝（`av scb not available` / `BTA_AV_OPEN_EVT::FAILED`）时，Bluedroid 会补发一条"从未连接成功"的 `DISCONNECTED`；原实现无条件 `link_down`，可能把正在播放的耳机一起拆掉。现按 `remote_bda` 过滤 A2DP/AVRCP 连接状态，并忽略无活动链路的 DISCONNECTED；同时**已连接期间关闭 page scan**（断开后恢复），避免其它耳机反复 page 造成的 SCB/CCB 报错。
+7. **反复点蓝牙/切设备后出现两个 MP3 同时解码、混着播放**：`mp3_player_play()` 在 `play_task` 已创建但还没解码出第一帧的窗口里，`s_state` 仍是 IDLE，第二次 play 会再建一个 `mp3_play` 任务。现加 `s_starting` 启动窗口标志 + `s_play_mux` 串行化入口，第二个 play 会等第一个进入 PLAYING/退出后再正常切歌，不再叠加解码任务。
 
 ### 构建
-1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件 155 → 89、编译单元 1665 → 1235（−25.8%），bt / http / OTA / protocomm / openthread / unity / cmock 全部不再编译。2026-11-14 为「WiFi 对时」重新加入 **esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant**（固件 +约 650KB，仍只占 factory 分区 34%），WiFi 只用于一次性对时，库代码从 IRAM 挪回 Flash、收发缓冲缩减以省内部 RAM（详见 `ideas_and_exps/WIFI_TIME_SYNC.md`）。
+1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件从 155 个裁剪到约 90 个，http / OTA / protocomm / openthread / unity / cmock 不再编译。2026-11-14 为「WiFi 对时」重新加入 **esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant**，为「经典蓝牙音频」加入 **bt** 与本地 vendored 的 **esp-dsp**（只编译 ANSI dotprod 一个源文件），固件约 3.0MB、factory 分区余量约 51%。WiFi 只用于一次性对时，库代码从 IRAM 挪回 Flash、收发缓冲缩减以省内部 RAM（详见 `ideas_and_exps/WIFI_TIME_SYNC.md`）。
 2. 关闭 `MBEDTLS_CERTIFICATE_BUNDLE` 与 `MBEDTLS_PKCS7_C`（本项目不做任何网络/TLS）。
 3. 按 `DONE_PLANS.md` #52 移除硬件自检/调试代码：删除 `hw_selftest.c/.h`、`CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT` 及 CMake/main/性能监视里的相关条目；debug 开机不再打印 `HWST summary`。`DONE_PLANS.md` #51（虚拟列表滚动性能）同时标记为**暂不实现**（S3 有旧版 IRAM 兜底、S31 性能已足够）。
 
 ### 性能与内存
-1. LVGL 对象（含目录/歌曲两个滚动列表页）全部放回 PSRAM：内部 RAM 稳态 +20.5KB（143.7→163.8KB）、开机完成最大连续块 31.7KB→86KB，为后续接入 WiFi/BT 留出余量；列表快速滚动 24~36fps。串口 `MEM:` 行同时新增 `fps=` 读数，方便以后做 UI 性能对比。
+1. LVGL 对象（含目录/歌曲两个滚动列表页）全部放回 PSRAM：内部 RAM 稳态 +20.5KB（143.7→163.8KB）、开机完成最大连续块 31.7KB→86KB。串口 `MEM:` 行同时新增 `fps=` 读数，方便以后做 UI 性能对比。
+2. **蓝牙接入的内存调整**：BT 控制器 + Bluedroid 常驻约吃掉 13KB 内部 DMA 池，首版直接把 DMA 压到 31B、SD 读全部失败。现改为：LVGL `LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`（+27KB）、绘制缓冲 `V_RES/10 → V_RES/16`（+33KB DMA）、MP3 解码缓冲 / `silence_flush` / EQ 文件名表 / BT 扫描表与命令队列迁到 PSRAM。实测 BT 已启动时开机完成内部 RAM 约 49KB、DMA 约 17KB，SD 读与播放正常、帧率约 25fps（静止 61fps）。
 
 ### 更新方式
 用 `tools/make_full_firmware.py` 生成全量固件后烧到 0x0，或分别刷固件 + 字体分区。**本次必须重刷字体分区**（font 分区起点从 0x800000 改到 0x600000）。

@@ -13,6 +13,7 @@
 #include "core/hardware/audio/eq.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/boot_reason.h"
+#include "core/hardware/bt/bt_service.h"
 #include "core/hardware/button_service.h"
 #include "core/hardware/display.h"
 #include "core/hardware/pldata.h"
@@ -26,6 +27,7 @@
 #include "core/utils/mem_trace.h"
 #include "core/utils/performance_monitor.h"
 #include "core/utils/power_service.h"
+#include "core/utils/quiet_mode.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
 #include "ui/key_handler.h"
@@ -197,6 +199,15 @@ void app_main(void)
         }
     }
 
+    /* 经典蓝牙音频服务（A2DP Source / SBC + AVRCP CT）：
+       - 只创建命令队列 + bt_svc 任务，协议栈在任务里**异步**启动（不阻塞开机）；
+       - 按 NVS 记忆的开关状态决定是否开栈；
+       - 主机不主动回连，但空闲态保持 page scan（可连接、不可发现），
+         已配对耳机开机后可自己连回来。 */
+    ESP_LOGI(TAG, "Initialize bluetooth service");
+    bt_service_init();
+    mem_trace_log("08b-bt_service");
+
     ESP_LOGI(TAG, "Initialize pldata partition (播放列表数据)");
     if (pldata_init() != ESP_OK) {
         ESP_LOGW(TAG, "pldata partition unavailable (播放列表持久化不可用)");
@@ -240,6 +251,7 @@ void app_main(void)
     // 睡眠定时器（默认关闭，由播放设置页开启；到点音量渐降后交给
     // fake_shutdown 走 AXP2101 软关机，与上键长按同一条真关机流程）
     sleep_timer_init();
+    quiet_mode_init();
     mem_trace_log("13-sleep_timer");
 
     // 开机自动开启睡眠定时（config_store 的 sleep_auto，默认"总是关闭"）：

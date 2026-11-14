@@ -88,6 +88,38 @@ uint32_t power_service_get_idle_sec(void);
  */
 void power_service_set_hold_awake(bool hold);
 
+/**
+ * @brief 播放线程的"性能需求"（2026-11，蓝牙音频用）
+ *
+ * 熄屏时默认把 CPU 固定到 80MHz 省电；但蓝牙 A2DP 输出要做**重采样 + EQ +
+ * SBC 编码**，80MHz 实测会卡顿/掉音。播放线程（bt_audio）在流开始时声明
+ * POWER_PERF_BT_AUDIO，熄屏频率改为 **160MHz**；流挂起/停止时撤销。
+ *
+ * 说明：这是"多路需求取并集"的简化实现——任何一个请求处于 on 状态就提高
+ * 熄屏频率；亮屏始终 320MHz，不受影响。任意任务可调用，内部线程安全。
+ */
+typedef enum {
+    POWER_PERF_BT_AUDIO = 0,   /* 蓝牙音频（重采样 + SBC 编码） */
+    POWER_PERF_COUNT
+} power_perf_req_t;
+
+/**
+ * @brief 置位/清除一个性能需求
+ *
+ * @param req 需求类别（见 power_perf_req_t）
+ * @param on  true = 需要更高性能；false = 撤销
+ */
+void power_service_perf_set(power_perf_req_t req, bool on);
+
+/**
+ * @brief 进入/退出"安静模式"（蓝牙不断电的伪关机）
+ *
+ * 进入后：CPU 固定 80MHz、不再执行低电自动关机与自动息屏检查（低电/超时
+ * 由 quiet_mode 自己的监控任务按 15%/12h 规则处理），避免与 fake_shutdown
+ * 的亮屏提示流程冲突。
+ */
+void power_service_set_quiet_mode(bool on);
+
 #ifdef __cplusplus
 }
 #endif

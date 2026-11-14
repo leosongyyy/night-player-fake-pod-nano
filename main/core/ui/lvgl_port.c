@@ -63,8 +63,13 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    再降到 /20 帧率会掉到约 20fps。
    2026-09-10 按用户要求改回 /10 做一轮实测（用更大缓冲换帧率）：
    重点盯 `heap_caps_get_free_size(MALLOC_CAP_DMA)`、FPS 与 SD 读失败日志，
-   若再现 allocate_dma_buf 失败/无故跳曲，退回 /12。 */
-#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
+   若再现 allocate_dma_buf 失败/无故跳曲，退回 /12。
+   ⚠ 2026-11 经典蓝牙接入后改成 /16：BT 控制器 + 协议栈从内部 DMA 池吃掉
+   约 13KB（实测 /10 时开机完成后 DMA 仅剩 31B，SD 读全部失败 → 所有歌被判
+   "坏曲"）。/16 每块 460×28×2B≈25KB、双缓冲≈51KB，比 /10 省约 33KB DMA；
+   代价是帧率略降（/20 约 20fps、/10 约 30fps，/16 约 25fps 量级）。
+   若日后去掉蓝牙，可再按实测回调到 /12 或 /10。 */
+#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 16)
 /* ⚠ 本移植层已没有"tick 周期"这个概念：tick 由 lv_tick_set_cb() 直接读硬件时间，
    原来是"esp_timer 每 2 ms 回调一次 lv_tick_inc(2)"，那套正是整屏定格的根因
    （见 lvgl_port_tick_cb 上方注释）。保留这行注释只为提醒后来者别再引回来。 */

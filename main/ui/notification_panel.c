@@ -1,13 +1,17 @@
 #include "ui/notification_panel.h"
 #include "ui/battery_indicator.h"
+#include "ui/bt_quick_panel.h"
 #include "ui/clock_display.h"
 #include "ui/list_common.h"
 #include "ui/settings_menu.h"
+#include "ui/toast.h"
 
 #include "core/fonts/system_font.h"
 #include "core/fonts/system_smaller_font.h"
 #include "core/hardware/audio/audio.h"
+#include "core/hardware/bt/bt_service.h"
 #include "core/hardware/display.h"
+#include "core/storage/bt_store.h"
 #include "core/storage/config_store.h"
 #include "core/utils/sleep_timer.h"
 
@@ -95,10 +99,14 @@ static lv_obj_t *bright_fill = NULL;
 /* 音量竖条 */
 static lv_obj_t *vol_fill = NULL;
 
-/* 左列第一个圆形按钮：睡眠定时开关（"Zz" 文字，点击一键开/关，颜色指示状态） */
-static lv_obj_t *s_sleep_btn = NULL;
-static lv_obj_t *s_sleep_btn_lbl = NULL;
-static bool s_sleep_btn_on = false;   /* 上次刷新时定时是否开启（1s 定时器对比，状态未变不重复刷样式） */
+/* 左列第一个圆形按钮：蓝牙开关（2026-11 起替换原睡眠定时按钮）。
+   点击 = 开/关蓝牙；长按 = 弹出蓝牙快速面板（设备列表 + 设置入口，
+   见 ui/bt_quick_panel.c）。
+   颜色指示状态：关=深灰、开未连=蓝、已连接=黄（黑图标）。 */
+static lv_obj_t *s_bt_btn = NULL;
+static lv_obj_t *s_bt_btn_lbl = NULL;
+static int s_bt_btn_state = -1;      /* 0=关 1=开未连 2=已连接（上次刷新值） */
+static bool s_bt_long_pressed = false;
 
 /* 面板拖拽状态 */
 static bool dragging = false;
@@ -271,7 +279,12 @@ static void notif_apply_volume(uint8_t level)
     }
     sleep_timer_fade_cancel();
     audio_set_volume_level(level);          /* 先写硬件（回调读到的即新值） */
-    config_store_set_volume_deferred(level);/* 后改内存 + 通知（持锁安全） */
+    if (audio_bt_profile_active()) {
+        /* 蓝牙设备配置优先：记到该设备，不污染配置槽位 */
+        bt_service_note_volume(level);
+    } else {
+        config_store_set_volume_deferred(level);/* 后改内存 + 通知（持锁安全） */
+    }
     /* ⚠ 同亮度：立即刷新本面板音量竖条，别等 100ms 的延迟派发，否则拖动
        音量竖条也是 10Hz 的"一格一格"（见 notif_apply_brightness 的说明）。
        同时让顶部左侧临时显示音量数值（约 3 秒后回到时间）。 */
@@ -326,7 +339,8 @@ static void notif_refresh_brightness_ui(uint8_t brightness)
 static void notif_config_changed_cb(void *ctx)
 {
     (void)ctx;
-    uint8_t vol = config_store_get_volume();
+    /* 音量数据源 = audio 当前档位（蓝牙连接期间是设备音量，不是配置槽位） */
+    uint8_t vol = audio_get_volume_level();
     if (vol != s_header_last_volume) {
         notif_show_volume_temp(vol);
     }
@@ -381,51 +395,81 @@ static void settings_btn_cb(lv_event_t *e)
 
 /* 刷新睡眠定时开关按钮配色：开启 = 黄色高亮底 + 黑字（醒目"激活"），
    关闭 = 深灰底 + 白字（与其它圆形按钮一致）。 */
-static void notif_refresh_sleep_btn(void)
+/* 蓝牙开关按钮：0=关闭、1=开启未连接、2=已连接（颜色区分） */
+static int notif_bt_btn_state_now(void)
 {
-    if (s_sleep_btn == NULL || s_sleep_btn_lbl == NULL) {
+    if (!bt_service_is_enabled()) {
+        return 0;
+    }
+    return bt_service_is_connected() ? 2 : 1;
+}
+
+static void notif_refresh_bt_btn(void)
+{
+    if (s_bt_btn == NULL || s_bt_btn_lbl == NULL) {
         return;
     }
-    if (sleep_timer_is_active()) {
-        lv_obj_set_style_bg_color(s_sleep_btn, NOTIF_PRESS_COLOR, 0);
-        lv_obj_set_style_text_color(s_sleep_btn_lbl, lv_color_black(), 0);
-    } else {
-        lv_obj_set_style_bg_color(s_sleep_btn, TRACK_BG_COLOR, 0);
-        lv_obj_set_style_text_color(s_sleep_btn_lbl, lv_color_white(), 0);
+    switch (notif_bt_btn_state_now()) {
+    case 0:
+        lv_obj_set_style_bg_color(s_bt_btn, TRACK_BG_COLOR, 0);
+        lv_obj_set_style_text_color(s_bt_btn_lbl, lv_color_white(), 0);
+        break;
+    case 1:
+        lv_obj_set_style_bg_color(s_bt_btn, lv_color_hex(0x007AFF), 0);
+        lv_obj_set_style_text_color(s_bt_btn_lbl, lv_color_white(), 0);
+        break;
+    default:
+        lv_obj_set_style_bg_color(s_bt_btn, NOTIF_PRESS_COLOR, 0);
+        lv_obj_set_style_text_color(s_bt_btn_lbl, lv_color_black(), 0);
+        break;
     }
 }
 
-/* 睡眠定时开关按钮：点击一键开启/关闭（行为与设置页长按一致）。
-   - 关闭 → 开启：用默认时长（config_store 的 sleep_default_min，设置页
-     点击档位时保存；无默认时兜底 45 分钟）启动睡眠定时；
-   - 开启 → 关闭：取消定时（若正在最后 30s 音量渐降，sleep_timer_set 内部
-     会触发恢复渐降前音量）。 */
-static void sleep_btn_cb(lv_event_t *e)
+/* 蓝牙按钮：点击开/关蓝牙；长按弹出设备列表快速连接。
+   长按后松开 LVGL 仍会发送 CLICKED，用 s_bt_long_pressed 忽略。 */
+static void bt_btn_cb(lv_event_t *e)
 {
-    (void)e;
-    if (sleep_timer_is_active()) {
-        sleep_timer_set(0);
-        ESP_LOGI(TAG, "sleep timer off (control center)");
-    } else {
-        uint32_t def = config_store_get_sleep_default_min();
-        if (def == 0) {
-            def = CONFIG_STORE_SLEEP_DEFAULT_MIN;   /* 兜底：无默认时长时用 45 分钟 */
-        }
-        sleep_timer_set(def);
-        ESP_LOGI(TAG, "sleep timer on: %u min (control center)", (unsigned)def);
+    lv_event_code_t code = lv_event_get_code(e);
+
+    if (code == LV_EVENT_PRESSED) {
+        s_bt_long_pressed = false;
+        return;
     }
-    notif_refresh_sleep_btn();
+    if (code == LV_EVENT_LONG_PRESSED) {
+        s_bt_long_pressed = true;
+        notif_animate_to(PANEL_CLOSED_Y);
+        if (!bt_service_is_enabled()) {
+            ui_toast_show("蓝牙已关闭，请先在设置中开启");
+            return;
+        }
+        ESP_LOGI(TAG, "long press BT button: open quick panel");
+        bt_quick_panel_show();
+        return;
+    }
+    if (code == LV_EVENT_CLICKED) {
+        if (s_bt_long_pressed) {
+            s_bt_long_pressed = false;
+            return;
+        }
+        bool on = !bt_service_is_enabled();
+        bt_service_set_enabled(on);
+        ui_toast_show(on ? "蓝牙已开启" : "蓝牙已关闭");
+        notif_refresh_bt_btn();
+        ESP_LOGI(TAG, "BT switch -> %s (control center)", on ? "on" : "off");
+    }
 }
 
-/* 周期同步睡眠按钮状态（1s）：睡眠定时可能在其它入口（设置页长按/开机
-   默认开启等）被开/关，按钮颜色需跟随；状态未变时跳过，避免反复设样式 */
-static void sleep_btn_status_timer_cb(lv_timer_t *timer)
+static void bt_btn_status_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
-    bool on = sleep_timer_is_active();
-    if (on != s_sleep_btn_on) {
-        s_sleep_btn_on = on;
-        notif_refresh_sleep_btn();
+    int st = notif_bt_btn_state_now();
+    if (st != s_bt_btn_state) {
+        s_bt_btn_state = st;
+        notif_refresh_bt_btn();
+    }
+    uint8_t vol = audio_get_volume_level();
+    if (vol != s_header_last_volume) {
+        notif_show_volume_temp(vol);
     }
 }
 
@@ -710,8 +754,10 @@ static void content_create(void)
              + 设置按钮（下，打开设置菜单） ---- */
     lv_obj_t *left_col = content_col_create(content);
     lv_obj_set_style_pad_row(left_col, ROUND_BTN_GAP, 0);
-    s_sleep_btn = round_btn_create(left_col, "Zz", &s_sleep_btn_lbl);
-    lv_obj_add_event_cb(s_sleep_btn, sleep_btn_cb, LV_EVENT_CLICKED, NULL);
+    s_bt_btn = round_btn_create(left_col, LV_SYMBOL_BLUETOOTH, &s_bt_btn_lbl);
+    lv_obj_add_event_cb(s_bt_btn, bt_btn_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_bt_btn, bt_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_bt_btn, bt_btn_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_t *settings_btn = round_btn_create(left_col, LV_SYMBOL_SETTINGS, NULL);
     lv_obj_add_event_cb(settings_btn, settings_btn_cb, LV_EVENT_CLICKED, NULL);
 
@@ -798,11 +844,11 @@ void notification_panel_create(lv_obj_t *status_bar)
     /* 初始填充：电池 + 亮度/音量竖条（时间文本已由 clock_display_attach
        在 header_create 里填好；音量不写文字，只有调音量时才临时显示） */
     notif_refresh_battery_ui();
-    s_header_last_volume = config_store_get_volume();
+    s_header_last_volume = audio_get_volume_level();
     notif_refresh_volume_ui(s_header_last_volume);
     notif_refresh_brightness_ui(config_store_get_brightness());
-    notif_refresh_sleep_btn();
-    s_sleep_btn_on = sleep_timer_is_active();
+    notif_refresh_bt_btn();
+    s_bt_btn_state = notif_bt_btn_state_now();
 
     /* 电池百分比周期刷新（5 秒）：电量变化慢，没必要跟随 1s 定时器。
        时钟的 1 秒刷新由 ui/clock_display 统一负责，这里不再另建 */
@@ -813,7 +859,7 @@ void notification_panel_create(lv_obj_t *status_bar)
 
     /* 睡眠定时开关按钮状态周期同步（1s）：睡眠定时可能被设置页长按/开机
        默认开启等入口修改，按钮颜色跟随（状态未变时不重绘） */
-    lv_timer_create(sleep_btn_status_timer_cb, 1000, NULL);
+    lv_timer_create(bt_btn_status_timer_cb, 1000, NULL);
 
     /* 触摸事件：状态栏（面板收起时下拉）与通知栏（展开时上拉/下拉）共用拖拽事件。
        亮度/音量竖条、圆形按钮等可点击子控件会消费自身事件（不冒泡），

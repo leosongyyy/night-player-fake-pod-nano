@@ -2,8 +2,10 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/eq.h"
+#include "core/hardware/bt/bt_service.h"
 #include "core/hardware/display.h"
 #include "core/player/player_controller.h"
+#include "core/storage/bt_store.h"
 #include "core/storage/config_store.h"
 #include "core/utils/sleep_timer.h"
 #include "ui/config_slot_popup.h"
@@ -172,6 +174,17 @@ static void settings_refresh_sleep(void)
 static void settings_refresh_eq(void)
 {
     if (s_eq_status == NULL) {
+        return;
+    }
+    /* 蓝牙连接期间显示设备 EQ（优先于配置槽位） */
+    int bt_idx = bt_service_connected_index();
+    if (bt_idx >= 0) {
+        bt_device_t d;
+        if (bt_store_get(bt_idx, &d) && d.eq_valid) {
+            lv_label_set_text(s_eq_status, d.eq_name);
+        } else {
+            lv_label_set_text(s_eq_status, "无 EQ");
+        }
         return;
     }
     char name[EQ_FILE_NAME_MAX];
@@ -426,7 +439,13 @@ static void eq_cell_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;
     }
-    eq_popup_toggle(s_settings_page);
+    /* 蓝牙连接期间切到"设备 EQ"（写 bt_store，断开自动恢复全局 EQ） */
+    int bt_idx = bt_service_connected_index();
+    if (bt_idx >= 0) {
+        eq_popup_toggle_for_device(s_settings_page, bt_idx);
+    } else {
+        eq_popup_toggle(s_settings_page);
+    }
 }
 
 /* 配置切换格子：点击打开配置槽位选择弹窗（SAVE1~SAVE4）。

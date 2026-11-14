@@ -40,16 +40,24 @@ void config_slots_switch(uint32_t idx)
     config_store_slot_snapshot_t snap;
     config_store_get_slot_snapshot(idx, &snap);
 
-    /* 4. 音量：直接落到 DAC（不等下一次播放），保证"切换即可感知" */
-    audio_set_volume_level(config_store_get_volume());
-
-    /* 5. EQ：有预设则应用，无则关闭（直通） */
+    /* 4. 音量：直接落到 DAC（不等下一次播放），保证"切换即可感知"。
+          ⚠ 蓝牙连接期间设备音量/EQ 优先级更高：这里只切换配置槽位本身，
+             不动正在生效的音频参数，断开蓝牙后 audio_bt_profile_leave 会
+             自动恢复新槽位的音量/EQ。 */
     char eq_name[EQ_FILE_NAME_MAX] = "";
-    eq_preset_t eq_preset;
-    if (config_store_get_eq(eq_name, sizeof(eq_name), &eq_preset)) {
-        eq_apply(&eq_preset);
+    if (audio_bt_profile_active()) {
+        ESP_LOGI(TAG, "slot switch while BT profile active: "
+                      "keep device volume/EQ (slot applied on disconnect)");
     } else {
-        eq_apply(NULL);
+        audio_set_volume_level(config_store_get_volume());
+
+        /* 5. EQ：有预设则应用，无则关闭（直通） */
+        eq_preset_t eq_preset;
+        if (config_store_get_eq(eq_name, sizeof(eq_name), &eq_preset)) {
+            eq_apply(&eq_preset);
+        } else {
+            eq_apply(NULL);
+        }
     }
 
     /* 6. 睡眠定时：**不属于配置槽位**（2026-11 起时长与开关都是全局键），

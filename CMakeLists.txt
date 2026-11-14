@@ -50,6 +50,13 @@ set(COMPONENTS
     esp_lcd_touch_cst816           # core/hardware/touch.c（三型号运行时择优）
     esp_lcd_touch_cst820
     esp_lcd_touch_chsc6417
+    # ESP-DSP（2026-11，本地 vendored：esp-dsp 1.4.12，Apache-2.0）：
+    # 蓝牙输出重采样用（core/hardware/audio/resampler.c 的 polyphase FIR
+    # 点积调用 dsps_dotprod_f32）。⚠ 不从组件管理器拉取（构建机可能离线），
+    # 直接放在 components/esp-dsp 并**必须**列进本白名单，否则 main 里
+    # #include "dsps_dotprod.h" 找不到头文件。S31 不是 ESP32/S3，
+    # esp-dsp 的 Kconfig 会把实现选成 ANSI C（DSP_OPTIMIZED 不可用）。
+    esp-dsp
 
     # ---- main 直接 include 头文件的 IDF 组件 ----
     esp_lcd                        # esp_lcd_panel_*.h / esp_lcd_panel_io.h
@@ -79,6 +86,13 @@ set(COMPONENTS
     esp_event                      # esp_event.h（WiFi/IP 事件）
     lwip                           # esp_sntp.h / lwip/netdb.h（SNTP + DNS）
     wpa_supplicant                 # WPA2/WPA3 握手（esp_wifi 的实现依赖）
+
+    # ---- 经典蓝牙音频（2026-11 新增，core/hardware/bt/） ----
+    # A2DP Source（SBC，内部编码器）+ AVRCP CT（绝对音量）。Classic 只能走
+    # Bluedroid + BTDM 控制器（见 sdkconfig.defaults 的 BT 段）。
+    # ⚠ 这里必须列 bt：main 直接 include esp_bt.h / esp_a2dp_api.h /
+    #   esp_avrc_api.h / esp_gap_bt_api.h。
+    bt                             # BlueDroid host + BTDM controller
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
@@ -90,3 +104,17 @@ add_compile_options("-Wno-format")
 set(PROJECT_VER "2.0.0.0-alpha-1")
 
 project(FakePodNanoNightPlayer)
+
+# ============================================================================
+# bt 组件的编译选项（2026-11，经典蓝牙音频接入）
+# ----------------------------------------------------------------------------
+# IDF 6.1 的 Bluedroid 里有若干 `BCM_STRNCPY_S(..., BD_NAME_LEN)`（把 248 字节
+# 名字写进 248 字节缓冲）；GCC 15 的 -Wstringop-truncation 会报"可能截断"，
+# 而 IDF 默认 -Werror 把它当错误。这不是本项目的代码，也不影响运行
+# （BT 名字本来就允许不以 '\0' 结尾，Bluedroid 内部按长度处理）。
+# 只对 bt 组件关掉这一条警告，不动全局的 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS。
+# ============================================================================
+idf_component_get_property(_bt_lib bt COMPONENT_LIB)
+if(TARGET ${_bt_lib})
+    target_compile_options(${_bt_lib} PRIVATE -Wno-stringop-truncation)
+endif()

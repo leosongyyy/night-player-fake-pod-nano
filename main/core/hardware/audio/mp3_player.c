@@ -47,10 +47,12 @@ static const char *TAG = "mp3_player";
 
 /* 静态缓冲（BSS，不占任务栈）：
    read_buf 放内部 RAM（fread 目标，PSRAM 写入偏慢会加剧卡顿）；
-   out_buf/stereo_buf 为解码输出与单声道→双声道转换缓冲 */
+   out_buf/stereo_buf 为解码输出与单声道→双声道转换缓冲——2026-11 起改放
+   PSRAM（各 4.6KB，合计 ~9.2KB 内部 RAM 让给蓝牙控制器；它们在解码任务栈
+   之外，只被 Helix 与 ringbuf 拷贝访问，PSRAM 带宽足够）。 */
 static unsigned char read_buf[MP3_READBUF_SIZE];
-static short out_buf[MP3_OUTBUF_SAMPLES];
-static short stereo_buf[MP3_OUTBUF_SAMPLES];   /* 单声道 → 双声道转换缓冲 */
+static short *out_buf = NULL;
+static short *stereo_buf = NULL;   /* 单声道 → 双声道转换缓冲 */
 
 /* producer/consumer 共享的 PCM ringbuf 与同步原语（首次播放时懒初始化） */
 static RingbufHandle_t s_rb = NULL;
@@ -64,6 +66,13 @@ static const char *s_path = NULL;
 
 /* 播放状态与控制 */
 static volatile mp3_player_state_t s_state = MP3_STATE_IDLE;
+/* play_task 已创建但还没解码出第一帧（s_state 仍 IDLE）的窗口。
+ * 没有这个标志时，两次 mp3_player_play 落在这个窗口内会各建一个
+ * mp3_play 任务 → 两个解码器同时往 ringbuf 写，耳机里混着两首歌。 */
+static volatile bool s_starting = false;
+/* 串行化 mp3_player_play：player_controller 正常只在一个任务里调用，
+ * 但停止回调里续播 + 用户/蓝牙事件可能并发进来，必须在入口互斥。 */
+static SemaphoreHandle_t s_play_mux = NULL;
 static volatile bool s_pause_requested = false;
 static volatile bool s_stop_requested = false;
 static volatile bool s_seek_requested = false;
@@ -299,6 +308,7 @@ static uint32_t mp3_read_xing_duration(const char *path)
 static void mp3_player_finish(void)
 {
     s_state = MP3_STATE_IDLE;
+    s_starting = false;
     mp3_player_stopped_cb_t cb = s_stopped_cb;
     if (cb != NULL) {
         cb(s_stop_reason);
@@ -398,6 +408,9 @@ static esp_err_t ensure_output_init(void)
         s_clear_mutex = xSemaphoreCreateBinary();
         xSemaphoreGive(s_clear_mutex);
     }
+    if (s_play_mux == NULL) {
+        s_play_mux = xSemaphoreCreateMutex();
+    }
     if (s_out_stopped_sem == NULL) {
         s_out_stopped_sem = xSemaphoreCreateBinary();   /* 初始为空，等 consumer 停止时 give */
     }
@@ -411,6 +424,27 @@ static esp_err_t ensure_output_init(void)
             ESP_LOGE(TAG, "create out task failed");
             return ESP_ERR_NO_MEM;
         }
+    }
+    /* 解码输出缓冲（PSRAM；失败回退内部 RAM） */
+    if (out_buf == NULL) {
+        out_buf = heap_caps_malloc(MP3_OUTBUF_SAMPLES * sizeof(short),
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (out_buf == NULL) {
+            out_buf = heap_caps_malloc(MP3_OUTBUF_SAMPLES * sizeof(short),
+                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+    }
+    if (stereo_buf == NULL) {
+        stereo_buf = heap_caps_malloc(MP3_OUTBUF_SAMPLES * sizeof(short),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (stereo_buf == NULL) {
+            stereo_buf = heap_caps_malloc(MP3_OUTBUF_SAMPLES * sizeof(short),
+                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+    }
+    if (out_buf == NULL || stereo_buf == NULL) {
+        ESP_LOGE(TAG, "allocate pcm buffers failed");
+        return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
@@ -616,6 +650,7 @@ static void play_task(void *arg)
                 s_played_ms = 0;
                 s_seg_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
                 s_state = MP3_STATE_PLAYING;
+                s_starting = false;
                 started = true;
                 ESP_LOGI(TAG, "mp3: %d Hz, %d ch, %d kbps, dur %u s",
                          fi.samprate, fi.nChans, fi.bitrate / 1000, (unsigned)s_duration_s);
@@ -699,10 +734,24 @@ static void play_task(void *arg)
 /* 对外接口                                                             */
 /* ------------------------------------------------------------------ */
 
-esp_err_t mp3_player_play(const char *path)
+static esp_err_t mp3_play_locked(const char *path)
 {
     if (path == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* 上一次 play 已创建任务、但还没解码出第一帧（s_state 仍 IDLE）：
+     * 等它进入 PLAYING 或退出，避免在这个窗口里再建一个解码任务 */
+    if (s_starting) {
+        uint32_t wait = 0;
+        while (s_starting && wait < 2000) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            wait += 10;
+        }
+        if (s_starting) {
+            ESP_LOGE(TAG, "previous track still starting");
+            return ESP_ERR_TIMEOUT;
+        }
     }
 
     /* 懒初始化 producer/consumer 基础设施（首次播放时创建一次） */
@@ -761,15 +810,35 @@ esp_err_t mp3_player_play(const char *path)
     s_duration_s = 0;
     s_stop_reason = MP3_STOP_NATURAL;   /* 新曲默认预期自然播完（坏曲路径会改写） */
 
+    s_starting = true;
     BaseType_t created = xTaskCreatePinnedToCore(play_task, "mp3_play",
                                                  MP3_PLAY_TASK_STACK, NULL,
                                                  MP3_PLAY_TASK_PRIO, NULL,
                                                  MP3_PLAY_TASK_CORE);
     if (created != pdPASS) {
+        s_starting = false;
         ESP_LOGE(TAG, "create play task failed");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+esp_err_t mp3_player_play(const char *path)
+{
+    if (path == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t init = ensure_output_init();
+    if (init != ESP_OK) {
+        return init;
+    }
+    if (s_play_mux == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(s_play_mux, portMAX_DELAY);
+    esp_err_t ret = mp3_play_locked(path);
+    xSemaphoreGive(s_play_mux);
+    return ret;
 }
 
 esp_err_t mp3_player_pause(void)

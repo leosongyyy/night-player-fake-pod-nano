@@ -210,6 +210,10 @@ void ui_toast_show_ms(const char *text, uint32_t duration_ms)
         toast_create();
     }
 
+    /* 提到最上层：Toast 可能在蓝牙设置页/时间弹窗等全屏覆盖层之前创建，
+       不置前的话会被这些后创建的层挡住（2026-11 发现）。 */
+    lv_obj_move_foreground(s_toast);
+
     /* 截断进行中的滑入/滑出动画并复位（正在滑出时新消息到达 → 拉回重显） */
     lv_anim_del(s_toast, toast_slide_anim_cb);
     lv_obj_set_style_translate_y(s_toast, 0, 0);

@@ -2,11 +2,13 @@
 
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/button_service.h"
+#include "core/hardware/bt/bt_service.h"
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/fake_shutdown.h"
 #include "core/utils/power_service.h"
+#include "core/utils/quiet_mode.h"
 #include "core/utils/sleep_timer.h"
 
 #include "esp_log.h"
@@ -59,7 +61,12 @@ static void key_adjust_volume(int8_t delta)
         vol = AUDIO_VOL_LEVEL_MAX;
     }
     audio_set_volume_level((uint8_t)vol);          /* 先写硬件（回调读到的即新值） */
-    config_store_set_volume((uint8_t)vol);         /* 后持久化 + 通知回调（持锁安全） */
+    if (audio_bt_profile_active()) {
+        /* 蓝牙设备配置优先：写回该设备的音量记忆，不污染配置槽位 */
+        bt_service_note_volume((uint8_t)vol);
+    } else {
+        config_store_set_volume((uint8_t)vol);     /* 后持久化 + 通知回调（持锁安全） */
+    }
     lvgl_port_unlock();
     ESP_LOGI(TAG, "volume level -> %d", (int)vol);
 }
@@ -74,6 +81,15 @@ static void on_button_event(button_event_t event, void *ctx)
     if (esp_timer_get_time() < (int64_t)DEEP_SLEEP_IGNORE_MS * 1000) {
         ESP_LOGI(TAG, "button event %d ignored within %d ms after boot",
                  (int)event, DEEP_SLEEP_IGNORE_MS);
+        return;
+    }
+
+    /* 安静模式（蓝牙伪关机）：屏幕/LVGL 已挂起，只响应长按电源键 → 重启。
+       短按/双键一律忽略，避免误亮屏或误触发播放控制。 */
+    if (quiet_mode_is_active()) {
+        if (event == BUTTON_EVENT_UP_LONG) {
+            quiet_mode_request_reboot();
+        }
         return;
     }
 
