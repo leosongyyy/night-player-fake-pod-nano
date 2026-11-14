@@ -211,7 +211,7 @@ I hwst: [PASS] rtc_auto_init_project_epoch
 
 - [ ] **软关机真机实测**：`fake_shutdown` 已改为写 `0x10[0]=1` 的真关机，等待实测
       （断电效果、开机恢复、SD/NVS 数据完整性）。
-- [ ] 低电策略（拒启/自动关机）尚未接回 `power_service` / `boot_flow`；电压/电量接口已就绪。
+- [x] 低电策略（拒启/自动关机）已接回（2026-11，按 AXP2101 **电量百分比**）：`boot_flow` 开机电量 <2% 且未充电 → 只显示「电量过低，请充电」、5 秒后 PMU 直接断电；`power_service` 每秒判电量 <5% 且未充电**持续 60 秒** → `fake_shutdown_enter()` 真关机。充电中 / VBUS 在位不触发，读数不可用（0xFF）不动作。
 - [x] PMU 电源键已合并进 `key_handler`：`button_service` 统一生成上/下键短按、长按、
       双键同时按下，`key_handler` 恢复 S3 映射（见 §8）。
 - [x] 时间显示与手动校时已完成：状态栏左格 HH:MM（`ui/clock_display.c`）、设置 →「时间与日期」的日期/时间/时区弹窗（`ui/time_date_popup.c`）、WiFi SNTP 对时（`core/network/wifi_time_sync.c`，见 `WIFI_TIME_SYNC.md`）。

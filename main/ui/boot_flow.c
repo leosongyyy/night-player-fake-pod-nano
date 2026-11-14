@@ -74,6 +74,7 @@ static void reset_position_btn_cb(lv_event_t *e);
 typedef enum {
     BOOT_ST_NONE = 0,
     BOOT_ST_SPLASH,       /* 开机封面（默认封面，屏幕最早点亮的那一屏） */
+    BOOT_ST_LOW_BAT,      /* 电量过低且未充电：拒绝启动（停在此屏） */
     BOOT_ST_NO_SD,        /* 未插入 SD 卡（停在此屏） */
     BOOT_ST_PROMPT_SCAN,  /* 提示扫描，等待用户点击开始扫描 */
     BOOT_ST_SCANNING,     /* 正在扫描（进度每 300ms 更新） */
@@ -196,7 +197,68 @@ void boot_splash_show(void)
     ESP_LOGI(TAG, "boot splash: default cover shown");
 }
 
-/* 1. 未插入 SD 卡：提示 + failsafe 按钮组（重置歌曲位置 / 清除扫描数据），
+/* 1. 低电拒启（S31，2026-11 接回）：电量 < 2% 且未在充电 → 只显示一行
+   「电量过低，请充电」，**停留 5 秒后由 PMU 直接断电**（不停在此界面）。
+   判据用 AXP2101 的电量计百分比（battery_read_info 的融合值），并要求
+   读数可用（percent != 0xFF），避免 PMU 读失败时把机器误关机。
+   ⚠ 与 S3 的差异：S3 用分压 ADC 的**电压**（<3.45V）判断并停在此屏等用户
+   关机；S31 没有那条分压链路，改用电量百分比，且由固件主动断电。
+   ⚠ 这里不走 fake_shutdown：开机早期没有播放现场要保存，而 fake_shutdown 会
+   把提示刷成「正在关机...」并挂起 LVGL，与"只显示一句提示"的诉求冲突。
+   运行中的低电关机由 power_service 按 5% / 60s 判（PMU 真关机）。 */
+#define BOOT_LOW_BAT_PERCENT        2
+#define BOOT_LOW_BAT_SHUTDOWN_MS    5000
+
+/* 5 秒到：一行提示已经显示完，直接让 PMU 断电。
+   断电成功时整机立刻停机，不会返回；失败只记录日志（面板保留最后一句提示，
+   用户可长按电源键 4 秒由 PMU 的 OFFLEVEL 硬件兜底断电，不在此处重试）。 */
+static void boot_low_bat_shutdown_cb(lv_timer_t *timer)
+{
+    (void)timer;
+
+    /* 5 秒内用户插上充电器：不再关机，直接重启进"充电专用界面"
+       （正常开机路径已初始化 SD/播放列表，重启最省事；esp_restart 后由
+       boot_reason 判定为插电开机）。 */
+    battery_info_t info;
+    if (battery_read_info(&info) == ESP_OK
+            && (info.vbus_present || info.charging)) {
+        ESP_LOGW(TAG, "low battery: charger plugged in, restarting to charge mode");
+        esp_restart();
+    }
+
+    ESP_LOGW(TAG, "low battery: 5 s elapsed, sending PMU power-off");
+    esp_err_t err = axp2101_power_off();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PMU power-off failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void boot_show_low_battery(const battery_info_t *info)
+{
+    s_state = BOOT_ST_LOW_BAT;
+    lv_obj_t *root = boot_root_create();
+
+    /* 只留一行居中白字：不显示电压/百分比，也不放任何按钮（屏幕 5 秒后熄灭） */
+    lv_obj_t *msg = boot_make_title(root, "电量过低，请充电");
+    lv_obj_center(msg);
+
+    /* 一次性定时器：LVGL 任务上下文，5 秒后由 PMU 断电 */
+    lv_timer_t *timer = lv_timer_create(boot_low_bat_shutdown_cb,
+                                        BOOT_LOW_BAT_SHUTDOWN_MS, NULL);
+    if (timer != NULL) {
+        lv_timer_set_repeat_count(timer, 1);
+    } else {
+        ESP_LOGE(TAG, "failed to create low-battery shutdown timer");
+    }
+
+    ESP_LOGW(TAG, "low battery: refusing to boot (%u%%, vbat=%u mV, vbus=%d), "
+                  "PMU power-off in %d ms",
+             (unsigned)(info->percent == 0xFF ? 0 : info->percent),
+             (unsigned)info->vbat_mv, (int)info->vbus_present,
+             BOOT_LOW_BAT_SHUTDOWN_MS);
+}
+
+/* 2. 未插入 SD 卡：提示 + failsafe 按钮组（重置歌曲位置 / 清除扫描数据），
       停在此屏。内容整体相对屏幕中心上移（基准偏移 -30），视觉居中偏上，
       给底部留白（460px 屏去掉标题与两按钮后仍不显拥挤） */
 static void boot_show_no_sd(void)
@@ -907,6 +969,18 @@ static void reset_position_btn_cb(lv_event_t *e)
      让 LVGL 停止渲染**（见 boot_scan_progress_cb 的持锁逻辑与 NPF_FONT.md §7.1）。 */
 void boot_flow_run(void)
 {
+    /* 0. 低电拒启（S31）：电量 < 2% 且未在充电 → 提示屏，停在此界面。
+          ⚠ 只认"电量计读数可用"的情况；PMU 读失败/未知时不拒启，
+            避免把机器误锁死在提示屏上。 */
+    battery_info_t binfo;
+    if (battery_read_info(&binfo) == ESP_OK
+            && binfo.available && binfo.percent != 0xFF
+            && binfo.percent < BOOT_LOW_BAT_PERCENT
+            && !binfo.vbus_present && !binfo.charging) {
+        boot_show_low_battery(&binfo);
+        return;
+    }
+
     /* 1. SD 卡检查：未挂载 → 无卡界面（failsafe 清除扫描数据） */
     if (!sd_card_is_mounted()) {
         ESP_LOGW(TAG, "SD card not mounted");

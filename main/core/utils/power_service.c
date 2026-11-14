@@ -7,6 +7,7 @@
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/deep_worker.h"
+#include "core/utils/fake_shutdown.h"
 #include "core/utils/task_psram.h"
 
 #include "esp_heap_caps.h"
@@ -45,10 +46,22 @@ static const char *TAG = "power_service";
 #define PM_CPU_FREQ_ON_MHZ  320
 #define PM_CPU_FREQ_OFF_MHZ 80
 
-/* S31 平台说明：S3 时代的"暂停超时自动伪关机"与"低电压自动伪关机"两条策略
-   都依赖 deepsleep 伪关机，已随平台迁移整段移除；S31 的关机已交给 AXP2101
-   （`fake_shutdown` 写 `0x10[0]=1` 真断电，由按键 / 睡眠定时器触发）。
-   本模块只保留**自动息屏 / 亮屏**与固定 CPU 频率，不再承担任何关机策略。 */
+/* 低电自动关机（S31，2026-11 接回）：电量 < 5% 且**未在充电**持续 60 秒 →
+   与上键长按同一条 PMU 真关机流程。
+   · 判据用 AXP2101 电量计百分比（battery_read_info 的融合值），与开机拒启
+     （boot_flow 的 2%）同一数据源，运行中阈值更保守；
+   · 充电中 / VBUS 在位时不累计，避免边充边用的低电量机器被误关机；
+   · 读数不可用（percent == 0xFF）或 PMU 未就绪时不动作（宁可不关，不误关）。 */
+#define LOW_BAT_SHUTDOWN_PERCENT  5
+#define LOW_BAT_SHUTDOWN_SEC      60
+
+/* 低电条件已持续的秒数：条件一旦断开立即清零（要求"持续"而非瞬时抖动） */
+static uint32_t s_low_bat_sec = 0;
+
+/* S31 平台说明：S3 的"息屏暂停超时自动关机"依赖 deepsleep 伪关机，已随平台
+   迁移移除；低电策略 2026-11 按 AXP2101 的电量百分比重新接回（见上方
+   LOW_BAT_* 常量，与开机拒启的 2% 同一数据源、阈值更保守）。
+   关机一律是 AXP2101 真断电（`fake_shutdown` 写 `0x10[0]=1`）。 */
 
 /* 息屏状态与状态切换互斥锁：screen_off/screen_on 可能来自不同任务（按键
    任务/守护任务），用互斥锁保护状态机与"固定频率、挂起/恢复 LVGL、改亮度"
@@ -95,12 +108,33 @@ static void power_service_touch_cb(bool pressed, uint16_t tx, uint16_t ty, void 
 static void power_service_task(void *arg)
 {
     (void)arg;
+    battery_info_t binfo;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SVC_CHECK_MS));
 
         /* 电池健康保护（4.0V 软件限充）：每秒检查一次，达到 4.0V 停充、
            降到 3.9V 恢复；保护关闭时几乎零开销（快速返回）。 */
         battery_health_protection_tick();
+
+        /* 低电自动关机：电量 < 5% 且未充电**持续** 60s → PMU 真关机。
+           条件一旦断开（插上充电器/电量回升/读数不可用）立即清零，
+           保证是"持续低电"才关，不被瞬时抖动误触发。
+           ⚠ 息屏播放中同样生效：电池过放比"夜里被关机"更不可接受。 */
+        const bool low = (battery_read_info(&binfo) == ESP_OK)
+                         && binfo.available && binfo.percent != 0xFF
+                         && binfo.percent < LOW_BAT_SHUTDOWN_PERCENT
+                         && !binfo.vbus_present && !binfo.charging;
+        if (low) {
+            s_low_bat_sec++;
+            if (s_low_bat_sec >= LOW_BAT_SHUTDOWN_SEC) {
+                ESP_LOGW(TAG, "battery %u%% and not charging for %u s, shutting down",
+                         (unsigned)binfo.percent, (unsigned)s_low_bat_sec);
+                s_low_bat_sec = 0;
+                fake_shutdown_enter();
+            }
+        } else {
+            s_low_bat_sec = 0;
+        }
 
         /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒）；被 hold_awake
            抑制时（网络对时/长流程）跳过，避免进度界面中途黑屏 */

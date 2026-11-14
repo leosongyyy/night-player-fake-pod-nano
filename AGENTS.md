@@ -19,7 +19,7 @@
 - 存储：**16MB Flash + 16MB Octal PSRAM（200MHz）**
 - 屏幕：**CO5300** AMOLED，**460x460**，QSPI（`esp_lcd_qspi_amoled` 通用驱动），窗口 X 偏移 10；**VCI_EN=GPIO44** 必须提前拉高
 - 触摸：**CST820**，I²C0（SDA48/SCL47/INT45/RST46）
-- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——**AXP2101 / PCF85063 驱动已接入**（电压/电量/充电状态/温度/电源键 IRQ、RTC 读时间/首次校时、**PMU 软关机（真关机）**、**开机原因（按键/插电）与插电开机的充电专用界面**、**电池健康保护（4.0V 软件限充）**；低电策略与 IMU 未接，见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 与 `ideas_and_exps/POWER_OPTIONS_AND_CHARGE_BOOT.md`）
+- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——**AXP2101 / PCF85063 驱动已接入**（电压/电量/充电状态/温度、电源键 IRQ、RTC 读时间/首次校时、**PMU 软关机（真关机）**、**开机原因（按键/插电）与插电开机的充电专用界面**、**电池健康保护（4.0V 软件限充）**、**低电保护按电量百分比**：开机 <2% 且未充电 → 提示 5 秒后 PMU 关机；使用中 <5% 且未充电持续 60 秒 → 自动关机；IMU 未接。见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 与 `ideas_and_exps/POWER_OPTIONS_AND_CHARGE_BOOT.md`）
 - 耳放芯片：CS43131，**I²C1**（SDA55/SCL54，0x30），I²S1（BCK52/WS51/DIN50，RST53），24.576MHz 板载晶振
 - SD：SDMMC 4-bit，CLK24/CMD25/D0 20/D1 21/D2 22/D3 23
 - 按键：**上键 = AXP2101 PWRON 电源键**（无主控 GPIO，经 GPIO49 中断维护按下/抬起状态）+ **下键 = GPIO61 独立按键**——`button_service` 统一生成"上/下键短按、长按、双键同时按下"五类事件，`key_handler` 恢复 S3 映射：亮屏上/下=音量±1、下键长按=音量-10、上键长按=关机、双键=息屏；息屏上键短按=播放/暂停、下键短按=下一曲、下键长按=上一曲、上键长按=关机、双键=亮屏
@@ -154,7 +154,7 @@ idfc help --all            # 全部命令与参数
 
 > 本项目目标：为成品开源播放器 **FakePodNano Pro**（ESP32-S31 + CO5300 AMOLED + CS43131 + 触摸；初代 S3 版见 `legacy_s3` 分支）开发**更好用、专注于音乐播放**的第三方固件，替代/改进原厂固件的使用体验。
 
-**项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、电池百分比显示、**双键按键映射与 PMU 软关机**均已实现（低电自动关机策略待接）。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
+**项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、电池百分比显示、**双键按键映射、PMU 软关机与低电保护（开机 <2% / 使用中 <5%·60s）**均已实现。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
 
 > 关于 `FUTURE_PLAN.md` 和 `DONE_PLAN.md`: 这两个文件主要存储较大型的需求和修复内容，以及其完成情况。日常小需求和调整无需记录在内。只有在 FUTURE_PLAN.md 中出现过的内容才可以移动到 DONE_PLAN.md 中。若在进行小需求时踩到了坑导致变成了大型研究，建议单开一个文件进行记录（例如 IRAM_DMA_AUDIT.md）
 
@@ -163,7 +163,7 @@ idfc help --all            # 全部命令与参数
 - 硬件层：AMOLED 显示（QSPI，CO5300 460×460 单款配置、窗口 X 偏移 10，**全黑启动防开机白屏闪烁**）、触摸（CST820，I²C0 0x15，原始 460×460 坐标 + ×29/30 校准，**异步初始化不阻塞开机**）、电池（**AXP2101**：真实电压 + E-Gauge 电量计 + 充放电状态，融合后显示百分比；S3 的分压 ADC 与电池日志已删除）、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
 - LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（16ms，即 `CONFIG_LV_DEF_REFR_PERIOD`；x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
-- 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）。⚠ S3 时代的"低电拒启（<3.45V）"分支已随平台迁移删除；AXP2101 的电压/电量数据已就绪，策略待接回。
+- 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → **低电拒启（电量 <2% 且未充电 → 显示「电量过低，请充电」5 秒后 PMU 关机，不停留）** → 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）。⚠ S3 的按电压（<3.45V）判据已随分压 ADC 删除，S31 改用电量百分比。
 - UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=当前时间 HH:MM（调音量时临时改显音量数值，停手 3 秒后回到时间）、中=当前页面名、右=电池百分比，≤20% 黄/≤10% 红/充电闪电图标；12/24 小时制在设置菜单 → 时间与日期 → 时间格式切换，12h 不显示上下午）、下拉控制中心（电量百分比/音量/时间、亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
 - **网络对时（2026-11）**：设置菜单 →「时间与日期」→「WiFi对时」读取 SD 卡 `/sdcard/.ecov/wifi.txt`（UTF-8：第 1 行 SSID、第 2 行密码、可选第 3 行 NTP 域名，默认 `ntp.aliyun.com`），WiFi STA 最多尝试 3 次、SNTP 最多 5 次，全屏进度 + 取消；成功后按 config_store 时区（默认 UTC+8）把 UTC 换算成本地时间写 PCF85063A。RTC 存本地墙钟时间，改时区会把 RTC 平移相同分钟数以保持绝对时刻。详见 **`ideas_and_exps/WIFI_TIME_SYNC.md`**。
 - 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：仅触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效；S3 的电池电压日志已删除）、全局 Toast 提示
@@ -250,7 +250,7 @@ main/
                                 #   开机自动开启判定 sleep_timer_boot_autostart_min：
                                 #   总是关闭 / 按时间段（RTC 小时落在 start~end，支持跨零点）/
                                 #   总是开启，三档与时间段存 config_store 的 sleepauto/slprange_*）
-      power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏
+      power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏 + 低电自动关机（<5%·60s）
       deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/关机深调用链唯一执行者
       task_psram.h/.c           # PSRAM 栈任务创建助手（task_create_psram_stack，失败自动回退内部 RAM）
   ui/                       # 应用 UI
@@ -264,7 +264,7 @@ main/
                             #   的功能（静音、对时结果…）都走这里
     clock_text.h/.c         # "HH:MM" 文本格式化（读 RTC + 12/24h，RTC 无效时 --:--）
     battery_indicator.h/.c  # 状态栏/控制中心共用的电池图标+百分比文本（充电/低电配色）
-    boot_flow.h/.c          # 开机流程控制器（未插卡/扫描/插电充电界面/进主界面；低电拒启策略待接 AXP2101）
+    boot_flow.h/.c          # 开机流程控制器（低电拒启/未插卡/扫描/插电充电界面/进主界面）
     main_ui.h/.c            # 主界面（四页滑动 tab：目录/歌曲/正在播放/播放设置）
     dir_list.h/.c           # 目录/歌单列表页（virtual_list，/sdcard 头部 + 行图标）
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
@@ -369,7 +369,7 @@ patches/
   - 🆕 **2026-11 S31 复测：路径B 默认关闭**（`CONFIG_UI_LVGL_PIN_HOT_OBJECTS=n`，对象全部走 PSRAM）。S31 上 `LVGL_INTERNAL_RESERVE`(40KB) 很早就触发，路径B 实际只钉得进 **20.8KB**（不是 S3 的 82.8KB），关掉后：内部 RAM 稳态 **147,175 → 167,707 B（+20.5KB）**、开机完成最大连续块 **31,744 → 86,016 B（+53KB）**；歌曲列表快速滚动 **24~36fps**，真机确认可接受。详见 `ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md`；`MEM:` 行现在末尾带 `fps=`（由 `lvgl_port_get_refr_count()` 统计，静止时 0 属正常）。
 - **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。**「写 flash 与 PSRAM 的关系」已做完整审计，见 `ideas_and_exps/FLASH_WRITE_VS_PSRAM.md`**——要点：① 写 flash 期间两颗核都被停住、只屏蔽"非 IRAM"中断，所以**不会**与 LVGL 渲染并发，被冻结的核恢复后数据完好；② 真正的两条硬约束是"PSRAM 栈任务不许直接写 flash"（有断言）与"IRAM ISR 不许碰任何 PSRAM 数据 / `lv_*` / 播放列表与字体 mmap"（**无断言，靠纪律**；LVGL 对象搬进 PSRAM 后这条从"不规范"升级为"必崩"）；③ 全项目 NVS 写入口唯一（`config_store.c`）、调用栈全在内部 RAM；PSRAM 栈任务的关缓存段全部委托 deep_worker；④ PSRAM 缓冲写 flash 由 `esp_flash_write` 的 32B 栈弹跳兜住（能用，但慢）。
 - 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 320MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
-- **自动关机策略：S31 迁移时已移除**（S3 时代的"息屏暂停超时 / 低电压持续 60s → 伪关机"依赖分压 ADC，代码已随平台迁移删除）。当前 `power_service` 只做"无操作自动息屏"；低电策略的**数据已就绪**（`battery_read_info()` 给电压/电量/充电状态），但**尚未接回** `power_service`/`boot_flow`，接回时优先用"电量 + 电压 AND"判据（见 `PMU_RTC_DRIVERS.md` §7）。
+- **低电保护（S31，按电量百分比，2026-11 接回）**：`boot_flow` 在开机流程最前面判「电量 < 2% 且未充电」→ 只显示「电量过低，请充电」，**5 秒后直接写 AXP2101 `0x10[0]=1` 断电**（不停在此屏、不走 fake_shutdown）；`power_service` 每秒判「电量 < 5% 且未充电**持续** 60 秒」→ `fake_shutdown_enter()` 真关机。两处都不在充电中 / VBUS 在位时触发，读数不可用（percent=0xFF）时不动作。S3 的"息屏暂停超时自动关机"**未接回**；S3 的按电压（<3.45V）判据随分压 ADC 删除。
 - 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep；关机走 PMU 软关机（真断电）。
 
 ### 关键技术要点与踩坑记录（务必遵守）
