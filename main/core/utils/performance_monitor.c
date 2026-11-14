@@ -1,4 +1,5 @@
 #include "performance_monitor.h"
+#include "core/ui/lvgl_port.h"
 #include "core/utils/task_psram.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -141,6 +142,10 @@ static void mem_monitor_task(void *pvParameters)
 
     size_t last_heap = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     size_t last_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* 帧率统计：LVGL 每次完成刷屏都会给 lvgl_port 的计数 +1，这里按采样间隔
+       取差值。静止时 LVGL 不刷新，fps=0 属正常；滚动/动画时才是有意义的读数。 */
+    uint32_t last_refr_cnt = lvgl_port_get_refr_count();
+    int64_t  last_refr_us  = esp_timer_get_time();
     uint32_t loop_cnt = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(MEM_MONITOR_INTERVAL_MS));
@@ -157,11 +162,22 @@ static void mem_monitor_task(void *pvParameters)
            用于验证"息屏降频生效"。 */
         int cpu_mhz = esp_clk_cpu_freq() / 1000000;
 
-        ESP_LOGI("MEM", "heap=%u (%c%u)  iram=%u (%c%u)  cpu0=%u%% cpu1=%u%%  freq=%dMHz(idle:%dMHz)",
+        /* 帧率 = 本次间隔内完成的刷新帧数 / 间隔时长（无符号差值，回绕安全） */
+        const uint32_t refr_now = lvgl_port_get_refr_count();
+        const int64_t  now_us   = esp_timer_get_time();
+        uint32_t fps = 0;
+        if (now_us > last_refr_us) {
+            fps = (uint32_t)(((uint64_t)(uint32_t)(refr_now - last_refr_cnt) * 1000000ULL) /
+                             (uint64_t)(now_us - last_refr_us));
+        }
+        last_refr_cnt = refr_now;
+        last_refr_us  = now_us;
+
+        ESP_LOGI("MEM", "heap=%u (%c%u)  iram=%u (%c%u)  cpu0=%u%% cpu1=%u%%  freq=%dMHz(idle:%dMHz)  fps=%u",
                  (unsigned)heap_now, hd >= 0 ? '+' : '-', (unsigned)(hd >= 0 ? hd : -hd),
                  (unsigned)internal_now, id >= 0 ? '+' : '-', (unsigned)(id >= 0 ? id : -id),
                  (unsigned)s_core0_usage, (unsigned)s_core1_usage, cpu_mhz,
-                 (int)s_freq_isr_mhz);
+                 (int)s_freq_isr_mhz, (unsigned)fps);
 
         last_heap = heap_now;
         last_internal = internal_now;

@@ -124,6 +124,16 @@ void lvgl_port_suspend(void);
  */
 void lvgl_port_resume(void);
 
+/**
+ * @brief 获取累计屏幕刷新帧数（LVGL 的 LV_EVENT_REFR_READY 次数）
+ *
+ * 供串口性能监视换算帧率：相邻两次采样的差值 ÷ 时间 = fps。
+ * 只统计"真的发生刷新"的帧，界面静止时计数不增长（fps 为 0 属正常）。
+ *
+ * @return 累计刷新帧数（uint32，约 49 天回绕；调用方按无符号差值计算即可）
+ */
+uint32_t lvgl_port_get_refr_count(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -20,6 +20,9 @@
 1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件 155 → 89、编译单元 1665 → 1235（−25.8%），wifi / bt / lwip / wpa_supplicant / http / OTA / protocomm / openthread / unity / cmock 全部不再编译。
 2. 关闭 `MBEDTLS_CERTIFICATE_BUNDLE` 与 `MBEDTLS_PKCS7_C`（本项目不做任何网络/TLS）。
 
+### 性能与内存
+1. LVGL 对象（含目录/歌曲两个滚动列表页）全部放回 PSRAM：内部 RAM 稳态 +20.5KB（143.7→163.8KB）、开机完成最大连续块 31.7KB→86KB，为后续接入 WiFi/BT 留出余量；列表快速滚动 24~36fps。串口 `MEM:` 行同时新增 `fps=` 读数，方便以后做 UI 性能对比。
+
 ### 更新方式
 用 `tools/make_full_firmware.py` 生成全量固件后烧到 0x0，或分别刷固件 + 字体分区。**本次必须重刷字体分区**（font 分区起点从 0x800000 改到 0x600000）。
 

@@ -3,6 +3,11 @@
  * @brief LVGL 9 自定义内存分配器（core/ui/lvgl_mem.c）的对外接口
  *
  * 目前只暴露一个东西：**"热点对象优先内部 RAM"的窗口开关**。
+ *
+ * ⚠ 该开关的实现受 Kconfig `CONFIG_UI_LVGL_PIN_HOT_OBJECTS` 控制，**2026-11 起
+ *   默认关闭**（S31 要把内部 RAM 留给 WiFi/BT）：关闭时本函数是空操作，调用点
+ *   保持原样即可，所有 LVGL 对象（含滚动列表页）都分配在 PSRAM。
+ *   实测对比见 ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md。
  */
 
 #ifndef CORE_UI_LVGL_MEM_H
@@ -35,6 +40,9 @@ extern "C" {
  * 分配会自动回退 PSRAM —— 功能不受影响，只是那部分对象不享受加速。
  *
  * ⚠ 未启用 CONFIG_LV_USE_CUSTOM_MALLOC（LVGL 用自带分配器）时本函数是空操作。
+ * ⚠ 未启用 CONFIG_UI_LVGL_PIN_HOT_OBJECTS（2026-11 起的默认）时本函数也是空操作，
+ *   上面的 21fps / 11fps 是 ESP32-S3 时代的数据，S31 的复测见
+ *   ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md。
  */
 void lvgl_mem_set_internal_prefer(bool on);
 

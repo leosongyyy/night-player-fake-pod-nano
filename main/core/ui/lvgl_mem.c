@@ -88,6 +88,13 @@ static bool s_fallback_logged = false;
 
 /* ---------------------------------------------------------------------------
    【路径B：热点对象优先内部 RAM】
+   ⚠ 本路径由 Kconfig `CONFIG_UI_LVGL_PIN_HOT_OBJECTS` 控制，**2026-11 起默认关闭**：
+     S31 要接 WiFi/BT，内部 RAM 优先留给无线协议栈；关闭时下面的窗口/统计/安全阀
+     整段不参与编译，`lvgl_mem_set_internal_prefer()` 退化为空函数，所有 LVGL
+     对象（含两个滚动列表页）一律走 PSRAM。实测对比见
+     ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md。
+   下面保留 S3 时代的原始结论（供需要重新打开时参考）：
+
    实测（列表快速滚动，见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §12）：
      · LVGL 对象在内部 RAM → 21 fps
      · LVGL 对象在 PSRAM   → 11 fps
@@ -100,6 +107,8 @@ static bool s_fallback_logged = false;
      也要求空闲量高于 LVGL_INTERNAL_RESERVE 才敢用内部 RAM，不够就自动回退 PSRAM
      （功能不受影响，只是那部分对象不享受加速）。
    --------------------------------------------------------------------------- */
+#if CONFIG_UI_LVGL_PIN_HOT_OBJECTS
+
 #define LVGL_INTERNAL_RESERVE   (40 * 1024)   /* 窗口内 malloc 的保留底线（按申请字节算） */
 /* ⚠ 上面这条保留线是按"申请 size 之和"卡的，而每笔分配还有 ~16B 的堆元数据/对齐
    开销，且 lv_realloc_core 的"继续留在内部 RAM"路径并不受它约束 —— 实测把整个
@@ -117,12 +126,15 @@ static size_t  s_internal_prefer_used  = 0;      /* 本窗口已钉到内部 RAM
    "启动后 2 秒内一律不打印"，而行槽恰好在 ~1.3s 创建，统计会被吞掉（实测踩过）。 */
 static int64_t s_last_pin_log_us       = -2000000;
 
+#endif /* CONFIG_UI_LVGL_PIN_HOT_OBJECTS */
+
 static void *lvgl_mem_alloc(size_t size)
 {
     if (size == 0) {
         return NULL;
     }
 
+#if CONFIG_UI_LVGL_PIN_HOT_OBJECTS
     /* 【路径B】热点对象窗口内：优先内部 RAM（但留足 LVGL_INTERNAL_RESERVE，
        不够就往下走 PSRAM，绝不把内部 RAM 吃穿） */
     if (s_internal_prefer_depth > 0 &&
@@ -134,6 +146,7 @@ static void *lvgl_mem_alloc(size_t size)
             return pinned;
         }
     }
+#endif /* CONFIG_UI_LVGL_PIN_HOT_OBJECTS */
 
     void *p = lvgl_mem_aligned_alloc(size, LVGL_MEM_PREFER);
     if (p == NULL) {
@@ -198,6 +211,7 @@ void *lv_realloc_core(void *p, size_t new_size)
         return NULL;
     }
 
+#if CONFIG_UI_LVGL_PIN_HOT_OBJECTS
     /* 【路径B】原指针若已被钉在内部 RAM（热点窗口内分配的），优先让它继续留在
        内部 RAM：否则 heap_caps_realloc 会因为 caps 不匹配而 malloc+memcpy+free，
        把对象"赶"回 PSRAM，钉住就白做了（文本缓冲每次改文本都会走 realloc，
@@ -213,6 +227,7 @@ void *lv_realloc_core(void *p, size_t new_size)
             return np;
         }
     }
+#endif /* CONFIG_UI_LVGL_PIN_HOT_OBJECTS */
 
     void *np = lvgl_mem_aligned_realloc(p, new_size, LVGL_MEM_PREFER);
     if (np == NULL) {
@@ -266,6 +281,13 @@ lv_result_t lv_mem_test_core(void)
    --------------------------------------------------------------------------- */
 void lvgl_mem_set_internal_prefer(bool on)
 {
+#if !CONFIG_UI_LVGL_PIN_HOT_OBJECTS
+    /* 路径B 编译期关闭：窗口内分配仍走 PSRAM（16MB），调用点无需改动。
+       保留本函数是为了让业务代码（main_ui / virtual_list）不必到处加 #if，
+       也方便以后把 Kconfig 开关一改就恢复"钉内部 RAM"的老方案。 */
+    LV_UNUSED(on);
+    return;
+#else
     if (on) {
         if (s_internal_prefer_depth++ == 0) {
             s_internal_prefer_used = 0;   /* 只有最外层进入时才复位统计 */
@@ -289,6 +311,7 @@ void lvgl_mem_set_internal_prefer(bool on)
                  (unsigned)s_internal_prefer_used,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
+#endif /* CONFIG_UI_LVGL_PIN_HOT_OBJECTS */
 }
 
 #else  /* LV_USE_STDLIB_MALLOC != LV_STDLIB_CUSTOM：LVGL 用自带分配器，本开关无效 */

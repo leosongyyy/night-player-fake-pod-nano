@@ -112,6 +112,11 @@ CONFIG_WS_TRANSPORT=n
 # 即 LVGL 对象堆的峰值需求 ≥105KB（若要留安全余量得 ~150KB），本项目内部 RAM
 # 无论如何都装不下，CUSTOM + PSRAM 是唯一可行方案。
 CONFIG_LV_USE_CUSTOM_MALLOC=y
+# 对象放哪：2026-11 起**全部走 PSRAM**。S3 时代曾在两个滚动列表页创建期间把
+# 热点对象钉回内部 RAM（路径B，省 1 帧差 10fps），但 S31 上该方案只钉得进约
+# 20.5KB（40KB 保留线提前触发），关掉后内部 RAM 稳态 +20.5KB、最大连续块
+# 31.7KB→86KB，列表快速滚动 24~36fps，真机确认可接受，故 Kconfig 开关
+# CONFIG_UI_LVGL_PIN_HOT_OBJECTS 默认 n。实测见 IRAM_OBJECTS_PSRAM_S31.md。
 # 字符串函数：用标准 C 的 memcpy/memset（对应 v8 的 LV_MEMCPY_MEMSET_STD=y）
 CONFIG_LV_USE_CLIB_STRING=y
 # 刷新周期：v9 显示刷新与输入设备轮询共用这一个周期（原先两个 33ms）

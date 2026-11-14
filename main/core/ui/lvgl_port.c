@@ -30,6 +30,25 @@ static lv_indev_t *s_indev = NULL;    /* 触摸输入设备对象（供 LVGL 控
 static uint8_t *s_draw_buf1 = NULL;   /* 绘制缓冲 1（DMA，见 EXAMPLE_LVGL_BUF_HEIGHT） */
 static uint8_t *s_draw_buf2 = NULL;   /* 绘制缓冲 2（DMA，双缓冲） */
 
+/* 刷新帧计数：LVGL 每完成一次屏幕刷新（LV_EVENT_REFR_READY）加一。
+   用途：LVGL 自带的 FPS 监视器只把数字画在屏幕角落，串口看不到；真机抓
+   "滚动时多少帧"、给对象放内部 RAM / PSRAM 做 A/B 时需要从串口读，
+   由 performance_monitor 每 2s 取一次差值换算 fps=。
+   ⚠ 只统计"真的发生刷新"的帧，静止时计数不增长 → fps 显示 0，属正常。 */
+static volatile uint32_t s_refr_cnt = 0;
+
+static void lvgl_refr_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_REFR_READY) {
+        s_refr_cnt++;
+    }
+}
+
+uint32_t lvgl_port_get_refr_count(void)
+{
+    return s_refr_cnt;
+}
+
 /* 触摸句柄（触摸异步初始化，就绪前为 NULL）：由触摸初始化完成回调
    （lvgl_port_set_touch_handle）写入，read_cb 读取；就绪前不给触摸数据 */
 static esp_lcd_touch_handle_t s_touch_handle = NULL;
@@ -421,6 +440,8 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     lv_display_set_user_data(s_disp, panel_handle);
     /* 重绘区域对齐：v8 的 disp_drv.rounder_cb 在 v9 里改为显示事件 */
     lv_display_add_event_cb(s_disp, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+    /* 刷新帧计数（供串口性能监视换算 fps，见 s_refr_cnt 注释） */
+    lv_display_add_event_cb(s_disp, lvgl_refr_event_cb, LV_EVENT_REFR_READY, NULL);
 
     /* PPA 混合加速（CONFIG_UI_PPA_ACCEL）：注册自定义 SW blend handler。
        必须在显示对象与绘制缓冲就绪之后、LVGL 任务开始渲染之前调用。

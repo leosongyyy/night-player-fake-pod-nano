@@ -117,6 +117,26 @@ menu "FakePodNanoNightPlayer 应用配置"
             CPU 填充 / PPA 填充 / CPU 混合（不透明、半透明）/ PPA 混合的
             计时对比并打印。仅用于确定 UI_PPA_BLEND_MIN_PX，正式固件关闭。
 
+    config UI_LVGL_PIN_HOT_OBJECTS
+        bool "把滚动列表的热点 LVGL 对象钉在内部 RAM（路径B）"
+        default n
+        help
+            开启：创建两个滚动列表页（目录/播放列表）的 LVGL 对象时打开
+            lvgl_mem 的"热点对象窗口"，把这些对象及其文本缓冲钉在内部 RAM
+            （core/ui/lvgl_mem.c 的路径B）。ESP32-S3 时代（LVGL 9.4 + 240MHz、
+            对象堆约 88KB 而 D 缓存仅 32KB）实测列表快速滚动 21fps vs 11fps，
+            所以当时默认开启。
+            关闭：窗口内所有分配仍然走 PSRAM（16MB，充裕），内部 RAM 只留给
+            DMA 绘制缓冲、驱动 DMA 与实时任务栈。
+            2026-11 迁到 ESP32-S31（320MHz）后重新评估：内部 RAM 比 S3 时代宽裕，
+            而 S31 后续要接 WiFi/BT（两者都要吃内部 RAM/IRAM），因此默认关闭。
+            真机实测（同一份 debug 构建）：
+              · 内部 RAM 稳态 147,175 B → 167,707 B（+20.5KB）；
+                开机完成最大连续块 31,744 B → 86,016 B（+53KB）；
+              · 歌曲列表快速滚动 24~36fps，用户确认可接受。
+            完整数据与复现方法见 ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md。
+            若以后真机觉得列表滚动不可接受，把本项改回 y 即可恢复（无需改代码）。
+
     config HW_SELFTEST
         bool "硬件自检（AXP2101 / PCF85063A 驱动，串口打印 PASS/FAIL）"
         default y

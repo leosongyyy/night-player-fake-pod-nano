@@ -166,6 +166,10 @@ void main_ui_create(void)
 
     /* 四个页面。
        【路径B】只把两个**滚动列表页**（目录 / 播放列表）的对象钉在内部 RAM：
+       ⚠ 2026-11 起 `CONFIG_UI_LVGL_PIN_HOT_OBJECTS` 默认 **n**（S31 要把内部 RAM
+        留给 WiFi/BT），下面两个窗口调用保留但 `lvgl_mem_set_internal_prefer()`
+        是空操作，两页对象全部走 PSRAM。实测见 IRAM_OBJECTS_PSRAM_S31.md。
+       恢复老方案只需把该 Kconfig 改回 y，不要在这里加 #if。
        它们是唯一在滚动时被反复访问的工作集（对象放内部 RAM 21fps vs PSRAM 11fps，
        见 ideas_and_exps/IRAM_AUDIT_LVGL9.md §12）。实测把整个 UI 都钉上并不会更快
        —— 钉住量从 77KB 加到 106KB、帧率毫无变化（§13.3）—— 却要多吃掉约 30KB
