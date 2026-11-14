@@ -42,7 +42,7 @@
 
 **3. 参考资料**
 
-- `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动、**esp-dsp 1.4.12（vendored，蓝牙重采样用，CMakeLists 已裁剪为只编 ANSI dotprod）**、**spi_flash（IDF 组件 fork，带 S31 分支预测补丁，见下方构建配置）**）。~~i2c_bsp~~ 已于 2026-11 迁移 IDF 6.1 时删除（全工程零引用的死代码）
+- `components/`：本地组件（esp_lcd_qspi_amoled AMOLED 驱动、esp_lcd_touch_cst816/820/chsc6417 触摸驱动、**spi_flash（IDF 组件 fork，带 S31 分支预测补丁，见下方构建配置）**）。~~i2c_bsp~~ 已于 2026-11 迁移 IDF 6.1 时删除（全工程零引用的死代码）。**蓝牙重采样用的 esp-dsp 从 2026-11-14 起改为托管组件**（`espressif/esp-dsp` 1.8.2，见 `main/idf_component.yml`，解包在 gitignore 的 `managed_components/`），仓库里不再 vendored 那 315 个文件
 - `patches/`：**构建期补丁文件**（托管组件用，当前两组：`lvgl_fast_mem_decl/`、`esp_lcd_touch_deps/`，见上方 IDF 6.1 条目）
 - `managed_components/`：ESP 组件管理器拉取的依赖（lvgl、esp_lcd_touch、esp_jpeg、cmake_utilities、chmorgan__esp-libhelix-mp3）。⚠ `esp_lcd_sh8601` 已于 2026-11 从 `main/idf_component.yml` 删除（本项目显示驱动是本地组件 `esp_lcd_qspi_amoled`，零代码引用它）
 - `IDFC_USAGE.md`（`ideas_and_exps/`）：idfc.exe 的完整使用说明（新版子命令用法、多配置构建原理与历史事故、退出码、常见问题排查）

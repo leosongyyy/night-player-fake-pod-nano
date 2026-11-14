@@ -34,7 +34,7 @@
 7. **反复点蓝牙/切设备后出现两个 MP3 同时解码、混着播放**：`mp3_player_play()` 在 `play_task` 已创建但还没解码出第一帧的窗口里，`s_state` 仍是 IDLE，第二次 play 会再建一个 `mp3_play` 任务。现加 `s_starting` 启动窗口标志 + `s_play_mux` 串行化入口，第二个 play 会等第一个进入 PLAYING/退出后再正常切歌，不再叠加解码任务。
 
 ### 构建
-1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件从 155 个裁剪到约 90 个，http / OTA / protocomm / openthread / unity / cmock 不再编译。2026-11-14 为「WiFi 对时」重新加入 **esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant**，为「经典蓝牙音频」加入 **bt** 与本地 vendored 的 **esp-dsp**（只编译 ANSI dotprod 一个源文件），固件约 3.0MB、factory 分区余量约 51%。WiFi 只用于一次性对时，库代码从 IRAM 挪回 Flash、收发缓冲缩减以省内部 RAM（详见 `ideas_and_exps/WIFI_TIME_SYNC.md`）。
+1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件从 155 个裁剪到约 90 个，http / OTA / protocomm / openthread / unity / cmock 不再编译。2026-11-14 为「WiFi 对时」重新加入 **esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant**，为「经典蓝牙音频」加入 **bt** 与 **esp-dsp**（2026-11-14 起由 vendored 1.4.12 改为托管组件 `espressif/esp-dsp` 1.8.2，仓库因此少 315 个文件；实测 S31 上可完整编译），固件约 3.0MB、factory 分区余量约 51%。WiFi 只用于一次性对时，库代码从 IRAM 挪回 Flash、收发缓冲缩减以省内部 RAM（详见 `ideas_and_exps/WIFI_TIME_SYNC.md`）。
 2. 关闭 `MBEDTLS_CERTIFICATE_BUNDLE` 与 `MBEDTLS_PKCS7_C`（本项目不做任何网络/TLS）。
 3. 按 `DONE_PLANS.md` #52 移除硬件自检/调试代码：删除 `hw_selftest.c/.h`、`CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT` 及 CMake/main/性能监视里的相关条目；debug 开机不再打印 `HWST summary`。`DONE_PLANS.md` #51（虚拟列表滚动性能）同时标记为**暂不实现**（S3 有旧版 IRAM 兜底、S31 性能已足够）。
 

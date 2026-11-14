@@ -19,6 +19,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 0.5.3
+  espressif/esp-dsp:
+    component_hash: ed9ac175b14e0414399a2b33c525579414b5bad19a2a67b12ea212def96f9a98
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.2
   espressif/esp_jpeg:
     component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
     dependencies:
@@ -53,10 +63,11 @@ dependencies:
 direct_dependencies:
 - chmorgan/esp-libhelix-mp3
 - espressif/cmake_utilities
+- espressif/esp-dsp
 - espressif/esp_jpeg
 - espressif/esp_lcd_touch
 - idf
 - lvgl/lvgl
-manifest_hash: 73a6a01bbdcc88d5b0b577653e5b83533695c95a0d667cfc8068771edd5126e1
+manifest_hash: 69609cb49ad56a9cd6196a046b09e1f81a3402e0806b48594786b22d3808c1ff
 target: esp32s31
 version: 3.0.0

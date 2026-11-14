@@ -11,7 +11,7 @@
 | 需求 | 实现 |
 |---|---|
 | 经典蓝牙音频，SBC | A2DP Source + Bluedroid **内部 SBC 编码器**（`BT_A2DP_USE_EXTERNAL_CODEC=n`），应用只喂 PCM |
-| 输出重采样到蓝牙格式（esp-dsp） | `resampler.c`：多相窗函数 sinc（Blackman），每个输出样本用 `dsps_dotprod_f32()`（esp-dsp 1.4.12，S31 上为 ANSI C） |
+| 输出重采样到蓝牙格式（esp-dsp） | `resampler.c`：多相窗函数 sinc（Blackman），每个输出样本用 `dsps_dotprod_f32()`（esp-dsp 1.8.2，托管组件；S31 上为 ANSI C） |
 | **EQ 放在重采样之后** | `bt_audio.c`：解码 int16 → 重采样到蓝牙 fs → EQ（系数按蓝牙 fs）→ 回放增益/软件音量 → int16 ringbuf → 协议栈 SBC |
 | 最多 5 个设备，设备音量/EQ 独立、优先于配置文件 | `bt_store`（NVS namespace `btdev`，`d0..d4` 五个 key）；连接时 `audio_bt_profile_enter()` 应用设备音量/EQ，断开时 `audio_bt_profile_leave()` 恢复配置槽位 |
 | 绝对音量支持/不支持 | 支持：AVRCP CT `SetAbsoluteVolume`（0~127），本机软件增益 1.0；不支持：本机软件衰减（**线性 1/30..1.0**）。耳机侧调音量经 `ESP_AVRC_RN_VOLUME_CHANGE` 同步回档位并写回设备 |
@@ -132,15 +132,23 @@ BT 控制器 + Bluedroid 常驻会吃掉约 **13KB 内部 DMA 池**。首版直�
 > ⚠ 如果改回 `V_RES/10` 或重新打开 LVGL FAST_MEM，BT 控制器初始化会再次因内部
 > 连续池不足失败（`orca_ems_env_init malloc pool failed`，随后在 BT 库内 panic）。
 
-## 5. esp-dsp 的来源与裁剪
+## 5. esp-dsp 的来源
 
-- 机器可能离线，仓库**直接 vendored** `components/esp-dsp/`（1.4.12，Apache-2.0，
-  只保留 `CMakeLists/Kconfig/LICENSE/README/CHANGELOG/modules`）。
-- S31 是 **RISC-V** 目标，上游把 Xtensa `.S` 无条件列进 SRCS；本项目只用
-  `dsps_dotprod_f32`，因此在 `components/esp-dsp/CMakeLists.txt` 里用
-  `list(FILTER srcs INCLUDE REGEX "modules/dotprod/float/dsps_dotprod_f32_ansi\\.c$")`
-  只编译 ANSI 版点积（也避开 kalman 等模块在新 C++ 工具链下的编译错误）。
-- 升级 esp-dsp 时请保留这段过滤。
+- **2026-11-14 起改为托管组件**：`main/idf_component.yml` 里
+  `espressif/esp-dsp: "1.8.2"`（Apache-2.0），解包到 gitignore 的
+  `managed_components/espressif__esp-dsp/`，**仓库里不再 vendored 那 315 个文件**
+  （版本与 hash 由 `dependencies.lock` 钉住）。
+- 之前是 vendored 1.4.12 + 在 `components/esp-dsp/CMakeLists.txt` 里用
+  `list(FILTER srcs ...)` 只编 ANSI 点积——因为 1.4.12 把 Xtensa `.S`
+  **无条件**列进 SRCS，RISC-V 工具链编不过。1.8.2 已按目标条件化，实测在
+  S31 上能**完整编译**（174 个编译单元，其中 91 个 `.S` 在源文件内部被
+  条件编译掉；S31 的 Kconfig 把实现选成 ANSI C）。
+- ⚠ 想恢复"只编一个文件"需要在**组件配置之前**改托管组件的 CMakeLists，
+  而 `patches/` 机制是在 `main/CMakeLists.txt`（配置阶段末尾）回写——
+  实测对源文件有效、对组件 CMakeLists **无效**（回写后不会重新配置，
+  规则仍是旧的），所以当前接受完整编译。若将来构建时间敏感，可改回
+  本地组件（只留 ANSI 点积）或写个"配置前"补丁钩子。
+- 只用到一个函数：`dsps_dotprod_f32()`（`resampler.c` 的多相 FIR 点积）。
 
 ## 6. 安静模式（蓝牙伪关机）
 
@@ -206,19 +214,53 @@ BT 控制器 + Bluedroid 常驻会吃掉约 **13KB 内部 DMA 池**。首版直�
 - 多设备切换（连接 A 时点 B 的提示、删除当前连接设备）；
 - 配置槽位切换与蓝牙连接并存时的音量/EQ 交接。
 
-**已知兼容性问题：ZYFDroid_EarFun（apt-X 优先）**
+**已知兼容性问题：ZYFDroid_EarFun（骁龙畅听芯片，被连时只宣告非 SBC 的单 SEP）**
 
-- 现象：host 主动连接（点击设备）时 ACL 能建起来，但控制器报
-  `OLM_LMP: acl lmp unpack failed, err:262 / opcode:54`
-  （LMP_page_scan_mode_req），随后 `BTA_AV_OPEN_EVT::FAILED status: 3`
-  （BTA_AV_FAIL_STREAM），耳机“连接成功”提示音后立刻“断开”提示音。
-  耳机自己 page 过来（重新打开耳机仓/回连）则一切正常。
-- 已排除：手机同时连接（多设备抢占）、删除后重新配对、host 连接期间关闭
-  page scan、重启蓝牙协议栈。ROSE/Ctyx/Sleep A30 的 host 主动连接均正常。
-- 线索：该耳机优先 apt-X；S31 用的是 Orca BR/EDR 控制器，失败点在
-  ACL/LMP 阶段（早于 A2DP codec 协商），应用层无法改 LMP 行为。
-- 当前只能让耳机主动回连（开仓/关机再开）；如需点击连接，需要耳机侧
-  关闭 apt-X 优先/升级固件，或由 Espressif 修 Orca 控制器对该 LMP PDU 的解析。
+- 现象：host 主动连接（点击设备）时 ACL 能建起来，耳机响"连接成功"后立刻
+  "断开"，随后 `BTA_AV_OPEN_EVT::FAILED status: 3`（`BTA_AV_FAIL_STREAM`）；
+  耳机自己 page 过来（开仓/回连）则一切正常（SBC 44.1k，`miss 0.000%`）。
+- **根因（2026-11 实测 + 反汇编确认，与 LMP、L2CAP 都无关）**：
+  1. 控制器日志 `OLM_LMP: acl lmp unpack failed, err:262 / opcode:54` 是**无害噪声**。
+     `opcode:54` 是十进制 → 0x36 = `LMP_page_scan_mode_req`（旧 paging scheme 协商
+     PDU）。Orca 控制器的 LMP 描述符表（`libbredr_app.a` 里 `s_olm_lmp_core_tbl`
+     46 条 + 7 张扩展表）**没有注册 53/54**，`err:262`(0x106) 在 `r_orca_lmp_unpack`
+     里就是"查表无此 opcode 描述符"（260=长度不匹配）；控制器随后按协议回
+     `LMP_not_accepted(opcode=54, err=0x1A)`，链路照常建立。
+  2. SDP 成功（`BT_A2D: a2d_sdp_cback status: 0`），AVDTP 的 L2CAP 连接也成功
+     （`BT_AVDT: avdt_l2c_connect_cfm_cback lcid: 65, result: 0`，`peer_mtu: 895`），
+     DISCOVER / GET_ALL_CAPABILITIES 都正常收发。
+  3. 失败点是**编码能力协商**：耳机 DISCOVER **只返回 1 个 sink SEP**
+     （`num_seps:1 num_snk:1`，`in_use 0`），codec 就是它 App 里当前选中的那个：
+     | 耳机 App 设置 | SEP seid | `codec_type` | 含义 |
+     |---|---|---|---|
+     | aptX 开（默认） | 8 | `255` (0xFF) | 非 A2DP 厂商编码（aptX 类），`elem=7 elem_len:9` |
+     | aptX 关 | 6 | `2` | AAC (MPEG-2/4)，仍不是 SBC |
+     本机 A2DP source 只有 SBC 能力 → `bta_av_co_audio_peer_supports_codec` 失败 →
+     `bta_av_open_failed` → 主动关 AVDTP。**该耳机从不把 SBC 的 SEP 摆出来，而
+     EarFun App 里也没有"纯 SBC"选项（只有 aptX / 关掉 aptX 后的 AAC）。**
+  4. 它作为 initiator（自己连过来）时会直接发 SET_CONFIGURATION 用 **SBC**
+     （`elem=7 elem_len:6` → `A2DP audio cfg: SBC ... 44100 Hz`），所以回连路径一直好。
+     **即"被连"和"主动连"两种角色对外宣称的 SEP 不对称。**
+- 试过但无效的办法：
+  - **只建 ACL 等它自己发起 AVDTP**（借 `esp_bt_gap_get_remote_services()` 的 SDP 查询
+    把 ACL 拉起来，不调 `esp_a2d_source_connect`）：耳机毫无反应，不会自发 AVDTP。
+  - 用 SDP 提前告知本机只支持 SBC：Bluedroid 的 A2DP Source SDP 记录里本来就没有
+    codec 能力列表（只有 service class / 协议 / A2DP 版本 / Supported Features），
+    而且这副耳机明显不读对端 SDP —— 我们只有 SBC，它照样只报 aptX/AAC。A2DP 也
+    没有"连接前协商编码"的阶段，第一个报文就是 AVDTP DISCOVER。
+  - 耳机芯片是 Qualcomm 骁龙畅听（Snapdragon Sound），aptX Adaptive / AAC 优先，
+    单 SEP 设计对手机（都支持 AAC）没问题，SBC-only 的 source 才是异类。
+- 结论：应用层无解（不是 LMP/时序/安全层问题，是耳机单方面的能力宣告）。
+  现状只能让耳机主动回连（开仓/关机再开）。若将来要兜底 UX，可在
+  `BTA_AV_OPEN_EVT::FAILED`/`FAIL_STREAM` 时给个 toast："该耳机不支持主机主动连接，
+  请打开耳机仓让它自动回连"。
+- 唯一未尝试的"强制 SBC"路线：fork `components/bt`（host），改
+  `bta_av_getcap_results` / `bta_av_co_audio_peer_supports_codec` 绕过 codec 过滤，
+  强行对它的 AAC/aptX SEID 发 SET_CONFIGURATION(SBC)。预期会被对端以
+  `AVDTP_ERR_UNSUP_CFG` 拒绝（SEP 是 codec 专属的），且代价是 89MB 组件入库 +
+  CMake/补丁 + 回滚，收益不确定，**评估后放弃**。
+
+
 
 建议回归顺序：配对 → 连接 → 播放（确认 `A2DP audio cfg` 的实际采样率）→
 音量键/控制中心调音量（有/无绝对音量各一副）→ 暂停/恢复 → 断开自动回 DAC →

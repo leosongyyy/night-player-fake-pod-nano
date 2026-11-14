@@ -153,6 +153,13 @@ idf_component_register(
 # ⚠ 内层文件清单用**逗号**分隔，不能用分号：CMake 的 list 语义里分号就是分隔符，
 #   无论怎么转义，外层 foreach 展开时都会被拆开（这里踩过一次：文件清单被拆成
 #   独立元素，list(GET ... 2) 取不到东西）。故此处用 "|" 分层、"," 分文件。
+#
+# ⚠ 局限：本机制只对**源文件**可靠（配置阶段回写、编译阶段读取，先后无所谓）。
+#   **不能**用来自动改某个托管组件自己的 CMakeLists.txt——组件的 CMakeLists 是在
+#   它被配置时读的，而 main 的 CMake 在它之后才执行（实测：esp-dsp 想在 CMakeLists
+#   里做 SRCS 过滤，回写成功但当次/后续构建都不会重新配置，规则始终是旧的）。
+#   需要改托管组件的构建脚本时，只能改它在 idf_component.yml 里的版本，或改用
+#   本项目自己的组件（参见 ideas_and_exps/BLUETOOTH_AUDIO.md 里 esp-dsp 的说明）。
 set(_patch_sets
     "lvgl_fast_mem_decl|managed_components/lvgl__lvgl|src/misc/lv_color.h,src/misc/lv_color_op.h,src/misc/lv_math.h"
     "esp_lcd_touch_deps|managed_components/espressif__esp_lcd_touch|CMakeLists.txt")
