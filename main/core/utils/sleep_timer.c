@@ -5,6 +5,7 @@
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/utils/power_service.h"
+#include "core/utils/fake_shutdown.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -12,8 +13,9 @@
 
 static const char *TAG = "sleep_timer";
 
-/* 任务参数：Core1 低优先级后台任务。到点执行「暂停播放 + 息屏」（不关机；
-   真正的定时关机要等 AXP2101 关机策略接回），放独立任务里不影响 LVGL/UI 线程。500ms 周期兼顾到期精度
+/* 任务参数：Core1 低优先级后台任务。到点执行「音量渐降 → 交给 fake_shutdown
+   走 AXP2101 真关机」（S31 没有 deepsleep 伪关机；关机链由 deep_worker 内部栈
+   执行，本任务只做浅投递），放独立任务里不影响 LVGL/UI 线程。500ms 周期兼顾到期精度
    与音量渐降步进（30s 内约 60 次更新，每步约降 1 档）。
    ⚠ 栈需 4096：渐降要直接调 audio_set_volume_level() 走旧版 I2C 驱动写
    CS43131（互斥锁 + 中断路径栈开销大），2048B 曾栈溢出（vApplication
@@ -57,7 +59,7 @@ static volatile uint8_t s_fade_origin = 0;           /* 渐降起点音量（恢
 static uint8_t          s_last_fade_level = 0;       /* 最近一次写入的渐降档位 */
 static volatile bool    s_restore_requested = false; /* 取消/延长定时后请求恢复 */
 
-/* 倒计时任务：到点「暂停播放 + 息屏」（不返回本函数，继续空转）；最后 30 秒执行音量渐降 */
+/* 倒计时任务：到点「音量渐降 → 关机」；最后 30 秒执行音量渐降 */
 static void sleep_timer_task(void *arg)
 {
     (void)arg;
@@ -82,16 +84,17 @@ static void sleep_timer_task(void *arg)
 
         int64_t remain_us = s_deadline_us - esp_timer_get_time();
         if (remain_us <= 0) {
-            /* S31：AXP2101 软关机（真断电）已经可用，但「定时关机」策略尚未接回，
-               睡眠定时到点暂时只做「暂停播放 + 息屏」——既停止出声，又避免屏幕
-               整夜亮着。接回定时关机时，在下面 pause 之后调用
-               fake_shutdown_enter() 即可。 */
-            ESP_LOGI(TAG, "sleep timer expired (%u min), pause playback and "
-                          "turn screen off", (unsigned)s_minutes);
+            /* S31：到点交给 fake_shutdown 走 AXP2101 软关机（真断电），
+               与「上键长按关机」是同一条流程。
+               ⚠ 关机链自己会保存播放现场、停播放、挂起 LVGL，并且**息屏状态
+               下会先亮屏**显示「正在关机...」——这里不要再 pause/息屏，否则
+               会把要亮屏的关机提示盖掉。
+               ⚠ 先恢复渐降音量：渐降值本来就不落 NVS，恢复只是让"关机失败
+               回到界面"时音量正常；真实关机用的是 config_store 里的用户音量。 */
+            ESP_LOGI(TAG, "sleep timer expired (%u min), shutting down",
+                     (unsigned)s_minutes);
             s_minutes = 0;
 
-            /* 渐降只写 audio 硬件、不落 NVS；到点先恢复用户原音量，避免
-               "睡眠定时结束后音量停在 0"（下次唤醒播放会没声音） */
             if (s_fade_active) {
                 s_fade_active = false;
                 audio_set_volume_level(s_fade_origin);
@@ -99,13 +102,12 @@ static void sleep_timer_task(void *arg)
                          (unsigned)s_fade_origin);
             }
 
-            player_controller_pause();
-            power_service_screen_off();
+            fake_shutdown_enter();
 
-            /* ⚠ 必须跳过下面的渐降段：到点后 remain_us <= 0，若继续用
-               remain_ms 计算渐降档位，负数强转 (uint32_t) 变成巨大值，
-               再经 uint8_t 截断会写出任意音量档（曾出现关机瞬间音量
-               跳变/爆音，听感比用户原音量还大）。 */
+            /* 关机成功：PMU 断电，本任务随整机消失；只有关机失败（PMU 未响应，
+               屏幕上会提示「关机失败，请长按电源键 4 秒」）才会回到这里继续空转，
+               不再重复触发（s_shutting_down 已复位，重试由用户长按完成）。 */
+            s_minutes = 0;
             continue;
         }
 
@@ -249,7 +251,7 @@ uint32_t sleep_timer_get_remaining_s(void)
     }
     int64_t remain = s_deadline_us - esp_timer_get_time();
     if (remain <= 0) {
-        return 0;   /* 已到点（任务即将暂停播放并息屏），UI 显示 0 即可 */
+        return 0;   /* 已到点（任务即将走关机流程），UI 显示 0 即可 */
     }
     /* 向上取整到秒，避免显示 14:00 时实际只剩 13:59.9 的误导 */
     return (uint32_t)((remain + 999999) / 1000000);
