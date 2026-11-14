@@ -10,10 +10,11 @@ extern "C" {
 #endif
 
 /**
- * @brief MP3 播放器（Helix 解码 + 播放控制 + 基于时钟的进度）
+ * @brief 本地播放器（MP3/FLAC/OGG Vorbis 流式解码 + 播放控制）
  *
- * 单曲播放：mp3_player_play() 启动 Core1 后台任务解码并输出到 I2S。
- * 提供暂停/恢复/停止控制与基于系统时钟的播放进度查询。
+ * 单曲播放：mp3_player_play() 启动 Core1 后台任务，按扩展名选择
+ * minimp3 / dr_flac / stb_vorbis 解码并输出到 I2S。
+ * 提供暂停/恢复/停止/seek 控制与播放位置查询。
  */
 
 /** 播放状态 */
@@ -41,7 +42,7 @@ typedef enum {
 typedef void (*mp3_player_stopped_cb_t)(mp3_player_stop_reason_t reason);
 
 /**
- * @brief 开始播放指定 MP3（Core1 后台任务，非阻塞）
+ * @brief 开始播放指定音频（MP3/FLAC/OGG，Core1 后台任务，非阻塞）
  *
  * 若当前正在播放/暂停，会先停止旧曲并等待其释放资源（解码器、文件句柄、
  * I2S），再启动新曲，因此可用于切换播放不同采样率的文件（采样率在解码
@@ -49,9 +50,9 @@ typedef void (*mp3_player_stopped_cb_t)(mp3_player_stop_reason_t reason);
  *
  * 前置条件：audio_init() 与 sd_card_init() 已完成。
  *
- * @param path 文件完整路径（须为静态字符串字面量）
+ * @param path 文件完整路径（内部会拷贝到播放任务自己的缓冲，无需常驻）
  * @return ESP_OK 任务创建成功；ESP_ERR_NO_MEM 创建失败；
- *         ESP_ERR_TIMEOUT 停止旧曲超时（2s 内未释放资源）
+ *         ESP_ERR_TIMEOUT 停止旧曲超时（3s 内未释放资源）
  */
 esp_err_t mp3_player_play(const char *path);
 
@@ -67,7 +68,7 @@ esp_err_t mp3_player_stop(void);
 /**
  * @brief 跳转到指定播放位置（秒）
  *
- * 按时间比例映射到文件字节偏移（CBR），seek 后重新找帧同步。
+ * 由各解码器按样本位置 seek（MP3 首次 seek 可能需要扫描建索引）。
  * 播放中或暂停中均可调用。
  *
  * @param target_s 目标时间（秒，超出总时长会被截断）
@@ -99,10 +100,9 @@ void mp3_player_set_stopped_callback(mp3_player_stopped_cb_t cb);
 /**
  * @brief 设置"下一首"歌曲的回放增益（16.16 定点线性系数，65536 = 0dB）
  *
- * ⚠ 本接口只暂存增益，**在 mp3_player_play() 内部完成"旧曲停止 + ringbuf
- * 清空"之后才应用到 audio**：若在 play 前直接调 audio_set_replay_gain，
- * 旧曲停止是异步的（旧任务可能阻塞在 ringbuf 背压上百 ms），期间旧曲残留
- * PCM 仍会被 consumer 送进 I2S，导致"旧歌内容用新歌增益播放"的音量突变。
+ * ⚠ 本接口只暂存增益，**在 mp3_player_play() 等待旧任务完全退出、新曲
+ * 解码器打开之后才应用到 audio**：旧曲停止是异步的，若在 play 前直接调
+ * audio_set_replay_gain，运行中的旧曲会立刻换增益，造成音量突变。
  * 延迟应用后旧曲全程保持旧增益，新歌从第一帧起用新增益。
  *
  * @param gain_q16 线性增益 × 65536（与 audio_set_replay_gain 同语义）。

@@ -29,6 +29,7 @@ set(MAIN_SRCS_SHARED
     "core/hardware/battery.c"
     "core/hardware/sd_card.c"
     "core/storage/config_store.c"
+
     "core/network/wifi_time_sync.c"
     "core/ui/lvgl_port.c"
     "core/ui/lvgl_mem.c"
@@ -62,6 +63,9 @@ set(MAIN_SRCS_PLAYER
     "core/storage/config_slots.c"
     "core/hardware/audio/cs43131.c"
     "core/hardware/audio/mp3_player.c"
+    "core/audio_decoders/audio_decoder.c"
+    "core/audio_decoders/minimp3_impl.c"
+    "core/audio_decoders/dr_flac_impl.c"
     "core/hardware/audio/eq.c"
     "core/player/player_controller.c"
     "core/player/shuffle_player.c"
@@ -76,6 +80,7 @@ set(MAIN_SRCS_PLAYER
     "core/image/default_cover.c"
     "core/image/cover_jpeg.c"
     "core/music/song_meta.c"
+    "core/music/cover_art.c"
     "ui/app.c"
     "ui/battery_indicator.c"
     "ui/bt_settings.c"
@@ -141,6 +146,14 @@ endif()
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "." "core" "ui")
+
+# 第三方单文件解码库（minimp3/dr_flac/stb_vorbis）含有未使用变量等警告，
+# 关闭这些文件的警告，避免被 IDF 的 -Werror 拦下。
+set_source_files_properties(
+    "core/audio_decoders/audio_decoder.c"
+    "core/audio_decoders/minimp3_impl.c"
+    "core/audio_decoders/dr_flac_impl.c"
+    PROPERTIES COMPILE_OPTIONS "-w")
 
 # ============================================================================
 # 构建期补丁：回写 patches/ 下针对**托管组件**的修改

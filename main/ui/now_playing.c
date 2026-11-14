@@ -7,6 +7,7 @@
 #include "core/fonts/system_font.h"
 #include "core/hardware/display.h"
 #include "core/image/cover_jpeg.h"
+#include "core/music/cover_art.h"
 #include "core/utils/mem_trace.h"
 #include "core/image/default_cover.h"
 #include "core/music/song_meta.h"
@@ -86,11 +87,11 @@ static bool     s_scroll_anim_running = false; /* 松手后的吸附/惯性滚�
 /* 封面加载（后台任务，歌曲变化时异步读取 .npd + JPEG 解码）              */
 /* ------------------------------------------------------------------ */
 
-/* ⚠ 栈 6KB：解码调用链较深（tjpgd JPEG 解码，460×460 帧缓冲落 PSRAM）。
-   实测栈高水位峰值约 3.8KB（mem_monitor 每 20s 打印的 stk 行），6KB 留约
-   2.2KB 余量；若未来解码库/封面尺寸变化导致余量吃紧，可回调到 8KB。 */
-#define COVER_TASK_STACK (6 * 1024)
-#define COVER_TASK_PRIO  1      /* 低优先级：不抢音频解码（mp3 播放任务 8/9） */
+/* 封面任务栈 8KB：解码调用链较深（tjpgd JPEG 解码，460×460 帧缓冲落 PSRAM），
+   并新增音频内嵌标签解析（ID3/FLAC/OGG 注释）和目录扫描（ca_folder_find
+   自身有约 2KB 路径缓冲）。6KB 时代实测高水位约 3.8KB，8KB 留出标签解析余量。 */
+#define COVER_TASK_STACK (8 * 1024)
+#define COVER_TASK_PRIO  1      /* 低优先级：不抢音频解码（mp3 播放任务 6） */
 #define COVER_TASK_CORE  1      /* 与音频同核但优先级低，空闲时才解码 */
 
 static lv_img_dsc_t s_cover_img   = { 0 }; /* 当前显示的封面图（data 为分配内存） */
@@ -125,21 +126,7 @@ void now_playing_enable_cover_load(void)
     }
 }
 
-/* 无封面/加载失败：切回默认封面（持锁，可在任务上下文调用） */
-static void cover_show_default(void)
-{
-    lvgl_port_lock(-1);
-    if (s_cover_owned) {
-        cover_jpeg_free(&s_cover_img);
-        s_cover_owned = false;
-    }
-    if (s_cover != NULL) {
-        lv_img_set_src(s_cover, DEFAULT_COVER_IMG);
-    }
-    lvgl_port_unlock();
-}
-
-/* 封面加载任务：等待通知 → 读取 .npd → JPEG 解码 → 持锁更新封面。
+/* 封面加载任务：等待通知 → 读取 .npd / 内嵌封面 → JPEG 解码 → 持锁更新封面。
    路径在任务开头快照（player_controller 的路径缓冲会被后续切歌覆盖）；
    解码完成后校验"当前歌曲未变"才应用，避免快速切歌显示错封面。
    ⚠ Bug 20 修复：本任务自带完整的 .npd 解析结果（song_meta_t 含标题/
@@ -166,11 +153,18 @@ static void cover_load_task(void *arg)
         mem_trace_log("cover:req");
         song_meta_t meta;
         if (song_meta_load(path, &meta) != ESP_OK) {
-            song_meta_free(&meta);
-            cover_show_default();   /* 无 .npd：标题本就回退文件名，无需补 */
-            continue;
+            song_meta_free(&meta);   /* 保证 meta 全零，便于下面补封面 */
         }
-        mem_trace_log("cover:npd_loaded");
+        /* .npd 不存在或没带封面时，退回音频内嵌封面 / 同目录封面图片 */
+        if (meta.jpeg_data == NULL || meta.jpeg_len == 0) {
+            uint8_t *art = NULL;
+            uint32_t art_len = 0;
+            if (cover_art_find(path, &art, &art_len) == ESP_OK) {
+                meta.jpeg_data = art;
+                meta.jpeg_len = art_len;
+            }
+        }
+        mem_trace_log("cover:meta_loaded");
 
         /* 解码前先校验歌曲未变（快速切歌时省掉无谓的解码） */
         player_controller_status_t st;
@@ -737,6 +731,8 @@ lv_obj_t *now_playing_create(lv_obj_t *tv)
        渐显、滑动时立即隐藏；=0 时始终显示 */
     s_cover = lv_img_create(s_page);
     lv_img_set_src(s_cover, DEFAULT_COVER_IMG);
+    /* 内嵌/目录封面不一定是 460x460：大于屏幕时居中裁切，小于屏幕时居中留黑边 */
+    lv_image_set_inner_align(s_cover, LV_IMAGE_ALIGN_CENTER);
     lv_obj_set_size(s_cover, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     lv_obj_set_pos(s_cover, 0, 0);
 #if NP_HIDE_COVER_ON_SCROLL

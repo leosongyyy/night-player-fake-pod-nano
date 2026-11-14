@@ -14,6 +14,8 @@ extern "C" {
  *
  * 上位机 .npd 里存放的是 460x460 的 JPEG（黑底居中），本模块将其解码为
  * RGB565 像素缓冲并封装成 lv_image_dsc_t，可直接 lv_image_set_src 显示。
+ * 也用于音频内嵌 / 目录封面（core/music/cover_art）：尺寸不固定，<=1024
+ * 原尺寸解码后由正在播放页居中裁切；1024~4096 走软件解码 1/2、1/4 缩放。
  *
  * 两条解码路径（`CONFIG_UI_COVER_HW_JPEG` 控制，见 main/Kconfig.projbuild）：
  *   - **硬件（默认）**：esp_driver_jpeg，DMA2D 直写 PSRAM，460x460 实测

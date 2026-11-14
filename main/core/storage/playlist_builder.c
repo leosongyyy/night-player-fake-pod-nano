@@ -115,7 +115,7 @@ static void make_full_path(const char *rel, char *out, size_t outsz)
     }
 }
 
-/* ---------------- 音频扩展名判断（当前播放引擎 Helix 仅支持 MP3） ---------------- */
+/* ---------------- 音频扩展名判断（播放引擎支持 MP3/FLAC/OGG Vorbis） ---------------- */
 
 static bool is_audio_file(const char *name)
 {
@@ -124,8 +124,9 @@ static bool is_audio_file(const char *name)
         return false;
     }
     const char *ext = dot + 1;
-    /* 音乐库目前只有 .mp3，播放引擎也只支持 MP3，故仅收录 mp3 */
-    return (strcasecmp(ext, "mp3") == 0);
+    return (strcasecmp(ext, "mp3") == 0) ||
+           (strcasecmp(ext, "flac") == 0) ||
+           (strcasecmp(ext, "ogg") == 0);
 }
 
 /* ---------------- 播放列表（.pl）文件 ---------------- */

@@ -1,5 +1,9 @@
 # 内部 RAM 紧张与 PSRAM 任务栈（task_psram）
 
+> ⚠ 2026-11 多格式播放改造后：`mp3_play` 改为单任务 24KB **PSRAM 栈**，
+> `mp3_out` 任务与 PCM ringbuf 已移除；下表中的播放任务清单为改造前基线。
+> 新播放任务运行期不触发 flash 关缓存路径，详见 `MULTI_FORMAT_AUDIO.md`。
+
 > 源码：`main/core/utils/task_psram.{c,h}`；配置：`sdkconfig.defaults` 的
 > `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`。
 

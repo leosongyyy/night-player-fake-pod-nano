@@ -67,7 +67,7 @@
 - 一个 **300ms 的 LVGL 定时器**（LVGL 任务上下文，已持锁）负责刷新计数标签、按 `phase` 切换状态提示、并在 `s_scan_done` 置位后切换到下一界面。
 
 ### 4.2 自动缓存核对（2026-11 反哺）
-开机在 SD 挂载后、扫描前先核对 pldata v2 头部：
+开机在 SD 挂载后、扫描前先核对 pldata v3 头部（v2 引入元信息，v3 因多格式扩展递增）：
 
 - `playlist_store_is_valid()` + `playlist_store_get_meta()` 读取 `card_id / signature / file_count`；
 - 卡 ID 与当前 `sd_card_get_id()` 不同 → `config_store_reset_position()` 清旧卡播放位置，自动扫描；

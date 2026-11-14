@@ -355,7 +355,7 @@ static void boot_show_no_music(void)
     lv_obj_t *title = boot_make_title(root, "未发现音乐");
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -60);
 
-    lv_obj_t *hint = boot_make_hint(root, "SD 卡中没有可播放的 mp3 文件");
+    lv_obj_t *hint = boot_make_hint(root, "SD 卡中没有可播放的 mp3 / flac / ogg 文件");
     lv_obj_align(hint, LV_ALIGN_CENTER, 0, 40);
 
     lv_obj_t *hint2 = boot_make_hint(root, "请放入音乐后重启设备");

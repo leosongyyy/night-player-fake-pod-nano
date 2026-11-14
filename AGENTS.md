@@ -30,7 +30,7 @@ ESP32-S31（rev v0.0，320MHz 双核 + LP core，512KB SRAM）+ **16MB Flash** +
 
 **3. 参考文档**（都在 `ideas_and_exps/`）
 
-`IDFC_USAGE.md`（idfc 完整用法/历史坑）、`BUILD_CONFIG.md`（构建配置）、`BUILD_MATRIX.md`（配置矩阵格式与 idfc 验收）、`AGENTS_DETAILS_ARCHIVE.md`（**2026-11-15 从本文件移出的历史实测数据与逐项理由**，考据时查这里）、`reference_docs/`（原厂资料整理版：`hardware_v1.md`、`pmu_axp2101.md`、`rtc_pcf85063a.md`）、`DUAL_APP_TIME_SYNC.md`（双固件对时）、`WIFI_TIME_SYNC.md`（对时实现细节）、`BLUETOOTH_AUDIO.md`、`NPF_FONT.md` + `BINFONT_RESEARCH.md`、`FONT_FLASH.md`、`FULL_FIRMWARE.md`、`LVGL9_MIGRATION.md`、`IRAM_DMA_AUDIT.md`、`IRAM_AUDIT_LVGL9.md`、`IRAM_OBJECTS_PSRAM_S31.md`、`PSRAM_TASK_STACK.md`、`FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`、`CONFIG_SLOTS.md`、`COVER_JPEG_HW.md`、`PPA_ACCEL.md`、`MARQUEE_STYLE.md`、`CLICK_WHEEL_USAGE.md`、`DISPLAY_FREEZE_TRIAGE.md`、`S31_FLASH_CACHE_RACE.md`、`DONE_PLANS.md` / `FUTURE_PLAN.md`。
+`IDFC_USAGE.md`（idfc 完整用法/历史坑）、`BUILD_CONFIG.md`（构建配置）、`BUILD_MATRIX.md`（配置矩阵格式与 idfc 验收）、`AGENTS_DETAILS_ARCHIVE.md`（**2026-11-15 从本文件移出的历史实测数据与逐项理由**，考据时查这里）、`reference_docs/`（原厂资料整理版：`hardware_v1.md`、`pmu_axp2101.md`、`rtc_pcf85063a.md`）、`DUAL_APP_TIME_SYNC.md`（双固件对时）、`WIFI_TIME_SYNC.md`（对时实现细节）、`BLUETOOTH_AUDIO.md`、`MULTI_FORMAT_AUDIO.md`（MP3/FLAC/OGG 多格式播放与封面）、`COVER_ART.md`（内嵌/目录封面查找顺序）、`NPF_FONT.md` + `BINFONT_RESEARCH.md`、`FONT_FLASH.md`、`FULL_FIRMWARE.md`、`LVGL9_MIGRATION.md`、`IRAM_DMA_AUDIT.md`、`IRAM_AUDIT_LVGL9.md`、`IRAM_OBJECTS_PSRAM_S31.md`、`PSRAM_TASK_STACK.md`、`FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`、`CONFIG_SLOTS.md`、`COVER_JPEG_HW.md`、`PPA_ACCEL.md`、`MARQUEE_STYLE.md`、`CLICK_WHEEL_USAGE.md`、`DISPLAY_FREEZE_TRIAGE.md`、`S31_FLASH_CACHE_RACE.md`、`DONE_PLANS.md` / `FUTURE_PLAN.md`。
 
 **4. idfc 使用说明（重要）**
 
@@ -95,7 +95,7 @@ idfc build -t sync              # 输出 build\sync\FakePodNanoNightPlayer.bin�
 
 **当前实现状态**（细节见各设计文档与源码注释）：
 
-- 播放核心：MP3（Helix，实测 5000+ 首）、文件夹与 `.pl` 歌单、循环（全部/列表/单曲）、顺序/**无限确定性随机**（断点续播）、回放增益、**10 段 EQ**、`.npd` 元数据 + **硬件 JPEG 封面**（失败回退软件解码）。
+- 播放核心：MP3 / FLAC / OGG Vorbis（minimp3 / dr_flac / stb_vorbis 流式解码，实测 5000+ 首）、文件夹与 `.pl` 歌单、循环（全部/列表/单曲）、顺序/**无限确定性随机**（断点续播）、回放增益、**10 段 EQ**、`.npd` 元数据优先，回退音频内嵌/同目录 JPEG 封面 + **硬件 JPEG 解码**（失败回退软件解码）。
 - **经典蓝牙音频**：A2DP Source（SBC，48k 优先/44.1k 兜底）+ AVRCP CT 绝对音量；EQ 在重采样之后；最多 5 设备各自记忆音量/EQ/安静模式；控制中心开关（长按快速面板）、设置菜单蓝牙页（配对/详情）；已配对耳机可主动回连；安静模式（只留蓝牙的伪关机）。见 `BLUETOOTH_AUDIO.md`。
 - 硬件层：AMOLED（QSPI，全黑启动防白屏）、触摸（CST820，异步初始化）、电池（AXP2101 融合百分比）、音频（I2S + CS43131）、SD（FAT/exFAT）、**RTC 走时 + 双键映射 + PMU 关机/低电保护**。
 - 任务布局：UI（LVGL）固定 Core0、解码/封面固定 Core1，分核不抢占（见"使用技术"）。
@@ -120,7 +120,9 @@ main/
     bt/bt_service.c       # 经典蓝牙：控制器/Bluedroid/A2DP/AVRCP + bt_svc 命令任务
   core/storage/           # config_store(+配置槽位) bt_store playlist(+_store/_builder/_format) config_slots
   core/player/            # player_controller / shuffle_player
-  core/music/song_meta.c  core/image/cover_jpeg.c + default_cover(_flash).c
+  core/music/             # song_meta(.npd) + cover_art(内嵌/同目录封面回退)
+  core/image/             # cover_jpeg(硬件/软件 JPEG) + default_cover(_flash)
+  core/audio_decoders/    # 多格式流式解码（minimp3 / dr_flac / stb_vorbis；统一 audio_decoder 接口）
   core/network/           # wifi_time_sync（只编进对时固件）
   core/fonts/             # system_font / font_npf（mmap 全字库）/ system_global_font_lite / system_smaller_font
   core/ui/                # lvgl_port lvgl_mem lvgl_ppa_accel lvgl_ppa_rotate touch_test virtual_list click_wheel global_style

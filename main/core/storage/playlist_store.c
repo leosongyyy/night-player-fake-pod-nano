@@ -11,9 +11,9 @@ static const char *TAG = "playlist_store";
 /* 头部魔数："PLTK"，用于 is_valid 快速判断 */
 #define PLAYLIST_STORE_MAGIC 0x504C544Bu
 /* 数据结构版本（写入头部，便于将来升级迁移）
- * v2：头部新增 SD 卡 ID 与曲库指纹，开机自动判断换卡/增删歌曲；
- *     旧 v1 库在首次启动时自动重扫一次。 */
-#define PLAYLIST_STORE_VERSION 2u
+ * v3：音频格式从仅 MP3 扩展到 MP3/FLAC/OGG，旧缓存自动重扫一次；
+ *     头部仍保留 SD 卡 ID / 曲库指纹 / 文件数（v2 引入）。 */
+#define PLAYLIST_STORE_VERSION 3u
 
 /**
  * @brief 分区头部（占数据区之前的一个扇区，offset 0）

@@ -13,15 +13,16 @@ extern "C" {
  *
  * 本模块汇聚"电源相关状态机与后台守护"：
  * - 息屏 = 屏幕全黑（亮度 0）+ 挂起 LVGL（停止刷屏、触摸轮询与 LVGL 时间）
- *          + CPU 固定降到 80MHz（esp_pm_configure 强制 max=min=80）。
+ *          + CPU 息屏固定频率：播放中 320MHz，暂停/停止 160MHz。
  *   亮屏 = CPU 恢复 320MHz（S31 CPLL 最高档）+ 恢复 LVGL + 恢复用户配置亮度。
  *   ⚠ 不用 DFS 动态调频（实测释放频率锁后空闲期降频不明显），改为直接固定
- *   频率；若 80MHz 下 MP3 解码卡顿，可把 PM_CPU_FREQ_OFF_MHZ 改为 160。
+ *   频率；160MHz 是为了在 OGG/FLAC 解码时避免低频欠载，同时比 320MHz 省电。
  * - 无操作（按键/触摸）超时自动息屏（config_store 的 screen_off_s，默认 30s）
+ * - 低电量持续 60 秒（<5% 且未充电）→ AXP2101 真关机
  *
- * ⚠ S31 平台：S3 时代的「息屏暂停超时自动关机」与「低电压自动关机」两条策略
- *   依赖 deepsleep 伪关机，已随平台迁移整体删除；S31 的关机是 AXP2101 真断电
- *   （`fake_shutdown` 写 `0x10[0]=1`），由按键/睡眠定时器触发，不在本模块里。
+ * ⚠ S31 平台：S3 时代的「息屏暂停超时自动关机」依赖 deepsleep 伪关机，
+ *   已随平台迁移删除；低电策略改为 AXP2101 电量百分比判据。S31 的关机是
+ *   AXP2101 真断电（`fake_shutdown` 写 `0x10[0]=1`）。
  *
  * 入口：
  * - 手动切换息屏/亮屏：双键同时按下（BUTTON_EVENT_BOTH），见 ui/key_handler
@@ -47,7 +48,7 @@ extern "C" {
  */
 void power_service_init(void);
 
-/** @brief 息屏（全黑 + 挂起 LVGL + CPU 锁 80MHz）。已息屏时直接返回。
+/** @brief 息屏（全黑 + 挂起 LVGL + CPU 播放中 320MHz / 空闲 160MHz）。已息屏时直接返回。
  *         线程安全：内部持状态互斥锁，可从按键任务/守护任务调用。 */
 void power_service_screen_off(void);
 

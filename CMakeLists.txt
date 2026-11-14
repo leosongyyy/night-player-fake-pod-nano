@@ -71,9 +71,8 @@ set(COMPONENTS
     esp_driver_jpeg                # driver/jpeg_decode.h（封面硬件 JPEG 解码，core/image/cover_jpeg.c）
     esp_mm                         # esp_cache.h（PPA 缓冲对齐/缓存同步）
     esp_partition                  # esp_partition.h（font 分区 mmap、pldata）
-    esp_pm                         # esp_pm.h（亮屏 320MHz / 息屏 80MHz）
+    esp_pm                         # esp_pm.h（亮屏 320MHz / 息屏播放 320MHz / 空闲 160MHz）
     esp_timer                      # esp_timer.h（各任务的周期定时）
-    esp_ringbuf                    # freertos/ringbuf.h（音频输出环形缓冲）
     nvs_flash                      # nvs_flash.h / nvs.h（config_store）
     fatfs                          # esp_vfs_fat.h（SD 卡挂载，exFAT 需 IDF 本体打补丁）
     vfs                            # 文件系统注册（fatfs 依赖，直接包含亦稳妥）
