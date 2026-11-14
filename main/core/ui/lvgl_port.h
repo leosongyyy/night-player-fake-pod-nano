@@ -103,6 +103,24 @@ void lvgl_port_unregister_touch_cb(lvgl_port_touch_cb_t cb, void *user_ctx);
 void lvgl_port_set_touch_handle(esp_lcd_touch_handle_t touch_handle);
 
 /**
+ * @brief 运行时切换画面旋转角度（顺时针 0/90/180/270，实验性）
+ *
+ * 画面与触摸一起切换：触摸 read_cb 会按同一角度做逆变换（并保留左右手
+ * 29/30 缩放校准，见 lvgl_port.c 的触摸变换注释）。切换后会把整屏
+ * （含 top/sys 层）标脏重绘，因此约一帧内完成切换、无需重启。
+ *
+ * ⚠ 必须在 LVGL 任务上下文或持有 LVGL 锁时调用（与 flush 回调同线程）。
+ * ⚠ 角度需同时持久化（config_store_set_display_rotation），本函数只管生效。
+ *
+ * @param cw_deg 0（关闭旋转）/ 90 / 180 / 270
+ * @return true 已切换；false 未编译进旋转支持 / PPA 初始化失败 / 角度非法
+ */
+bool lvgl_port_set_display_rotation(uint16_t cw_deg);
+
+/** @brief 画面旋转是否可用（PPA 初始化成功；与当前角度是否为 0 无关） */
+bool lvgl_port_display_rotation_available(void);
+
+/**
  * @brief 挂起 LVGL（冻结 LVGL 时间 + 挂起 LVGL 任务）
  *
  * 供息屏/深度休眠前调用：冻结 lv_tick（LVGL 时间停在这一刻，恢复后动画从

@@ -3,6 +3,7 @@
 #include "core/storage/config_store.h"
 #include "core/ui/touch_test.h"
 #include "core/ui/lvgl_ppa_accel.h"
+#include "core/ui/lvgl_ppa_rotate.h"
 
 #include <assert.h>
 
@@ -125,6 +126,17 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     const int offsetx2 = area->x2;
     const int offsety1 = area->y1;
     const int offsety2 = area->y2;
+
+#if CONFIG_UI_DISPLAY_ROTATE_PPA
+    /* 实验性：整体顺时针旋转（PPA 硬件 SRM，见 core/ui/lvgl_ppa_rotate.c）。
+       成功时本块已完成「旋转 + 字节序交换 + 按旋转后坐标提交」，直接返回；
+       失败（未初始化/角度为 0/PPA 出错）则往下走原路径，保证界面仍然可用。
+       ⚠ 触摸坐标由本文件的 touchpad read_cb 按同一角度做逆变换，二者必须
+         保持一致（角度都取 lvgl_ppa_rotate_get_angle() 的"实际生效值"）。 */
+    if (lvgl_ppa_rotate_flush(area, px_map)) {
+        return;
+    }
+#endif
 
     /* ⚠ 字节序：v8 靠 LV_COLOR_16_SWAP=y 让整条渲染管线直接产出"高字节在前"的
        RGB565；v9 移除了该配置项，官方做法是在 flush 回调里把这一块缓冲整体
@@ -287,25 +299,28 @@ static uint8_t s_touch_cb_count = 0;
    并转发给所有注册的触摸事件订阅者（如触摸测试、息屏活动检测）。 */
 
 /* ====================================================================
- * 触摸坐标线性校准（×29/30，沿用 S3 经验值，S31 真机实测后确定）
+ * 触摸坐标变换（旋转 + 左右手校准；顺序不可颠倒）
  *
- * 来源：S3 旧板（CST816/820 面板）实测 "×29/30" 时点击位置最符合直觉，
- * 是本项目当年的经验值。S31 移植（5e7e92f）时因这块 CST820 直接输出
- * 460×460 逻辑坐标，先按"直通"上了；2026-11 真机对照测试后确认加回
- * 同一系数手感最好，遂固定为该值：等效把坐标整体向内收 1/30
- * （0~459 → 0~443）。
+ * ① 先按**画面旋转角度**做逆变换（面板坐标 → LVGL 逻辑坐标）：
+ *    画面顺时针转 θ 后，逻辑点 p 会显示在面板的 R_θ(p)；手指给的是面板坐标，
+ *    所以要反过来转 θ 才能命中同一个控件。例：θ=90° 时逻辑左上角显示在面板
+ *    右上角，于是面板 (459,0) 必须变回逻辑 (0,0)。
+ *    角度取"实际生效"值（lvgl_ppa_rotate_get_angle()）：PPA 初始化失败时
+ *    画面其实没转，这里也必须按 0 处理，否则触摸会和画面对不上。
  *
- * ⚠ 想再调就改这两个数，不用动别处：
- *      TOUCH_CAL_NUM/DEN = 30/30  → 关闭校准（原始直通，S31 迁移初行为）
- *      TOUCH_CAL_NUM/DEN = 29/30  → 当前值（S3 参数，S31 实测最优）
- *    分子越大坐标越靠外（手指点得越偏右下，上报值越大）。换面板型号或
- *    换贴合工艺后需要重新标定。
+ * ② 再做 ×29/30 缩放校准，**锚角由握持手型决定**（2026-11 对该款触摸屏的
+ *    结论）：这块屏的 29/30 系数本来只是"右撇子 + 不旋转"握法下的经验值，
+ *    所以：
+ *      · 右撇子（默认）：以**旋转后的左上角**为原点 —— x、y 都向 0 收；
+ *      · 左撇子：以**旋转后的右上角**为原点 —— x 向右边收、y 仍从顶部收。
+ *    只有"右撇子 + 不旋转"这一种组合才与加的旋转功能之前的旧代码等价。
  *
  * 为什么放在 LVGL 移植层而不是 touch.c 的 process_coordinates：
  * 这里是**唯一**的坐标出口——LVGL 的 indev 数据源和所有触摸订阅者
- * （触摸测试白点、息屏活动检测、ClickWheel）都拿这一份值，校准放这里
- * 才能保证"白点看到的点"和"控件命中的点"是同一个点。若放驱动层，
- * 白点会跟随未校准坐标，测试时反而看不出真实命中差异。
+ * （触摸测试白点、息屏活动检测、ClickWheel）都拿这一份值，变换放这里
+ * 才能保证"白点看到的点"和"控件命中的点"是同一个点。
+ *
+ * ⚠ 想关闭缩放校准：把 TOUCH_CAL_NUM/DEN 改成 30/30（旋转仍然生效）。
  * ==================================================================== */
 #define TOUCH_CAL_NUM   29
 #define TOUCH_CAL_DEN   30
@@ -357,23 +372,62 @@ static void lvgl_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         touched = true;
     }
 
-    /* 坐标校准（S3 参数 ×29/30，见文件内 TOUCH_CAL_NUM/DEN 的说明）。
-       ⚠ 必须在下面"最后坐标"更新之前做：s_last_touch_* 存的也应是校准后的
-       值，否则抬手帧会突然跳回未校准坐标（进度条/滑块会在松手瞬间偏移）。
-       ⚠ 用 uint32_t 中转再转回 uint16_t：459×29 = 13311 虽然不会溢出
-       uint16_t，但保留宽中间量以免将来调大分子时静默截断。 */
-    touchpad_x = (uint16_t)((uint32_t)touchpad_x * TOUCH_CAL_NUM / TOUCH_CAL_DEN);
-    touchpad_y = (uint16_t)((uint32_t)touchpad_y * TOUCH_CAL_NUM / TOUCH_CAL_DEN);
-
+    /* ① 先按画面旋转做逆变换，② 再按左右手做 29/30 缩放（顺序不可颠倒，
+       推导与"为什么是逆变换"见 TOUCH_CAL_NUM 上方的长注释）。
+       ⚠ 只有真正按下（读到有效坐标）时才更新"最后坐标"基准；抬手帧沿用
+       上一次按下的坐标（见上方 s_last_touch_* 注释）。
+       ⚠ 用 uint32_t 中转再转回 uint16_t：459×29 = 13311 不会溢出，但保留
+       宽中间量以免将来调大分子时静默截断。 */
     if (touched) {
-        /* 只有真正按下（读到有效坐标）时才更新"最后坐标"基准。
-           抬手帧不覆盖，抬手时沿用上一次按下的坐标（见上方注释）。 */
-        s_last_touch_x = touchpad_x;
-        s_last_touch_y = touchpad_y;
-    } else {
-        touchpad_x = s_last_touch_x;
-        touchpad_y = s_last_touch_y;
+        const uint16_t rot = lvgl_ppa_rotate_get_angle();   /* 实际生效角度（未启用/失败=0） */
+        const uint32_t max_x = EXAMPLE_LCD_H_RES - 1;
+        const uint32_t max_y = EXAMPLE_LCD_V_RES - 1;
+        /* 先钳到面板坐标范围内：旋转要用 max_x/max_y 做减法，原始坐标越界
+           （控制器噪声/校准异常）会下溢成巨大值，转回 uint16 后乱跳 */
+        if (touchpad_x > max_x) {
+            touchpad_x = (uint16_t)max_x;
+        }
+        if (touchpad_y > max_y) {
+            touchpad_y = (uint16_t)max_y;
+        }
+        uint32_t tx = touchpad_x;
+        uint32_t ty = touchpad_y;
+
+        switch (rot) {
+        case 90: {                       /* 逆时针 90°：面板 (x,y) → 逻辑 (y, H-1-x) */
+            const uint32_t x = tx;
+            tx = ty;
+            ty = max_y - x;
+            break;
+        }
+        case 180:                        /* 中心对称 */
+            tx = max_x - tx;
+            ty = max_y - ty;
+            break;
+        case 270: {                      /* 顺时针 90°：面板 (x,y) → 逻辑 (W-1-y, x) */
+            const uint32_t y = ty;
+            tx = max_x - y;
+            ty = touchpad_x;
+            break;
+        }
+        default:                         /* 0°：不变 */
+            break;
+        }
+
+        if (config_store_get_touch_left_handed()) {
+            /* 左撇子：以旋转后右上角 (max_x, 0) 为原点 */
+            tx = max_x - ((max_x - tx) * TOUCH_CAL_NUM) / TOUCH_CAL_DEN;
+        } else {
+            /* 右撇子：以旋转后左上角 (0, 0) 为原点 */
+            tx = (tx * TOUCH_CAL_NUM) / TOUCH_CAL_DEN;
+        }
+        ty = (ty * TOUCH_CAL_NUM) / TOUCH_CAL_DEN;
+
+        s_last_touch_x = (uint16_t)tx;
+        s_last_touch_y = (uint16_t)ty;
     }
+    touchpad_x = s_last_touch_x;
+    touchpad_y = s_last_touch_y;
 
     data->state = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     data->point.x = touchpad_x;
@@ -481,8 +535,25 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     /* 性能自测（仅 CONFIG_UI_PPA_BENCH 开启时有效，正式固件是空函数） */
     lvgl_ppa_accel_benchmark();
 
+    /* 实验性画面旋转（CONFIG_UI_DISPLAY_ROTATE_PPA）：在 flush 回调里用 PPA 的
+       SRM 把每块绘制缓冲按设定角度旋转再提交面板（触摸坐标不转）。
+       ⚠ **不要**改用 lv_display_set_rotation()：那是 LVGL 的软件旋转，
+       在绘制管线里逐 draw task 做矩阵变换，S3 时代实测帧率暴跌；
+       这里让 LVGL 保持 460x460 竖屏渲染，只在刷屏前转一次缓冲。
+       必须在 LVGL 任务创建之前初始化（失败会自动退回未旋转路径，不阻断开机）。
+       初始角度来自 NVS（开发者选项里可运行时切换，见
+       lvgl_port_set_display_rotation）。 */
+    if (!lvgl_ppa_rotate_init(panel_handle, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES,
+                              draw_buf_bytes, config_store_get_display_rotation())) {
+        ESP_LOGW(TAG, "PPA 旋转不可用，画面保持未旋转");
+    }
+
     // 设置旋转角度
-    // lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90); // 旋转90度
+    // lv_display_set_rotation(s_disp, LV_DISPLAY_ROTATION_90); // 软件旋转（慢，勿用）
+    // ↑ 需求（画面顺时针转 90°）由上面的 lvgl_ppa_rotate_init() 在 flush 层用
+    //   PPA 硬件完成；LVGL 自身的软件旋转会把旋转塞进每个 draw task 的矩阵变换里，
+    //   实测帧率暴跌（S3 时代根因），不要再打开。
+
 
     /* tick 已在 lv_init() 之后用 lv_tick_set_cb() 接到硬件时间上，
        这里**不再**创建 esp_timer 定时器喂 lv_tick_inc —— 那正是整屏
@@ -516,6 +587,32 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
     } else {
         ESP_LOGI(TAG, "Touch test dot disabled (developer option off)");
     }
+}
+
+/* 运行时切换画面旋转角度（0/90/180/270，顺时针）。
+   画面与触摸一起切换（触摸 read_cb 读的是同一个"实际生效角度"）；切换后
+   必须整屏重绘，否则旧方向的残留块会和新方向的块混在一起（面板 RAM 没有
+   "整体翻转"能力，只能重画一遍）。
+   必须在 LVGL 任务上下文/持锁时调用（与 flush 回调同线程，避免读写竞争；
+   设置菜单的点击回调就满足这个条件）。 */
+bool lvgl_port_set_display_rotation(uint16_t cw_deg)
+{
+    if (!lvgl_ppa_rotate_set_angle(cw_deg)) {
+        return false;
+    }
+    /* 整屏 + 顶层/系统层（下拉控制中心、Toast、LVGL 性能监视器都挂在那里）
+       全部失效，让下一帧把整屏按新方向重画。 */
+    lv_obj_invalidate(lv_screen_active());
+    lv_obj_invalidate(lv_layer_top());
+    lv_obj_invalidate(lv_layer_sys());
+    ESP_LOGI(TAG, "display rotation -> %u deg (touch not rotated)", (unsigned)cw_deg);
+    return true;
+}
+
+/* 画面旋转是否可用（PPA 初始化成功；与当前是否为 0° 无关） */
+bool lvgl_port_display_rotation_available(void)
+{
+    return lvgl_ppa_rotate_available();
 }
 
 void lvgl_port_suspend(void)

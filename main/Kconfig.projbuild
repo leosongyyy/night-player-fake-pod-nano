@@ -117,6 +117,40 @@ menu "FakePodNanoNightPlayer 应用配置"
             CPU 填充 / PPA 填充 / CPU 混合（不透明、半透明）/ PPA 混合的
             计时对比并打印。仅用于确定 UI_PPA_BLEND_MIN_PX，正式固件关闭。
 
+    config UI_DISPLAY_ROTATE_PPA
+        bool "画面旋转（PPA 硬件旋转，实验性）"
+        depends on SOC_PPA_SUPPORTED
+        default y
+        help
+            实验性功能：LVGL 仍按 460x460 竖屏渲染（不调 lv_display_set_rotation，
+            那是软件旋转、S3 时代实测帧率暴跌），只在 flush 回调里把每块绘制
+            缓冲交给 PPA 的 SRM 硬件旋转后按旋转后的坐标提交面板。
+            每块最大 460x46，旋转耗时约「100us 固定 + 旋转带宽」。
+
+            角度（顺时针 0/90/180/270）存 NVS，开机默认 90°；可在
+            设置菜单 →「显示设置」→「屏幕旋转方向」里**运行时切换**
+            （立即生效，无需重启）。
+
+            触摸坐标会按同一角度做逆变换跟随旋转；「显示设置」里的
+            「触屏校准」再按握持手型选择 29/30 缩放的锚角：
+            右撇子 = 旋转后左上角，左撇子 = 旋转后右上角（默认右撇子）。
+            实现与几何推导见 ideas_and_exps/PPA_ROTATE.md。
+
+            代价：内部 DMA RAM 多一块绘制缓冲大小的旋转输出缓冲（460x46x2B
+            ≈ 41KB，与 LVGL 单块绘制缓冲同尺寸，**开机总是分配**，这样运行时
+            切换不需要再申请）。分配失败或 PPA 方向自检失败时自动退回未旋转
+            路径（串口会打印原因）。
+            实测：静止 60fps，左右滑动/列表快速滚动帧率约降 20%（见
+            PPA_ROTATE.md §5）。
+
+    config UI_DISPLAY_ROTATE_STATS
+        bool "打印 PPA 旋转的一次性吞吐统计"
+        depends on UI_DISPLAY_ROTATE_PPA
+        default y
+        help
+            累计前 500 次旋转的耗时/像素数，打印一条平均耗时与吞吐后停止
+            统计（不会持续刷日志）。仅用于评估旋转本身的开销。
+
     config UI_LVGL_PIN_HOT_OBJECTS
         bool "把滚动列表的热点 LVGL 对象钉在内部 RAM（路径B）"
         default n

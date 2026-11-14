@@ -34,6 +34,8 @@ static const char *TAG = "config_store";
 /* ⚠ 不兼容旧键 `clkwheel_fast`（旧版 bool 速度）：速度档位功能尚未发布，
    最终用户拿到的固件只会有新键 `clkwheel_spd`，无需迁移逻辑 */
 #define KEY_TOUCH_TEST       "touchtest"
+#define KEY_TOUCH_LEFT       "touchleft"  /* 触屏校准：0=右撇子（默认），1=左撇子 */
+#define KEY_ROTATION         "rotation"   /* 画面旋转角度（0/90/180/270，顺时针） */
 #define KEY_WAS_PLAYING      "was_play"
 #define KEY_LAST_GLOBAL      "last_glob"
 #define KEY_LAST_VALID       "last_valid"
@@ -131,6 +133,14 @@ static bool     s_cw_reverse  = (CONFIG_STORE_CW_REVERSE_DEFAULT != 0);
 static uint8_t  s_cw_speed    = CONFIG_STORE_CW_SPEED_DEFAULT;
 /* 开发者选项（运行时开关，开机检查、重启生效）：触摸测试白点（默认关） */
 static bool     s_touch_test  = (CONFIG_STORE_TOUCH_TEST_DEFAULT != 0);
+/* 开发者选项：画面旋转角度（顺时针 0/90/180/270，默认 90）。
+   实验性 PPA 硬件旋转（触摸不跟随），切换**立即生效**（不重启），
+   见 core/ui/lvgl_ppa_rotate.c 与 ideas_and_exps/PPA_ROTATE.md。
+   NVS 里存的是角度/90（u8 索引 0~3，因为 270 放不进 uint8）。 */
+static uint16_t s_rotation    = CONFIG_STORE_ROTATION_DEFAULT;
+/* 触屏校准：左撇子模式（默认右撇子）。决定 29/30 缩放的锚角：右撇子以旋转后
+   左上角为原点，左撇子以旋转后右上角为原点。立即生效，见 lvgl_port.c 的触摸变换 */
+static bool     s_touch_left  = (CONFIG_STORE_TOUCH_LEFT_DEFAULT != 0);
 /* 关机前播放状态：默认 true（无记录时开机自动播放，保持旧行为） */
 static bool     s_was_playing = true;
 /* 回放增益总开关（默认开）：关=所有歌按 0dB 播放，开=按 .npd 元数据增益。
@@ -736,6 +746,24 @@ void config_store_init(void)
     } else {
         s_touch_test = (touch_test != 0);
     }
+    /* 开发者选项：画面旋转角度（NVS 存角度/90 的索引；无记录/脏数据回默认值） */
+    uint8_t rotation_idx = 0;
+    if (nvs_get_u8(s_nvs, KEY_ROTATION, &rotation_idx) != ESP_OK) {
+        s_rotation = CONFIG_STORE_ROTATION_DEFAULT;
+    } else if (rotation_idx <= 3) {
+        s_rotation = (uint16_t)rotation_idx * 90u;
+    } else {
+        ESP_LOGW(TAG, "invalid rotation idx=%u in NVS, fallback to %u deg",
+                 (unsigned)rotation_idx, (unsigned)CONFIG_STORE_ROTATION_DEFAULT);
+        s_rotation = CONFIG_STORE_ROTATION_DEFAULT;
+    }
+    /* 触屏校准：左右手（无记录时默认右撇子） */
+    uint8_t touch_left = 0;
+    if (nvs_get_u8(s_nvs, KEY_TOUCH_LEFT, &touch_left) != ESP_OK) {
+        s_touch_left = (CONFIG_STORE_TOUCH_LEFT_DEFAULT != 0);
+    } else {
+        s_touch_left = (touch_left != 0);
+    }
     /* 回放增益总开关：无记录（首次烧录/升级）时默认开启（保持既有行为） */
     uint8_t replay_gain = 0;
     if (nvs_get_u8(s_nvs, KEY_REPLAY_GAIN, &replay_gain) != ESP_OK) {
@@ -1090,6 +1118,16 @@ bool config_store_get_touch_test(void)
     return s_touch_test;
 }
 
+uint16_t config_store_get_display_rotation(void)
+{
+    return s_rotation;
+}
+
+bool config_store_get_touch_left_handed(void)
+{
+    return s_touch_left;
+}
+
 bool config_store_get_was_playing(void)
 {
     return s_was_playing;
@@ -1361,6 +1399,33 @@ void config_store_set_touch_test(bool on)
     }
     s_touch_test = on;
     cfg_write_u8(KEY_TOUCH_TEST, on ? 1 : 0);
+}
+
+/* 开发者选项：画面旋转角度（0/90/180/270，顺时针）。与触摸测试不同，本项
+   立即生效（调用方随后 lvgl_port_set_display_rotation()），故不通知回调，
+   开发者选项页自己的状态文字由点击回调就地刷新。 */
+void config_store_set_display_rotation(uint16_t cw_deg)
+{
+    if (cw_deg != 0 && cw_deg != 90 && cw_deg != 180 && cw_deg != 270) {
+        return;
+    }
+    if (cw_deg == s_rotation) {
+        return;
+    }
+    s_rotation = cw_deg;
+    cfg_write_u8(KEY_ROTATION, (uint8_t)(cw_deg / 90u));
+}
+
+/* 触屏校准：左右手（默认右撇子）。只写内存 + NVS，不通知回调——触摸
+   read_cb 每次轮询直接读，下一次轮询就生效；显示设置页自己的状态文字由
+   点击回调就地刷新。 */
+void config_store_set_touch_left_handed(bool left)
+{
+    if (left == s_touch_left) {
+        return;
+    }
+    s_touch_left = left;
+    cfg_write_u8(KEY_TOUCH_LEFT, left ? 1 : 0);
 }
 
 /* 回放增益总开关：立即生效（控制器轮询到变化后重新应用到音频链路，且设置页

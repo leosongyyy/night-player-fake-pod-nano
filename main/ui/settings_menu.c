@@ -69,6 +69,17 @@ static const char *const SCREEN_OFF_STEP_TXT[] = {
     "10 秒", "15 秒", "30 秒", "1 分钟", "2 分钟", "5 分钟", "10 分钟",
 };
 
+/* 画面旋转档位（顺时针，PPA 硬件旋转）与触屏校准档位。
+   旋转作用于画面，触摸坐标会跟随旋转（见 core/ui/lvgl_port.c 的触摸变换）；
+   左右手决定 29/30 缩放的锚角：右撇子=旋转后左上角，左撇子=旋转后右上角 */
+#define ROTATION_STEP_COUNT  4
+static const uint16_t ROTATION_STEPS[ROTATION_STEP_COUNT] = { 0, 90, 180, 270 };
+static const char *const ROTATION_TXT[ROTATION_STEP_COUNT] = {
+    "不旋转", "90°（顺时针）", "180°", "270°（顺时针）",
+};
+#define HAND_STEP_COUNT  2
+static const char *const HAND_TXT[HAND_STEP_COUNT] = { "右撇子", "左撇子" };
+
 /* ------------------------------------------------------------------ */
 /* 状态句柄                                                             */
 /* ------------------------------------------------------------------ */
@@ -86,7 +97,9 @@ static lv_point_t s_bg_press_point = { 0, 0 };
 static lv_obj_t *s_sleep_auto_status   = NULL;   /* 睡眠定时器（自动开启模式） */
 static lv_obj_t *s_sleep_range_status  = NULL;   /* 睡眠定时器（时间段） */
 static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
-static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
+static lv_obj_t *s_screen_off_status   = NULL;   /* 显示设置 → 屏幕超时（当前档位） */
+static lv_obj_t *s_rotation_status     = NULL;   /* 显示设置 → 屏幕旋转方向 */
+static lv_obj_t *s_hand_status         = NULL;   /* 显示设置 → 触屏校准（右/左撇子） */
 static lv_obj_t *s_rescan_count_status = NULL;   /* 重新扫描（当前歌曲总数，
                                                     不含 .pl 歌单目录；进入菜单时统计一次） */
 /* 「时间与日期」页右侧状态：当前日期 / 当前时间 / 时区 / 时间制式 */
@@ -123,12 +136,18 @@ _Static_assert(CONFIG_STORE_CW_SPEED_NORMAL == CLICK_WHEEL_SPEED_NORMAL &&
 
 /* 息屏档位子页的行对象（选中项高亮刷新用） */
 static lv_obj_t *s_screen_off_rows[SCREEN_OFF_STEP_COUNT] = { NULL };
+/* 旋转 / 触屏校准子页的行对象（选中项高亮刷新用） */
+static lv_obj_t *s_rotation_rows[ROTATION_STEP_COUNT] = { NULL };
+static lv_obj_t *s_hand_rows[HAND_STEP_COUNT] = { NULL };
 
 /* 子页句柄（**懒加载**：NULL = 尚未构建，首次进入该子页时才创建）。
    动机见 settings_menu_show() 注释：整个菜单常驻需要约 55KB 内部 RAM、
    构建耗时约 310ms，全部从开机路径上移除。 */
 static lv_obj_t *s_sleep_page      = NULL;   /* 睡眠定时器 */
-static lv_obj_t *s_screen_off_page = NULL;   /* 屏幕自动息屏 */
+static lv_obj_t *s_display_page    = NULL;   /* 显示设置（屏幕超时/旋转/触屏校准） */
+static lv_obj_t *s_screen_off_page = NULL;   /* 屏幕超时（显示设置的子页） */
+static lv_obj_t *s_rotation_page   = NULL;   /* 屏幕旋转方向（显示设置的子页） */
+static lv_obj_t *s_hand_page       = NULL;   /* 触屏校准（显示设置的子页） */
 static lv_obj_t *s_cw_page         = NULL;   /* 虚拟 ClickWheel */
 static lv_obj_t *s_time_page       = NULL;   /* 时间与日期 */
 static lv_obj_t *s_power_page      = NULL;   /* 电源选项（占位） */
@@ -499,6 +518,77 @@ static void menu_refresh_screen_off_sel(void)
     }
 }
 
+/* 刷新「显示设置」页三行的右侧状态（屏幕超时 / 屏幕旋转方向 / 触屏校准）。
+   屏幕超时行的句柄与 menu_refresh_root 共用（根页面不再显示它，但刷新无害）。 */
+static void menu_refresh_display(void)
+{
+    if (s_screen_off_status != NULL) {
+        char buf[16];
+        screen_off_format(config_store_get_screen_off_s(), buf, sizeof(buf));
+        lv_label_set_text(s_screen_off_status, buf);
+    }
+    if (s_rotation_status != NULL) {
+        const uint16_t deg = config_store_get_display_rotation();
+        if (deg == 0) {
+            lv_label_set_text(s_rotation_status, "不旋转");
+        } else {
+            char buf[12];
+            snprintf(buf, sizeof(buf), "%u°", (unsigned)deg);
+            lv_label_set_text(s_rotation_status, buf);
+        }
+    }
+    if (s_hand_status != NULL) {
+        lv_label_set_text(s_hand_status,
+                          config_store_get_touch_left_handed() ? "左撇子" : "右撇子");
+    }
+}
+
+/* 刷新旋转档位子页的选中高亮（进入子页/切换档位后调用）。
+   档位行没有图标，标题 label 是行内第 0 个子对象 */
+static void menu_refresh_rotation_sel(void)
+{
+    const uint16_t cur = config_store_get_display_rotation();
+    for (size_t i = 0; i < ROTATION_STEP_COUNT; i++) {
+        if (s_rotation_rows[i] == NULL) {
+            continue;
+        }
+        lv_obj_t *lbl = lv_obj_get_child(s_rotation_rows[i], 0);
+        if (lbl != NULL) {
+            lv_obj_set_style_text_color(lbl,
+                (ROTATION_STEPS[i] == cur) ? TEXT_HL_COLOR : TEXT_COLOR, 0);
+        }
+    }
+}
+
+/* 刷新触屏校准子页的选中高亮（0=右撇子，1=左撇子） */
+static void menu_refresh_hand_sel(void)
+{
+    const uint8_t cur = config_store_get_touch_left_handed() ? 1 : 0;
+    for (size_t i = 0; i < HAND_STEP_COUNT; i++) {
+        if (s_hand_rows[i] == NULL) {
+            continue;
+        }
+        lv_obj_t *lbl = lv_obj_get_child(s_hand_rows[i], 0);
+        if (lbl != NULL) {
+            lv_obj_set_style_text_color(lbl,
+                (i == cur) ? TEXT_HL_COLOR : TEXT_COLOR, 0);
+        }
+    }
+}
+
+/* 从子页返回指定页面，并把根页面垫在返回栈底。
+   ⚠ lv_menu 没有"回到某页"的 API：直接 clear_history + set_page(page) 会让
+   cur_depth=1，返回按钮被判定为"根"（点击变成关闭菜单）。先压 root 再压目标
+   页（depth=2）后，返回按钮才会正常回到 root。 */
+static void menu_return_to(lv_obj_t *page)
+{
+    lv_menu_clear_history(s_menu);
+    if (page != s_root_page) {
+        lv_menu_set_page(s_menu, s_root_page);
+    }
+    lv_menu_set_page(s_menu, page);
+}
+
 /* ------------------------------------------------------------------ */
 /* 交互事件                                                             */
 /* ------------------------------------------------------------------ */
@@ -586,10 +676,8 @@ static void cw_speed_row_cb(lv_event_t *e)
              CW_SPEED_TXT[next], (unsigned)next);
 }
 
-/* 息屏档位行：点击设置并返回根页面。
-   ⚠ 不能直接 lv_menu_set_page(root)：lv_menu 会把 root 也压入历史
-   （cur_depth 增长），返回按钮会"先回子页再回根"；先 clear_history
-   再 set_page(root) 才能干净地回到根（cur_depth=1）。 */
+/* 屏幕超时档位行：点击设置并返回「显示设置」页（2026-11 起本页挂在
+   显示设置下，不再直接回根页面）。 */
 static void screen_off_row_cb(lv_event_t *e)
 {
     uint32_t idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
@@ -597,9 +685,39 @@ static void screen_off_row_cb(lv_event_t *e)
     config_store_set_screen_off_s(sec);
     ESP_LOGI(TAG, "screen off -> %u s", (unsigned)sec);
     menu_refresh_screen_off_sel();
-    menu_refresh_root();
-    lv_menu_clear_history(s_menu);
-    lv_menu_set_page(s_menu, s_root_page);
+    menu_refresh_display();
+    menu_return_to(s_display_page);
+}
+
+/* 旋转档位：点击后**立即生效**（PPA 硬件旋转），触摸坐标同时跟随旋转。
+   ⚠ 先 lvgl_port_set_display_rotation（失败=PPA 不可用，则不写 NVS、保持原角），
+   成功后再持久化；整屏重绘由 lvgl_port_set_display_rotation 内部完成。 */
+static void rotation_row_cb(lv_event_t *e)
+{
+    const uint32_t idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    const uint16_t deg = ROTATION_STEPS[idx];
+    if (!lvgl_port_set_display_rotation(deg)) {
+        ESP_LOGW(TAG, "display rotation -> %u deg failed (PPA unavailable)",
+                 (unsigned)deg);
+        return;
+    }
+    config_store_set_display_rotation(deg);
+    ESP_LOGI(TAG, "display rotation -> %u deg (touch follows)", (unsigned)deg);
+    menu_refresh_rotation_sel();
+    menu_refresh_display();
+    menu_return_to(s_display_page);
+}
+
+/* 触屏校准：右撇子（0）/左撇子（1），立即生效（触摸 read_cb 每次轮询都读配置） */
+static void hand_row_cb(lv_event_t *e)
+{
+    const uint32_t idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    const bool left = (idx == 1);
+    config_store_set_touch_left_handed(left);
+    menu_refresh_hand_sel();
+    menu_refresh_display();
+    ESP_LOGI(TAG, "touch calibration -> %s", left ? "left-handed" : "right-handed");
+    menu_return_to(s_display_page);
 }
 
 /* 返回按钮（header）：根页面时点击 = 关闭菜单；
@@ -808,8 +926,8 @@ static void dev_restart_row_cb(lv_event_t *e)
 }
 
 /* 构建开发者选项子页（**懒加载**：从关于页首次点进来时才构建）。
-   S31 版本只保留"触摸测试白点"（开机检查、重启生效）：
-   它对应 lvgl_port_init 末尾是否创建圆点。
+   2026-11 起「画面旋转」已移到「显示设置」，本页只剩触摸测试白点
+   （开机检查、重启生效，对应 lvgl_port_init 末尾是否创建圆点）。
    入口行由 about_page_build() 挂在关于页最下方。 */
 static lv_obj_t *dev_page_build(void)
 {
@@ -819,7 +937,7 @@ static lv_obj_t *dev_page_build(void)
     lv_obj_t *dev_page = lv_menu_page_create(s_menu, (char *)"开发者选项");
     page_style_apply(dev_page);
 
-    /* 1. 触摸测试白点：开关 */
+    /* 1. 触摸测试白点：开关（重启生效） */
     lv_obj_t *touch_row = menu_row_create(dev_page, NULL,
                                           "触摸测试白点", &s_dev_touch_status);
     lv_obj_add_flag(touch_row, LV_OBJ_FLAG_CLICKABLE);
@@ -831,7 +949,7 @@ static lv_obj_t *dev_page_build(void)
     menu_note_row_create(dev_page,
         "以上修改保存到设备（NVS），重启后生效。");
 
-    /* 3. 立即重启：一键生效 */
+    /* 4. 立即重启：一键生效 */
     lv_obj_t *restart_row = menu_row_create(dev_page, LV_SYMBOL_REFRESH,
                                             "立即重启生效", NULL);
     lv_obj_add_flag(restart_row, LV_OBJ_FLAG_CLICKABLE);
@@ -855,14 +973,17 @@ static lv_obj_t *dev_page_build(void)
    为把它从**开机路径**上彻底移除，页面改为**分级懒加载**：
      - 外壳（背景层 + lv_menu + header）与根页面：首次打开菜单时构建
        （实测 44ms）；
-     - 6 个子页（+ 关于页里的"开发者选项"）：**首次点进该子页时**才构建。
+     - 各子页（含开发者选项、显示设置里的三个子页）：**首次点进该子页时**才构建。
    实测效果：开机主界面提前约 305ms 出现（1943 → 1638ms），且未打开过设置时
    常驻内部 RAM / DMA 各多出约 29KB（SD 读余量同步变宽松）。 */
 
 /* 各子页构建器（**幂等**：已构建则直接返回句柄）。定义在本节末尾，
    这里先统一前向声明（root_page_build / about_page_build 会引用）。 */
 static lv_obj_t *sleep_page_build(void);
+static lv_obj_t *display_page_build(void);
 static lv_obj_t *screen_off_page_build(void);
+static lv_obj_t *rotation_page_build(void);
+static lv_obj_t *hand_page_build(void);
 static lv_obj_t *cw_page_build(void);
 static lv_obj_t *time_date_page_build(void);
 static lv_obj_t *power_page_build(void);
@@ -872,8 +993,9 @@ static lv_obj_t *dev_page_build(void);
 static lv_obj_t *rescan_page_build(void);
 
 /* 懒加载入口表：行的事件 user_data 传**下标**（C 不允许函数指针与 void*
-   互转，故不走"指针塞 user_data"那条路） */
-#define LAZY_ENTRY_MAX  12
+   互转，故不走"指针塞 user_data"那条路）。
+   容量：根页面 8 + 开发者选项 1 + 显示设置 3 = 12，留 4 个余量给后续页面 */
+#define LAZY_ENTRY_MAX  16
 static lv_obj_t *(*s_lazy_builders[LAZY_ENTRY_MAX])(void);
 static uint8_t s_lazy_count = 0;
 
@@ -912,7 +1034,7 @@ static lv_obj_t *lazy_row_create(lv_obj_t *parent, const char *icon,
     return row;
 }
 
-/* 根页面：8 个功能行（睡眠定时器 / 屏幕自动息屏 / 虚拟 ClickWheel /
+/* 根页面：8 个功能行（睡眠定时器 / 显示设置 / 虚拟 ClickWheel /
    时间与日期 / 电源选项 / 按键帮助 / 关于 / 重新扫描），全部为子页入口
    （子页懒加载，见上）。
    ⚠ 行数增加后根页面内容高度超过可视区（实测 6 行需 426px、可视 357px），
@@ -927,8 +1049,10 @@ static void root_page_build(void)
     /* 入口行：点击时才构建对应子页 */
     lazy_row_create(s_root_page, LV_SYMBOL_POWER, "睡眠定时器",
                     NULL, sleep_page_build);
-    lazy_row_create(s_root_page, LV_SYMBOL_EYE_CLOSE, "屏幕自动息屏",
-                    &s_screen_off_status, screen_off_page_build);
+    /* 2026-11：原「屏幕自动息屏」独立入口收进「显示设置」，同页还放
+       屏幕旋转方向与触屏校准（见 display_page_build） */
+    lazy_row_create(s_root_page, LV_SYMBOL_EYE_CLOSE, "显示设置",
+                    NULL, display_page_build);
     /* 入口行：**不显示右侧状态**（开关状态在子页第一行「开启」里看），
        标题直接点明是"选项"页——2026-09-11 用户要求 */
     lazy_row_create(s_root_page, LV_SYMBOL_REFRESH, "虚拟 ClickWheel 选项",
@@ -994,13 +1118,14 @@ static lv_obj_t *sleep_page_build(void)
     return sleep_page;
 }
 
-/* 2. 屏幕自动息屏子页：选择档位 */
+/* 2. 屏幕超时（原「屏幕自动息屏」，2026-11 起是「显示设置」的第一项）：
+   选择档位。 */
 static lv_obj_t *screen_off_page_build(void)
 {
     if (s_screen_off_page != NULL) {
         return s_screen_off_page;
     }
-    lv_obj_t *screen_off_page = lv_menu_page_create(s_menu, (char *)"屏幕自动息屏");
+    lv_obj_t *screen_off_page = lv_menu_page_create(s_menu, (char *)"屏幕超时");
     page_style_apply(screen_off_page);
     for (size_t i = 0; i < SCREEN_OFF_STEP_COUNT; i++) {
         lv_obj_t *opt = menu_row_create(screen_off_page, NULL,
@@ -1014,6 +1139,78 @@ static lv_obj_t *screen_off_page_build(void)
     s_screen_off_page = screen_off_page;
     ESP_LOGI(TAG, "screen off page built");
     return screen_off_page;
+}
+
+/* 2.1 显示设置子页（2026-11 新页）：屏幕超时（第一项）/ 屏幕旋转方向 /
+   触屏校准。三个入口都是懒加载子页。
+   ⚠ 屏幕超时页原本直接挂在根页面，现按用户要求收进本页；它选完档位后
+   返回的是本页（见 screen_off_row_cb 的 menu_return_to）。 */
+static lv_obj_t *display_page_build(void)
+{
+    if (s_display_page != NULL) {
+        return s_display_page;
+    }
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"显示设置");
+    page_style_apply(page);
+
+    lazy_row_create(page, NULL, "屏幕超时", &s_screen_off_status,
+                    screen_off_page_build);
+    lazy_row_create(page, NULL, "屏幕旋转方向", &s_rotation_status,
+                    rotation_page_build);
+    lazy_row_create(page, NULL, "触屏校准", &s_hand_status,
+                    hand_page_build);
+
+    menu_refresh_display();
+    s_display_page = page;
+    ESP_LOGI(TAG, "display page built");
+    return page;
+}
+
+/* 2.1.1 屏幕旋转方向子页：0/90/180/270 四档，点击立即生效（PPA 硬件旋转） */
+static lv_obj_t *rotation_page_build(void)
+{
+    if (s_rotation_page != NULL) {
+        return s_rotation_page;
+    }
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"屏幕旋转方向");
+    page_style_apply(page);
+    for (size_t i = 0; i < ROTATION_STEP_COUNT; i++) {
+        lv_obj_t *opt = menu_row_create(page, NULL, ROTATION_TXT[i], NULL);
+        lv_obj_add_flag(opt, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(opt, rotation_row_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)i);
+        s_rotation_rows[i] = opt;
+    }
+    menu_note_row_create(page,
+        "旋转立即生效，触摸坐标会跟随画面一起旋转（无需重启）。");
+    menu_refresh_rotation_sel();
+    s_rotation_page = page;
+    ESP_LOGI(TAG, "rotation page built");
+    return page;
+}
+
+/* 2.1.2 触屏校准子页：右撇子（默认）/ 左撇子，切换立即生效。
+   只影响 29/30 缩放的锚角，不改变触摸与画面的旋转关系。 */
+static lv_obj_t *hand_page_build(void)
+{
+    if (s_hand_page != NULL) {
+        return s_hand_page;
+    }
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"触屏校准");
+    page_style_apply(page);
+    for (size_t i = 0; i < HAND_STEP_COUNT; i++) {
+        lv_obj_t *opt = menu_row_create(page, NULL, HAND_TXT[i], NULL);
+        lv_obj_add_flag(opt, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(opt, hand_row_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)i);
+        s_hand_rows[i] = opt;
+    }
+    menu_note_row_create(page,
+        "使用不同的手握持时，建议选择对应的触屏校准逻辑。");
+    menu_refresh_hand_sel();
+    s_hand_page = page;
+    ESP_LOGI(TAG, "touch calibration page built");
+    return page;
 }
 
 /* 3. 虚拟 ClickWheel 子页（长列表右下角速滑按钮）。

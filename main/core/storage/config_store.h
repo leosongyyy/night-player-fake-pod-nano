@@ -60,9 +60,13 @@ extern "C" {
  *                       的圈数乘一个 ≤1 的系数（0.25 一档均匀变化）——
  *                       普通 ×1.00（不计算）/ 快速 ×0.75 / 极速 ×0.50；
  *                       设置菜单里点击循环切换
- *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关，
- *     开机读取决定是否启动相关任务/创建调试对象，修改需重启生效）：
- *     - 触摸测试白点 touch_test（bool，默认关，见 core/ui/touch_test）
+ *   - 开发者选项（设置菜单 → 关于 → 开发者选项，均为 NVS 运行时开关）：
+ *     - 触摸测试白点 touch_test（bool，默认关，见 core/ui/touch_test；
+ *       开机读取决定是否创建调试对象，修改需重启生效）
+ *     - 画面旋转 rotation（NVS 存"角度/90"的 u8 索引；0/90/180/270 顺时针，
+ *       默认 90）：PPA 硬件旋转画面，触摸会跟随旋转，切换**立即生效**
+ *     - 触屏校准 touch_left（bool，默认 false=右撇子）：决定 29/30 缩放的
+ *       锚角——右撇子以**旋转后左上角**为原点，左撇子以**右上角**为原点
  *   - 回放增益总开关 replay_gain（bool，默认**开**）：关=所有歌曲按 0dB
  *     播放（.npd 元数据里的增益值不再应用），开=按元数据增益应用。播放设置页
  *     第 8 格切换并持久化；控制器轮询到变化后重新应用到音频链路（见
@@ -177,6 +181,8 @@ typedef enum {
     CONFIG_STORE_SLEEP_AUTO_COUNT = 3,
 } config_store_sleep_auto_t;
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
+#define CONFIG_STORE_TOUCH_LEFT_DEFAULT   0u  /* 触屏校准默认右撇子（以旋转后左上角为缩放原点） */
+#define CONFIG_STORE_ROTATION_DEFAULT     90u /* 画面旋转默认 90°（PPA 实验，开发者选项可切 0/90/180/270） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
 #define CONFIG_STORE_BATT_CARE_DEFAULT    0u  /* 电池健康保护默认关（标准 4.2V 满电） */
 #define CONFIG_STORE_TIME_24H_DEFAULT     1u  /* 时间显示默认 24 小时制 */
@@ -311,6 +317,25 @@ uint8_t config_store_get_click_wheel_speed(void);
 
 /** @brief 触摸测试白点开关（true=开机创建跟随手指的白色圆点；默认关） */
 bool config_store_get_touch_test(void);
+
+/**
+ * @brief 画面旋转角度（顺时针 0/90/180/270；默认 90）
+ *
+ * 实验性功能（PPA 硬件旋转，见 ideas_and_exps/PPA_ROTATE.md）：
+ * 只旋转画面，**不旋转触摸**。由开发者选项切换，立即生效并持久化；
+ * 开机时由 lvgl_port_init 读取后交给 PPA 旋转模块。
+ * 无 NVS 记录（首次烧录/升级）时返回 CONFIG_STORE_ROTATION_DEFAULT。
+ */
+uint16_t config_store_get_display_rotation(void);
+
+/**
+ * @brief 触屏校准：是否左手握持（左撇子模式；默认 false = 右撇子）
+ *
+ * 触摸坐标的变换顺序是「先按画面旋转做逆变换，再按本项决定 29/30 缩放的
+ * 锚角」：右撇子以**旋转后的左上角**为原点，左撇子以**旋转后的右上角**
+ * 为原点（纵向都以顶部为原点）。由「显示设置 → 触屏校准」切换，立即生效。
+ */
+bool config_store_get_touch_left_handed(void);
 
 /** @brief 回放增益总开关（true=按 .npd 元数据增益应用；false=全部按 0dB 播放。
  *          默认开） */
@@ -487,6 +512,15 @@ void config_store_set_click_wheel_speed(uint8_t speed);
 /** @brief 设置触摸测试白点开关并持久化（开发者选项；开机检查，重启生效，
  *          仅持久化不通知回调） */
 void config_store_set_touch_test(bool on);
+
+/** @brief 设置画面旋转角度并持久化（显示设置；0/90/180/270，越界忽略）。
+ *          ⚠ 只存 NVS：实际生效由调用方随后调用
+ *            lvgl_port_set_display_rotation()（立即重绘）完成 */
+void config_store_set_display_rotation(uint16_t cw_deg);
+
+/** @brief 设置触屏校准的左右手（true=左撇子，false=右撇子；默认右撇子）。
+ *          立即生效（触摸 read_cb 每次轮询都读本配置），仅持久化不通知回调 */
+void config_store_set_touch_left_handed(bool left);
 
 /** @brief 设置回放增益总开关并持久化（播放设置页第 8 格）。
  *          立即生效：音频链路由控制器轮询到变化后重新应用增益；同时通知
