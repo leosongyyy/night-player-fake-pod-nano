@@ -23,7 +23,10 @@ set(MAIN_SRCS
     "core/hardware/audio/cs43131.c"
     "core/hardware/audio/mp3_player.c"
     "core/hardware/audio/eq.c"
-    "core/network/wifi_time_sync.c"
+    # ⚠ 2026-11-15 WiFi对时**暂时下线**（换内部 RAM / UI 帧率）：本文件不再编。
+    #   源文件保留在树里；恢复时把下面这行取消注释，并把根 CMakeLists.txt 的
+    #   COMPONENTS 白名单里 5 个网络组件一并恢复（见 WIFI_TIME_SYNC.md）。
+    # "core/network/wifi_time_sync.c"
     "core/player/player_controller.c"
     "core/player/shuffle_player.c"
     "core/ui/lvgl_port.c"
@@ -67,7 +70,7 @@ set(MAIN_SRCS
     "ui/eq_popup.c"
     "ui/config_slot_popup.c"
     "ui/time_date_popup.c"
-    "ui/time_sync_ui.c"
+    # "ui/time_sync_ui.c"   # 2026-11-15 WiFi对时暂时下线（见 core/network 那条注释）
     "ui/toast.c")
 
 # 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR

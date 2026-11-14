@@ -21,7 +21,7 @@
 #include "ui/main_ui.h"
 #include "ui/now_playing.h"
 #include "ui/time_date_popup.h"
-#include "ui/time_sync_ui.h"
+#include "ui/toast.h"
 
 #include <stdio.h>
 
@@ -1296,10 +1296,17 @@ static void time_date_time_row_cb(lv_event_t *e)
     time_date_popup_show_time();
 }
 
+/* WiFi对时（2026-11-15 暂时下线）：菜单入口保留，点击只弹提示。
+   WiFi 协议栈（esp_wifi/lwip/wpa_supplicant/esp_netif）常驻占用约 27KB
+   内部 RAM，是蓝牙之后 UI 帧率的主要挤压来源；先按用户要求砍掉换帧率。
+   恢复步骤：把 core/network/wifi_time_sync.c 与 ui/time_sync_ui.c 加回
+   main/CMakeLists.txt 的 MAIN_SRCS、根 CMakeLists.txt 的 COMPONENTS 白名单
+   取消注释 5 个网络组件，再把本回调改回 time_sync_ui_start()。
+   见 ideas_and_exps/WIFI_TIME_SYNC.md 的「暂时下线」一节。 */
 static void time_date_sync_row_cb(lv_event_t *e)
 {
     (void)e;
-    time_sync_ui_start();
+    ui_toast_show("WiFi对时暂未实现");
 }
 
 static void time_date_tz_row_cb(lv_event_t *e)
@@ -1323,8 +1330,8 @@ static void time_date_fmt_row_cb(lv_event_t *e)
       设置日期 / 时间设置 / WiFi对时 / 时区设置 / 时间格式 五项，
       右侧显示当前值。
       日期/时间/时区点击后弹出滚轮弹窗（ui/time_date_popup.c）；
-      WiFi对时进入全屏进度界面（ui/time_sync_ui.c），读取
-      /sdcard/.ecov/wifi.txt 连 WiFi 并做 NTP。
+      **WiFi对时 2026-11-15 暂时下线**（入口保留、点击只弹 Toast，见上方
+      time_date_sync_row_cb 的说明）。
       RTC 里存的是本地墙钟时间，时区只影响网络对时的 UTC 换算；
       改时区时由弹窗把 RTC 平移，保持绝对时刻不变。 */
 static lv_obj_t *time_date_page_build(void)
@@ -1359,9 +1366,9 @@ static lv_obj_t *time_date_page_build(void)
     lv_obj_add_flag(fmt_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(fmt_row, time_date_fmt_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 只保留一句简短说明：WiFi 配置由电脑版工具写入，本页不再堆细节
-       （2026-11-14 用户要求删掉原来的两段长说明） */
-    menu_note_row_create(page, "* WiFi对时可在电脑版工具里配置");
+    /* WiFi对时暂时下线期间，说明行改成实情提示（原来写的是"由电脑版工具配置"，
+       功能砍掉后那句话会误导） */
+    menu_note_row_create(page, "* WiFi对时暂未实现，后续版本恢复");
 
     /* 弹窗保存/对时成功后刷新本页右侧状态 */
     time_date_popup_set_refresh_cb(menu_refresh_time_date);

@@ -115,7 +115,7 @@ BT 控制器 + Bluedroid 常驻会吃掉约 **13KB 内部 DMA 池**。首版直�
 | 调整 | 效果 |
 |---|---|
 | `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`（blend 等移出 IRAM，经 `SPIRAM_FETCH_INSTRUCTIONS` 在 PSRAM 执行） | 释放约 **27KB** 内部 RAM；实测帧率仍 61fps（S31 320MHz） |
-| LVGL 绘制缓冲 `V_RES/10` → **`V_RES/16`**（双缓冲 83KB → 51KB DMA） | 释放约 **33KB DMA**；帧率约 25fps 量级 |
+| LVGL 绘制缓冲 `V_RES/10` → **`V_RES/16`**（双缓冲 83KB → 51KB DMA） | 释放约 **33KB DMA**；帧率约 25fps 量级（**2026-11-15 已改回 `/10`**，见 §4.1） |
 | mp3 `out_buf`/`stereo_buf`（9.2KB）→ PSRAM | 内部 RAM +9.2KB |
 | `audio.c` 的 `silence_flush`（11.5KB）→ PSRAM | 内部 RAM +11.5KB |
 | `bt_store` 由 1.3KB 整块 blob 改为每设备 key（`d0..d4`） | 去掉 1.3KB 落盘快照 |
@@ -129,8 +129,28 @@ BT 控制器 + Bluedroid 常驻会吃掉约 **13KB 内部 DMA 池**。首版直�
 - DMA 余量约 **17KB**（最大连续块 15KB）；
 - SD 读、播放、封面解码、UI 均正常。
 
-> ⚠ 如果改回 `V_RES/10` 或重新打开 LVGL FAST_MEM，BT 控制器初始化会再次因内部
-> 连续池不足失败（`orca_ems_env_init malloc pool failed`，随后在 BT 库内 panic）。
+> ⚠ 如果**在这个内存格局下**改回 `V_RES/10` 或重新打开 LVGL FAST_MEM，BT 控制器
+> 初始化会再次因内部连续池不足失败（`orca_ems_env_init malloc pool failed`，
+> 随后在 BT 库内 panic）。
+
+### 4.1 2026-11-15：WiFi 下线 + 栈回收后，绘制缓冲已回到 `V_RES/10`
+
+上面那套"用 `V_RES/16` 换 DMA"是在 **WiFi 协议栈还在固件里**时做的取舍。
+2026-11-15 把 WiFi对时整体下线（静态少 **30,834 B** DIRAM、Flash 少 588KB，
+见 `WIFI_TIME_SYNC.md` §9），同时回收 LVGL 栈 20→12KB、`main` 栈 16→8KB，
+于是绘制缓冲改回 `/10`（每块 ≈41KB ×2），并用**逐级回退**（`/10 → /12 → /16`）
+替代原来的 `assert`：
+
+- 分配顺序：`lvgl_port_init()` 里先要两块缓冲，**BT 栈还没启动**（`bt_service_init`
+  在后面），所以 BT 的运行时内存不跟绘制缓冲抢同一时刻的连续块；
+- 若 `/10` 拿不到连续块，会打日志并自动降 `/12`、`/16`，**不会挂启动**；
+- 真机串口应出现 `draw buffers: V_RES/10 (...)` 这一行，`MEM:` 的 `iram=`
+  与滚动 `fps=` 需要烧录后重新标定（本节 49KB/17KB 是 `/16` 时代的数字，
+  **不再适用**）。
+
+> ⚠ PPA 旋转 tile 也是按绘制缓冲大小分配的（`lvgl_ppa_rotate_init` 传的就是
+> `s_draw_buf_bytes`），所以 `/10` 实际要 **3 块 41KB**（双缓冲 + tile）的 DMA，
+> 不是 2 块。这是 `/10` 能否落地的真正门槛。
 
 ## 5. esp-dsp 的来源
 

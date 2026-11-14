@@ -70,54 +70,22 @@ static char s_month_opts[12 * 3];
 static char s_day_opts[31 * 3];
 static bool s_opts_ready = false;
 
-/* 时区档位表（常用偏移：整点 + 半小时 + 三刻钟） */
-typedef struct {
-    int minutes;
-    const char *label;
-} tz_entry_t;
-
-static const tz_entry_t TZ_TABLE[] = {
-    { -720, "UTC-12" },
-    { -660, "UTC-11" },
-    { -600, "UTC-10" },
-    { -570, "UTC-9:30" },
-    { -540, "UTC-9" },
-    { -480, "UTC-8" },
-    { -420, "UTC-7" },
-    { -360, "UTC-6" },
-    { -300, "UTC-5 纽约" },
-    { -240, "UTC-4" },
-    { -210, "UTC-3:30" },
-    { -180, "UTC-3" },
-    { -120, "UTC-2" },
-    {  -60, "UTC-1" },
-    {    0, "UTC+0 伦敦" },
-    {   60, "UTC+1 巴黎" },
-    {  120, "UTC+2" },
-    {  180, "UTC+3" },
-    {  210, "UTC+3:30" },
-    {  240, "UTC+4" },
-    {  270, "UTC+4:30" },
-    {  300, "UTC+5" },
-    {  330, "UTC+5:30 印度" },
-    {  345, "UTC+5:45" },
-    {  360, "UTC+6" },
-    {  390, "UTC+6:30" },
-    {  420, "UTC+7 曼谷" },
-    {  480, "UTC+8 北京时间" },
-    {  525, "UTC+8:45" },
-    {  540, "UTC+9 东京" },
-    {  570, "UTC+9:30" },
-    {  600, "UTC+10" },
-    {  630, "UTC+10:30" },
-    {  660, "UTC+11" },
-    {  720, "UTC+12" },
-    {  765, "UTC+12:45" },
-    {  780, "UTC+13" },
-    {  840, "UTC+14" },
-};
-#define TZ_COUNT  (sizeof(TZ_TABLE) / sizeof(TZ_TABLE[0]))
-static char s_tz_opts[TZ_COUNT][28];
+/* 时区档位（2026-11-15 改）：**动态生成**，只保留 "GMT±H[:MM]"，
+   不再带城市/地区名，也不再占约 1KB 静态 .bss（原来 TZ_TABLE + s_tz_opts）。
+   - 范围 -12:00 ~ +14:00，步长 15 分钟（与 config_store_set_tz_offset_min
+     的 15 分钟粒度一致），共 TZ_OPT_COUNT=105 档；
+   - 标签最长 "GMT-12:45"（9 字符）；整点写作 "GMT+8"，零偏移写作 "GMT"；
+   - 选项串在打开弹窗时现场拼进一块 LVGL 堆（PSRAM）缓冲，roller 内部会复制
+     一份（lv_label_set_text），拼完即可释放。
+   ⚠ 105 档比原来带城市名的 40 档长，滚轮翻起来更久；若嫌长可把
+     TZ_STEP_MIN 改成 30（常见时区已够，代价是 +5:45/+8:45/+12:45 取整）。 */
+#define TZ_MIN_OFFSET_MIN  (-12 * 60)
+#define TZ_MAX_OFFSET_MIN  ( 14 * 60)
+#define TZ_STEP_MIN        15
+#define TZ_OPT_COUNT       (((TZ_MAX_OFFSET_MIN) - (TZ_MIN_OFFSET_MIN)) \
+                            / TZ_STEP_MIN + 1)
+#define TZ_LABEL_MAX       12
+#define TZ_OPT_BUF_SIZE    (TZ_OPT_COUNT * (TZ_LABEL_MAX + 1))
 
 /* ------------------------------------------------------------------ */
 /* 格式化辅助                                                          */
@@ -144,9 +112,18 @@ void time_date_format_tz(int minutes, char *buf, size_t size)
     if (buf == NULL || size == 0) {
         return;
     }
+    if (minutes == 0) {
+        snprintf(buf, size, "GMT");
+        return;
+    }
     int abs_min = (minutes < 0) ? -minutes : minutes;
-    snprintf(buf, size, "UTC%c%d:%02d", (minutes < 0) ? '-' : '+',
-             abs_min / 60, abs_min % 60);
+    if (abs_min % 60 == 0) {
+        snprintf(buf, size, "GMT%c%d", (minutes < 0) ? '-' : '+',
+                 abs_min / 60);
+    } else {
+        snprintf(buf, size, "GMT%c%d:%02d", (minutes < 0) ? '-' : '+',
+                 abs_min / 60, abs_min % 60);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -199,10 +176,6 @@ static void options_init(void)
         if (d < 31) {
             strcat(s_day_opts, "\n");
         }
-    }
-
-    for (size_t i = 0; i < TZ_COUNT; i++) {
-        snprintf(s_tz_opts[i], sizeof(s_tz_opts[i]), "%s", TZ_TABLE[i].label);
     }
 
     /* 小时档位（00:00 ~ 23:00）：小时区间弹窗的两个滚轮共用一份字符串 */
@@ -664,14 +637,23 @@ void time_date_popup_show_time(void)
 /* 时区弹窗                                                             */
 /* ------------------------------------------------------------------ */
 
+/* 档位下标 → 分钟偏移（第 0 档 = -12:00，最后一档 = +14:00） */
+static int tz_minutes_at(int idx)
+{
+    return TZ_MIN_OFFSET_MIN + idx * TZ_STEP_MIN;
+}
+
+/* 分钟偏移 → 档位下标：就近取整，越界收敛到两端（config_store 已按 15 分钟
+   粒度存，所以正常情况下就是精确命中） */
 static int tz_index_of(int minutes)
 {
-    for (size_t i = 0; i < TZ_COUNT; i++) {
-        if (TZ_TABLE[i].minutes == minutes) {
-            return (int)i;
-        }
+    if (minutes <= TZ_MIN_OFFSET_MIN) {
+        return 0;
     }
-    return -1;
+    if (minutes >= TZ_MAX_OFFSET_MIN) {
+        return TZ_OPT_COUNT - 1;
+    }
+    return (minutes - TZ_MIN_OFFSET_MIN + TZ_STEP_MIN / 2) / TZ_STEP_MIN;
 }
 
 /* 把 RTC 平移 delta 分钟（保持绝对时刻不变） */
@@ -711,11 +693,11 @@ static void tz_save_cb(lv_event_t *e)
 {
     (void)e;
     int idx = (int)lv_roller_get_selected(s_tz_roller);
-    if (idx < 0 || idx >= (int)TZ_COUNT) {
+    if (idx < 0 || idx >= (int)TZ_OPT_COUNT) {
         popup_hide(s_tz_root);
         return;
     }
-    int new_min = TZ_TABLE[idx].minutes;
+    int new_min = tz_minutes_at(idx);
     int old_min = config_store_get_tz_offset_min();
     if (new_min == old_min) {
         popup_hide(s_tz_root);
@@ -736,15 +718,27 @@ static void tz_save_cb(lv_event_t *e)
              shifted ? "ok" : "failed");
 }
 
-static void tz_popup_create(void)
+static bool tz_popup_create(void)
 {
-    char options[TZ_COUNT * 30];
+    /* 选项串现场生成（105 档）：放 LVGL 堆（PSRAM），不占静态 RAM，也不压
+       LVGL 任务栈（12KB）；roller 内部会复制一份，设完即可释放。 */
+    char *options = (char *)lv_malloc(TZ_OPT_BUF_SIZE);
+    if (options == NULL) {
+        ESP_LOGE(TAG, "tz options 分配失败（%u B）", (unsigned)TZ_OPT_BUF_SIZE);
+        return false;
+    }
+    size_t used = 0;
     options[0] = '\0';
-    for (size_t i = 0; i < TZ_COUNT; i++) {
-        strcat(options, s_tz_opts[i]);
-        if (i + 1 < TZ_COUNT) {
-            strcat(options, "\n");
+    for (int i = 0; i < TZ_OPT_COUNT; i++) {
+        char label[TZ_LABEL_MAX];
+        time_date_format_tz(tz_minutes_at(i), label, sizeof(label));
+        int n = snprintf(options + used, TZ_OPT_BUF_SIZE - used, "%s%s", label,
+                         (i + 1 < TZ_OPT_COUNT) ? "\n" : "");
+        if (n < 0 || (size_t)n >= TZ_OPT_BUF_SIZE - used) {
+            ESP_LOGE(TAG, "tz options 溢出（i=%d, used=%u）", i, (unsigned)used);
+            break;
         }
+        used += (size_t)n;
     }
 
     s_tz_root = popup_root_create();
@@ -755,6 +749,7 @@ static void tz_popup_create(void)
                                    + TD_ROLLER_H + TD_GAP + TD_BTN_H);
     s_tz_roller = lv_roller_create(panel);
     lv_roller_set_options(s_tz_roller, options, LV_ROLLER_MODE_NORMAL);
+    lv_free(options);
     lv_roller_set_visible_row_count(s_tz_roller, 4);
     lv_obj_set_size(s_tz_roller, TD_PANEL_W - TD_PANEL_PAD * 2, TD_ROLLER_H);
     roller_style_apply(s_tz_roller);
@@ -762,26 +757,21 @@ static void tz_popup_create(void)
     lv_obj_t *btns = button_row_create(panel);
     action_button_create(btns, "取消", false, tz_cancel_cb, NULL);
     action_button_create(btns, "保存", true, tz_save_cb, NULL);
+    return true;
 }
 
 void time_date_popup_show_tz(void)
 {
     options_init();
-    if (s_tz_root == NULL) {
-        tz_popup_create();
+    if (s_tz_root == NULL && !tz_popup_create()) {
+        ui_toast_show("内存不足，无法打开时区设置");
+        return;
     }
     int cur = config_store_get_tz_offset_min();
     int idx = tz_index_of(cur);
-    if (idx < 0) {
-        /* 不在档位表里（理论上不会，setter 已按 15 分钟取整）：就近取整点 */
-        idx = tz_index_of((cur >= 0) ? (cur / 60 * 60) : -((-cur) / 60 * 60));
-        if (idx < 0) {
-            idx = tz_index_of(CONFIG_STORE_TZ_OFFSET_DEFAULT);
-        }
-    }
     lv_roller_set_selected(s_tz_roller, (uint32_t)idx, LV_ANIM_OFF);
     popup_show(s_tz_root);
-    ESP_LOGI(TAG, "tz popup shown (%d min)", cur);
+    ESP_LOGI(TAG, "tz popup shown (%d min, idx %d)", cur, idx);
 }
 
 /* ------------------------------------------------------------------ */

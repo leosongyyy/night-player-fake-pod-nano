@@ -82,7 +82,8 @@ void time_date_format_date(const rtc_time_t *t, char *buf, size_t size);
 /** @brief "HH:MM:SS" */
 void time_date_format_time(const rtc_time_t *t, char *buf, size_t size);
 
-/** @brief "UTC+8" / "UTC-3:30" / "UTC+5:45" */
+/** @brief "GMT+8" / "GMT-3:30" / "GMT+5:45" / "GMT"（2026-11-15 起由 UTC 改叫 GMT，
+ *         与动态生成的时区滚轮选项保持一致；不再带城市名） */
 void time_date_format_tz(int minutes, char *buf, size_t size);
 
 #ifdef __cplusplus

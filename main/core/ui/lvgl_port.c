@@ -30,6 +30,10 @@ static lv_display_t *s_disp = NULL;   /* LVGL 显示对象（flush/rounder 回�
 static lv_indev_t *s_indev = NULL;    /* 触摸输入设备对象（供 LVGL 控件接收触摸事件） */
 static uint8_t *s_draw_buf1 = NULL;   /* 绘制缓冲 1（DMA，见 EXAMPLE_LVGL_BUF_HEIGHT） */
 static uint8_t *s_draw_buf2 = NULL;   /* 绘制缓冲 2（DMA，双缓冲） */
+/* 实际采用的单块缓冲字节数：正常是 V_RES/10，DMA 连续块不够时会降档（/12、/16）。
+   PPA 旋转 tile 也按这个尺寸分配，所以必须把"最终值"存下来给
+   lvgl_ppa_rotate_init() 用，不能再用编译期常量。 */
+static size_t s_draw_buf_bytes = 0;
 
 /* 刷新帧计数：LVGL 每完成一次屏幕刷新（LV_EVENT_REFR_READY）加一。
    用途：LVGL 自带的 FPS 监视器只把数字画在屏幕角落，串口看不到；真机抓
@@ -64,34 +68,38 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    2026-09-10 按用户要求改回 /10 做一轮实测（用更大缓冲换帧率）：
    重点盯 `heap_caps_get_free_size(MALLOC_CAP_DMA)`、FPS 与 SD 读失败日志，
    若再现 allocate_dma_buf 失败/无故跳曲，退回 /12。
-   ⚠ 2026-11 经典蓝牙接入后改成 /16：BT 控制器 + 协议栈从内部 DMA 池吃掉
+   2026-11 经典蓝牙接入后改成 /16：BT 控制器 + 协议栈从内部 DMA 池吃掉
    约 13KB（实测 /10 时开机完成后 DMA 仅剩 31B，SD 读全部失败 → 所有歌被判
    "坏曲"）。/16 每块 460×28×2B≈25KB、双缓冲≈51KB，比 /10 省约 33KB DMA；
    代价是帧率略降（/20 约 20fps、/10 约 30fps，/16 约 25fps 量级）。
-   若日后去掉蓝牙，可再按实测回调到 /12 或 /10。 */
-#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 16)
+   【2026-11-15】WiFi对时下线（省 ~27KB 内部 RAM）+ LVGL/main 任务栈回收后
+   改回 /10，目标是把帧率恢复到加蓝牙前的水平；同时把分配改成**逐级回退**
+   （/10 → /12 → /16），万一连续块不够也不会 assert 挂启动，只会降档并打印
+   实际档位。 回退档位见下方 k_buf_divs。 */
+#define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
 /* ⚠ 本移植层已没有"tick 周期"这个概念：tick 由 lv_tick_set_cb() 直接读硬件时间，
    原来是"esp_timer 每 2 ms 回调一次 lv_tick_inc(2)"，那套正是整屏定格的根因
    （见 lvgl_port_tick_cb 上方注释）。保留这行注释只为提醒后来者别再引回来。 */
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-/* ⚠ 栈 20KB（LVGL 9 迁移时 6KB→12KB；2026-10 TTF 迁移再 12KB→20KB）：
+/* ⚠ 栈 12KB（LVGL 9 迁移时 6KB→12KB；2026-10 TTF 迁移 12→20KB；
+   **2026-11 改回位图字体后 20→12KB**，2026-11-15 再次确认）：
    栈里要跑 lv_timer_handler 的整条渲染链（控件事件回调 → 布局/重绘 →
    各 draw unit → 刷屏 esp_lcd_panel_draw_bitmap 的 QSPI DMA 链）。
-   LVGL 8.4 下实测高水位约 3.3KB，6KB 足够；**LVGL 9 的绘制管线明显更深**
+   LVGL 8.4 下实测高水位约 3.3KB，6KB 足够；LVGL 9 的绘制管线明显更深
    （draw task / layer / 混合函数层层下探），6KB 会在"首次渲染设置页"
    这种重页面时溢出 —— 实测现象：从主界面滑到第 4 页（播放设置）必定
    `A stack overflow in task LVGL has been detected` 并 panic 重启。
-   改到 12KB 后位图字体时代不再溢出。
-   ⚠ **2026-10 TTF 迁移时**12KB 又不够了：光栅化字形会进 FreeType 的
-   smooth 光栅化器，而它把渲染池当栈上局部变量用（当时池子已从默认 16KB 压到
-   4KB），叠加深层绘制链后实测 12KB 只剩 **172 字节**，所以曾上调到 20KB。
-   **2026-11 已改回位图字体（NPF1）**，不再有光栅化，20KB 继续保留（余量约 8KB，
-   未重新收紧；位图 bpp2→A8 展开与绘制管线仍吃栈）。若内部 RAM 吃紧，可按
-   mem_monitor 的 stk 行实测后回落到 12KB。
+   改到 12KB 后位图字体时代不再溢出（当年实测高水位 5532B，余量 ~6.5KB）。
+   2026-10 TTF 迁移时 12KB 不够（FreeType 光栅化池在栈上，实测只剩 172B），
+   所以曾上调到 20KB；**2026-11 改回 NPF1 位图字体后不再光栅化**，20KB 的
+   额外 8KB 纯属 TTF 遗留 —— 2026-11-15 按用户要求回收（内部 RAM 换帧率）。
+   ⚠ 恢复 12KB 后必须回归："首次进设置页"、"息屏→亮屏全屏重刷"
+   （deep_worker 里 lv_refr_now 全屏光栅化是最深的路径）、长列表滚动。
+   若出现 `stack overflow in task LVGL`，改回 16KB 再测。
    ⚠ 内部栈不能走 PSRAM（见 AGENTS.md），加栈会吃内部 RAM，改动前先看
    mem_monitor 的 stk 行与内部 RAM 余量。 */
-#define EXAMPLE_LVGL_TASK_STACK_SIZE   (20 * 1024)
+#define EXAMPLE_LVGL_TASK_STACK_SIZE   (12 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 
 /* ESP-IDF 面板 IO 的"传输完成"回调（中断上下文）：
@@ -511,21 +519,50 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
        缓冲分配失败（assert s_draw_buf2 挂在启动阶段）。 */
     /* ⚠ 缓冲字节数向上取整到 64B：PPA（CONFIG_UI_PPA_ACCEL）要求 out.buffer 与
        out.buffer_size 都按 cache line 对齐，否则驱动内部 msync 会越过缓冲尾部。
-       多出来的 <64 字节不会被 LVGL 当成一行（h = buf_size / stride 向下取整）。 */
-    const size_t draw_buf_bytes =
-        ((size_t)EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT
-         * LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) + 63u) & ~(size_t)63u;
-    s_draw_buf1 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, draw_buf_bytes, MALLOC_CAP_DMA);
-    assert(s_draw_buf1);
-    s_draw_buf2 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, draw_buf_bytes, MALLOC_CAP_DMA);
-    assert(s_draw_buf2);
+       多出来的 <64 字节不会被 LVGL 当成一行（h = buf_size / stride 向下取整）。
+       ⚠ 分配**逐级回退**：先要 /10（加蓝牙前的帧率配置），DMA 连续块不够时
+       自动降 /12、再降 /16，只打日志不 assert —— 两缓冲 + PPA 旋转 tile 一共
+       要 3 块这么大的 DMA，开机时连续块不够的概率不为零，宁可帧率降档也不能
+       让整机起不来。 */
+    static const uint8_t k_buf_divs[] = { 10, 12, 16 };
+    for (size_t i = 0; i < sizeof(k_buf_divs) / sizeof(k_buf_divs[0]); i++) {
+        const size_t bytes =
+            ((size_t)EXAMPLE_LCD_H_RES * (EXAMPLE_LCD_V_RES / k_buf_divs[i])
+             * LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) + 63u)
+            & ~(size_t)63u;
+        s_draw_buf1 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, bytes,
+                                              MALLOC_CAP_DMA);
+        if (s_draw_buf1 == NULL) {
+            ESP_LOGW(TAG, "draw buf1 分配失败（V_RES/%u，%u B），降档重试",
+                     (unsigned)k_buf_divs[i], (unsigned)bytes);
+            continue;
+        }
+        s_draw_buf2 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, bytes,
+                                              MALLOC_CAP_DMA);
+        if (s_draw_buf2 == NULL) {
+            ESP_LOGW(TAG, "draw buf2 分配失败（V_RES/%u），降档重试",
+                     (unsigned)k_buf_divs[i]);
+            heap_caps_free(s_draw_buf1);
+            s_draw_buf1 = NULL;
+            continue;
+        }
+        s_draw_buf_bytes = bytes;
+        ESP_LOGI(TAG, "draw buffers: V_RES/%u (%u B/块, 双缓冲 %u B, "
+                      "DMA 余量 %u B, 最大连续块 %u B)",
+                 (unsigned)k_buf_divs[i], (unsigned)bytes,
+                 (unsigned)(bytes * 2),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+        break;
+    }
+    assert(s_draw_buf1 != NULL && s_draw_buf2 != NULL && s_draw_buf_bytes != 0);
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
     /* v9：显示对象在 lv_init 之后动态创建，回调与缓冲都挂到该对象上 */
     s_disp = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     assert(s_disp);
     lv_display_set_flush_cb(s_disp, lvgl_flush_cb);
-    lv_display_set_buffers(s_disp, s_draw_buf1, s_draw_buf2, draw_buf_bytes,
+    lv_display_set_buffers(s_disp, s_draw_buf1, s_draw_buf2, s_draw_buf_bytes,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_user_data(s_disp, panel_handle);
     /* 重绘区域对齐：v8 的 disp_drv.rounder_cb 在 v9 里改为显示事件 */
@@ -549,7 +586,7 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
        初始角度来自 NVS（开发者选项里可运行时切换，见
        lvgl_port_set_display_rotation）。 */
     if (!lvgl_ppa_rotate_init(panel_handle, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES,
-                              draw_buf_bytes, config_store_get_display_rotation())) {
+                              s_draw_buf_bytes, config_store_get_display_rotation())) {
         ESP_LOGW(TAG, "PPA 旋转不可用，画面保持未旋转");
     }
 

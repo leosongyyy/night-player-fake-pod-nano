@@ -61,8 +61,12 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_320=y
 # 8KB 时栈溢出 12.6KB 跌进 .bss，把 esp_pm / task_wdt 的静态量写坏（详见
 # ideas_and_exps/FontSystem.md §崩溃定位）。2026-11 已改回位图字体（NPF1，
 # 不再光栅化），16KB 继续保留（未重新收紧）；这个栈只在 app_main 期间占用，
-# app_main 返回后随任务一起释放。若内部 RAM 吃紧，可实测后回落到 8KB。
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# app_main 返回后随任务一起释放。
+# 【2026-11-15】按用户要求回落到 8KB：位图字体下不再有光栅化，8KB 是 TTF
+# 迁移前的原值；而且 LVGL 绘制缓冲（V_RES/10，两块 41KB DMA）正是在 app_main
+# 里分配的，这个栈活着会直接占掉 8KB 连续内部 RAM —— 回落等于给绘制缓冲让路。
+# 若开机出现 "***ERROR*** A stack overflow in task main" 再退回 16KB。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_SYSTEM_BBPLL_RECALIB=n
 CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
 CONFIG_ESP_WIFI_STATIC_TX_BUFFER=y
