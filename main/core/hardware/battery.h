@@ -77,6 +77,44 @@ bool battery_is_charging(void);
 
 /** @brief 读取完整电池快照（含电压/电量/充电状态） */
 esp_err_t battery_read_info(battery_info_t *info);
+/* ⚠ 不提供电池温度：本板 TS 脚是固定电阻（无 NTC），读数恒定无意义，
+   设置页已移除「电池温度」一项（见 axp2101_read_ts_mv 的说明）。 */
+
+/**
+ * @brief 应用/取消"电池健康保护"（充电到约 4.0V 后软件停充）
+ *
+ * 开启：CV 保持 **4.2V**，但在 VBAT ≥ 4.0V 时写 `0x18[1]=0` 停充；
+ *       放电到 VBAT ≤ 3.9V 时自动恢复充电（见 battery_health_protection_tick）。
+ *       ≈ 75~80% 电量，充电/恢复仍由本模块与 PMU 配合完成。
+ * 关闭：恢复充电，CV 4.2V，标准满电。
+ *
+ * ⚠ **不能改成"把 CV 降到 4.0V"**：当电池电压高于 CV 时 PMU 会断开 BATFET
+ *   （充电完成保护），此时拔掉充电器 VSYS 无来源 → DCDC 欠压保护硬断电。
+ *   真机已复现（电池 4.17V、CV 4.0V，拔电后 0x21=0x20 DCDC_UV）。
+ * ⚠ PMU 每次上电都会恢复 EFUSE 默认，所以开机时必须按 NVS 配置重新下发一次。
+ *
+ * @param on true=4.0V 限充；false=标准满电
+ * @return ESP_OK / PMU 错误
+ */
+esp_err_t battery_set_health_protection(bool on);
+
+/**
+ * @brief 电池健康保护的周期检查（建议 1s 调一次）
+ *
+ * 开通时：≥4.0V 停充、≤3.9V 恢复；关闭时兜底确保充电已恢复。
+ * 只在保护开启/停充状态下才读 I²C，其余时候几乎零开销。
+ * ⚠ 可从任意任务调用（内部互斥 + I²C 不写 flash）；正常使用时由
+ *   `power_service` 的 1s 守护任务调用，充电界面由 `chg_mon` 调用。
+ */
+void battery_health_protection_tick(void);
+
+/**
+ * @brief 当前是否处于"保护性停止充电"状态（保护开启 且 已到 4.0V 停充）
+ *
+ * 充电专用界面用它把大环画成**完整一圈**表示"充电已停止"（而不是按实际
+ * 电量画弧），同时环中心仍显示实际电量。保护关闭/未停充时返回 false。
+ */
+bool battery_health_protection_is_stopped(void);
 
 /* ---------------------------- 纯函数（可自检） -------------------------- */
 

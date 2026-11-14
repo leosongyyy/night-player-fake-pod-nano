@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "core/fonts/system_font.h"
+#include "core/hardware/axp2101.h"
+#include "core/hardware/battery.h"
 #include "core/image/default_cover.h"
 #include "core/player/player_controller.h"
 #include "core/hardware/display.h"
@@ -13,9 +15,15 @@
 #include "core/storage/playlist_builder.h"
 #include "core/storage/playlist_store.h"
 #include "core/ui/lvgl_port.h"   /* lvgl_port_lock/unlock：写入分区时冻结 LVGL */
+#include "core/utils/deep_worker.h"   /* 充电界面息屏/亮屏的深链 */
 #include "core/utils/mem_trace.h"
+#include "core/utils/fake_shutdown.h"
 #include "core/utils/sleep_timer.h"
+#include "core/utils/task_psram.h"
+#include "driver/gpio.h"   /* 充电界面的下键（GPIO61）"任意键亮屏"用 */
 #include "esp_log.h"
+#include "esp_system.h"   /* esp_restart()：充电界面短按上键进入正常系统 */
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -71,6 +79,7 @@ typedef enum {
     BOOT_ST_SCANNING,     /* 正在扫描（进度每 300ms 更新） */
     BOOT_ST_NO_MUSIC,     /* 扫描后无音乐（停在此屏） */
     BOOT_ST_NORMAL,       /* 进入常规界面 */
+    BOOT_ST_CHARGING,     /* 充电专用界面（插充电器开机；拔电即 PMU 关机） */
 } boot_state_t;
 
 static boot_state_t s_state = BOOT_ST_NONE;
@@ -337,6 +346,383 @@ static void boot_enter_normal(void)
 
     ESP_LOGI(TAG, "enter normal UI");
     mem_trace_log("ui:enter normal done");
+}
+
+/* ------------------------------------------------------------------ */
+/* 充电专用界面（插充电器自动开机）                                       */
+/* ------------------------------------------------------------------ */
+
+/* 轮询周期：200ms——拔充电器要尽快反应（PMU 已不在充电，系统靠电池跑），
+   但也不必更密；1s 刷一次界面足够（电量/电压变化很慢）。 */
+#define CHG_POLL_MS            50u
+#define CHG_UI_REFRESH_US      (1000 * 1000)
+/* 开机后宽限 1.5s 再判断"没插充电器"：避免 PMU 上电瞬间 VBUS 状态抖动导致
+   刚进界面就关机。 */
+#define CHG_UNPLUG_GRACE_US    (1500 * 1000)
+/* 充电界面无操作自动息屏：10 秒（按任意键亮屏；亮屏后短按上键才进系统） */
+#define CHG_AUTO_SCREEN_OFF_US (10 * 1000 * 1000)
+/* 充电界面：上键按住满 0.6s 进入系统（与"按住电源键开机"语义一致）。
+   PMU 的 IRQLEVEL 最短是 1s，所以不用 PMU 长按事件，由固件计时。 */
+#define CHG_BOOT_HOLD_US       (600 * 1000)
+/* 充电界面的"任意键"：上键 = PMU PWRON（无主控 GPIO）；下键 = GPIO61（低有效） */
+#define CHG_DOWN_KEY_GPIO      GPIO_NUM_61
+#define CHG_MON_STACK          4096u
+#define CHG_MON_PRIO           4
+#define CHG_MON_CORE           1   /* 与 LVGL(Core0) 分开 */
+
+static lv_obj_t *s_chg_arc     = NULL;   /* 大环：电量 0~100（lv_arc） */
+static lv_obj_t *s_chg_percent = NULL;   /* 环中心百分比 */
+static lv_obj_t *s_chg_status  = NULL;   /* 环中心下方状态 */
+static lv_obj_t *s_chg_care    = NULL;   /* 底部小字：电池健康保护是否启用 */
+/* 关机流程互斥：拔电检测每 50ms 一次，关机失败后不要反复重试 */
+static volatile bool s_chg_shutting_down = false;
+/* 充电界面息屏状态（独立的轻量息屏：AMOLED SLEEP IN + 挂起 LVGL，与
+   power_service 的息屏互不影响——charge-only 模式没有初始化 power_service） */
+static bool     s_chg_screen_off = false;
+/* 最近一次"按键活动"时刻（us）：自动息屏计时基准 */
+static int64_t  s_chg_last_activity_us = 0;
+/* 上一次"按住"状态与按下时刻：上键按住满 0.6s 进入系统（PMU 的 IRQLEVEL 最短
+   1s，做不到 0.6s，所以由固件计时）。 */
+static bool     s_chg_up_prev = false;
+static int64_t  s_chg_up_press_us = 0;
+/* 下键上一轮的去抖状态 */
+static int      s_chg_down_stable = 1;   /* 1=抬起，0=按下（去抖后的稳定值） */
+static int      s_chg_down_debounce = 0;
+
+/* 充电界面亮度：用户配置 + 下限 128（插着充电器时至少半亮，别像没开机） */
+static uint8_t charging_ui_brightness(void)
+{
+    uint8_t b = config_store_get_brightness();
+    return (b < 128) ? 128 : b;
+}
+
+#define CHG_COLOR_ACTIVE  lv_color_hex(0xFFC000)   /* 充电中：黄（项目强调色） */
+#define CHG_COLOR_FULL    lv_color_hex(0x30D158)   /* 已充满：绿 */
+
+/* 刷新界面（**必须持 LVGL 锁**）。info==NULL 表示本次读取失败。 */
+static void charging_ui_update(const battery_info_t *info)
+{
+    if (s_chg_arc == NULL) {
+        return;
+    }
+
+    /* 底部小字：**只在保护开启时显示**「电池健康保护：开启」；关闭时整条隐藏
+       （本界面无法改设置，但每次刷新都读一次，保持与 NVS 一致）。 */
+    if (s_chg_care != NULL) {
+        if (config_store_get_batt_care()) {
+            lv_label_set_text(s_chg_care, "电池健康保护：开启");
+            lv_obj_clear_flag(s_chg_care, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_chg_care, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    if (info == NULL || info->percent == 0xFF) {
+        lv_arc_set_value(s_chg_arc, 0);
+        lv_obj_set_style_arc_color(s_chg_arc, lv_palette_main(LV_PALETTE_GREY),
+                                   LV_PART_INDICATOR);
+        if (s_chg_percent != NULL) {
+            lv_label_set_text(s_chg_percent, "--%");
+        }
+        if (s_chg_status != NULL) {
+            lv_label_set_text(s_chg_status, "电池信息不可用");
+            lv_obj_set_style_text_color(s_chg_status, lv_palette_main(LV_PALETTE_GREY), 0);
+        }
+        return;
+    }
+
+    /* 电池健康保护开启且已到 4.0V 停充时：大环画成**完整一圈**表示"充电已停止"，
+       不再按实际电量画弧；环中心仍显示实际电量（信息不丢）。 */
+    const bool care_stopped = battery_health_protection_is_stopped();
+    lv_arc_set_value(s_chg_arc, care_stopped ? 100 : info->percent);
+    if (s_chg_percent != NULL) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%u%%", (unsigned)info->percent);
+        lv_label_set_text(s_chg_percent, buf);
+    }
+
+    /* 状态文案：
+       · 保护性停充 = "充电已停止"（到 4.0V 上限，不是真的充满）；
+       · 阶段 DONE = PMU 判定充满；
+       · 电池健康保护开启时，PMU 在约 4.0V 被软件停充（阶段=not charging 但
+         VBUS 在位、电压已到上限）——对用户来说就是"已充满"，不能显示成
+         "未在充电"让人以为没在充。 */
+    const bool full = care_stopped
+                      || (info->charge_stage == AXP2101_CHG_DONE)
+                      || (!info->charging && info->vbat_mv >= 4000);
+    lv_obj_set_style_arc_color(s_chg_arc, full ? CHG_COLOR_FULL : CHG_COLOR_ACTIVE,
+                               LV_PART_INDICATOR);
+    if (s_chg_status != NULL) {
+        lv_label_set_text(s_chg_status,
+                          care_stopped ? "充电已停止"
+                                       : full ? "已充满"
+                                              : info->charging ? "正在充电"
+                                                               : "未在充电");
+        lv_obj_set_style_text_color(s_chg_status,
+                                    full ? CHG_COLOR_FULL : lv_color_white(), 0);
+    }
+}
+
+/* 息屏"重活"（deep_worker 内部 12KB 栈执行）：AMOLED SLEEP IN → 挂起 LVGL。
+   ⚠ 与 power_service 的区别：这里在**持 LVGL 锁**时挂起 LVGL 任务，再释放锁。
+   若像 power_service 那样"先解锁、再 suspend"，LVGL 任务可能刚好拿到锁并卡在
+   lv_timer_handler 里被挂起 → 锁永远不释放，之后所有 lvgl_port_lock 都会死等。
+   持锁时挂起则保证 LVGL 任务没有持锁。 */
+static void charging_screen_off_do(void *arg)
+{
+    (void)arg;
+    if (lvgl_port_lock(-1)) {
+        display_sleep_enter();
+        lvgl_port_suspend();
+        lvgl_port_unlock();
+    }
+}
+
+/* 亮屏"重活"（deep_worker 内部栈执行）：唤醒 AMOLED（SLEEP OUT + 重发完整
+   初始化）→ 全屏重刷 → 恢复亮度 → 恢复 LVGL（同样在持锁时 resume，见上）。
+   ⚠ 顺序与 power_service_do_screen_on 一致：先于 LVGL 恢复完成，且刷完
+   才点亮亮度（面板重初始化会清显示 RAM，必须在黑屏状态刷完整屏）。 */
+static void charging_screen_on_do(void *arg)
+{
+    (void)arg;
+    if (lvgl_port_lock(-1)) {
+        display_sleep_exit();
+        lv_obj_invalidate(lv_scr_act());
+        lv_refr_now(NULL);
+        display_set_brightness(charging_ui_brightness());
+        lvgl_port_resume();
+        lvgl_port_unlock();
+    }
+}
+
+/* 息屏（监控任务上下文，非 LVGL 任务）：深链委托 deep_worker，失败就地兜底
+   （息屏不做全屏重刷，4KB 栈足够）。 */
+static void charging_screen_off(void)
+{
+    if (s_chg_screen_off) {
+        return;
+    }
+    s_chg_screen_off = true;
+    if (!deep_worker_call(charging_screen_off_do, NULL)) {
+        ESP_LOGW(TAG, "deep_worker unavailable, screen off in monitor task");
+        charging_screen_off_do(NULL);
+    }
+    ESP_LOGI(TAG, "charging UI: screen off (no key for 10s)");
+}
+
+/* 亮屏：委托 deep_worker（全屏重刷需要大栈）；失败时只做最小恢复并告警。 */
+static void charging_screen_on(void)
+{
+    if (!s_chg_screen_off) {
+        s_chg_last_activity_us = esp_timer_get_time();
+        return;
+    }
+    s_chg_screen_off = false;
+    if (!deep_worker_call(charging_screen_on_do, NULL)) {
+        ESP_LOGE(TAG, "deep_worker unavailable, cannot fully re-init display");
+    }
+    s_chg_last_activity_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "charging UI: screen on (key pressed)");
+}
+
+/* 记录一次按键活动：重置自动息屏计时 */
+static void charging_note_activity(void)
+{
+    s_chg_last_activity_us = esp_timer_get_time();
+}
+
+/* 拔掉充电器：交给 fake_shutdown 走统一关机链（deep_worker 12KB 内部栈：
+   显示「充电器已断开，正在关机...」→ 挂起 LVGL → 写 PMU 0x10 断电）。
+   ⚠ 充电专用模式下播放器/SD/NVS 都未初始化，流程中的保存现场/停播放/卸 SD
+     都是无操作，真正生效的是"显示提示 + 挂起 LVGL + PMU 断电"。
+   ⚠ 若此时是息屏状态，先亮屏再关机，否则用户看不到"正在关机"提示。
+   ⚠ 本函数运行在 charging_monitor_task（PSRAM 栈）：只做投递，不在本任务里
+     渲染 LVGL / 关缓存，因此安全。 */
+static void charging_shutdown(void)
+{
+    if (s_chg_shutting_down) {
+        return;
+    }
+    s_chg_shutting_down = true;   /* 关机失败也不重试（PMU 长按 4s 硬件兜底） */
+    if (s_chg_screen_off) {
+        charging_screen_on();
+    }
+    ESP_LOGW(TAG, "charger removed -> shutdown via PMU");
+    fake_shutdown_charger_unplugged();
+}
+
+/* 充电监控任务（PSRAM 栈，Core1）：
+   · 50ms 轮询上键（PMU 按住状态/短按事件）与下键（GPIO61）；
+     息屏时按任意键只亮屏，亮屏后短按上键才 esp_restart 进系统；
+   · 无按键 10 秒自动息屏（AMOLED SLEEP IN + 挂起 LVGL）；
+   · 每 200ms 读一次 PMU 状态（电量/电压/VBUS，界面 1s 刷一次）；
+   · 拔掉充电器 → 宽限 1.5s 后 PMU 关机。 */
+static void charging_monitor_task(void *arg)
+{
+    (void)arg;
+    const int64_t start_us = esp_timer_get_time();
+    int64_t last_ui_us = 0;
+    int64_t last_care_us = 0;
+    int     battery_div = 0;
+    bool    info_ok = false;
+    battery_info_t info;
+    memset(&info, 0, sizeof(info));
+    s_chg_last_activity_us = start_us;
+
+    /* 下键（GPIO61）：充电模式不初始化 button_service，这里自己配置输入上拉。
+       只用于"按任意键亮屏"，亮屏状态下无动作。 */
+    const gpio_config_t key_cfg = {
+        .pin_bit_mask = 1ULL << CHG_DOWN_KEY_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&key_cfg) != ESP_OK) {
+        ESP_LOGW(TAG, "GPIO%d config failed (down key cannot wake screen)",
+                 CHG_DOWN_KEY_GPIO);
+    }
+
+    while (1) {
+        const int64_t now = esp_timer_get_time();
+
+        /* 1) PMU 快照：每 200ms 一次（50ms × 4），界面仍只 1s 刷一次 */
+        if (battery_div == 0) {
+            info_ok = (battery_read_info(&info) == ESP_OK);
+        }
+        if (++battery_div >= 4) {
+            battery_div = 0;
+        }
+
+        /* 电池健康保护（4.0V 软件限充）：充电模式没有 power_service，
+           这里同样每秒维护一次（息屏期间也继续）。 */
+        if (now - last_care_us >= (int64_t)CHG_UI_REFRESH_US) {
+            last_care_us = now;
+            battery_health_protection_tick();
+        }
+
+        /* 2) 上键（PMU PWRON）：
+              · 按下沿 = 任意键亮屏（息屏时先亮屏）；
+              · **按住满 0.6s = 进入系统**（与"按住电源键开机"语义一致）。
+              PMU 的 IRQLEVEL 最短 1s，做不了 0.6s，所以这里用按住时长计时。 */
+        const bool up_pressed = axp2101_is_power_key_pressed();
+        if (up_pressed) {
+            if (!s_chg_up_prev) {
+                s_chg_up_press_us = now;
+                charging_note_activity();
+                if (s_chg_screen_off) {
+                    charging_screen_on();
+                }
+            } else if (now - s_chg_up_press_us >= CHG_BOOT_HOLD_US) {
+                ESP_LOGW(TAG, "charging UI: power key held 0.6s -> restart "
+                              "to normal system");
+                vTaskDelay(pdMS_TO_TICKS(50));
+                esp_restart();
+            }
+        }
+        s_chg_up_prev = up_pressed;
+
+        /* 3) 下键（GPIO61，低有效）：去抖后按下沿 = 任意键亮屏 */
+        const int down_raw = (gpio_get_level(CHG_DOWN_KEY_GPIO) == 0) ? 0 : 1;
+        if (down_raw != s_chg_down_stable) {
+            if (++s_chg_down_debounce >= 2) {
+                s_chg_down_stable = down_raw;
+                s_chg_down_debounce = 0;
+                if (down_raw == 0) {
+                    charging_note_activity();
+                    if (s_chg_screen_off) {
+                        charging_screen_on();
+                    }
+                }
+            }
+        } else {
+            s_chg_down_debounce = 0;
+        }
+
+        /* 4) 10 秒无按键自动息屏 */
+        if (!s_chg_shutting_down && !s_chg_screen_off
+                && (now - s_chg_last_activity_us) >= CHG_AUTO_SCREEN_OFF_US) {
+            charging_screen_off();
+        }
+
+        /* 6) 界面刷新：只在亮屏时做（息屏期间 LVGL 已挂起） */
+        if (!s_chg_shutting_down && !s_chg_screen_off && info_ok
+                && (now - last_ui_us) >= (int64_t)CHG_UI_REFRESH_US) {
+            last_ui_us = now;
+            if (lvgl_port_lock(1000)) {
+                charging_ui_update(&info);
+                lvgl_port_unlock();
+            }
+        }
+
+        /* 7) 拔掉充电器：宽限期后 PMU 关机（关机中/失败后不再重复触发） */
+        if (!s_chg_shutting_down && info_ok && !info.vbus_present
+                && (now - start_us) >= (int64_t)CHG_UNPLUG_GRACE_US) {
+            charging_shutdown();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(CHG_POLL_MS));
+    }
+}
+
+void boot_flow_run_charger_mode(void)
+{
+    s_state = BOOT_ST_CHARGING;
+    lv_obj_t *root = boot_root_create();
+
+    /* 大环展示电量：12 点方向为起点（rotation=270），顺时针填满一圈 */
+    s_chg_arc = lv_arc_create(root);
+    lv_obj_set_size(s_chg_arc, 330, 330);
+    lv_obj_center(s_chg_arc);
+    lv_obj_clear_flag(s_chg_arc, LV_OBJ_FLAG_CLICKABLE);   /* 纯显示，拖动把手也去掉 */
+    lv_arc_set_rotation(s_chg_arc, 270);
+    lv_arc_set_bg_angles(s_chg_arc, 0, 360);
+    lv_arc_set_range(s_chg_arc, 0, 100);
+    lv_arc_set_value(s_chg_arc, 0);
+    lv_obj_set_style_arc_width(s_chg_arc, 22, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_chg_arc, 22, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_chg_arc, lv_color_hex(0x2A2A2E), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_chg_arc, CHG_COLOR_ACTIVE, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_chg_arc, true, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(s_chg_arc, true, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_chg_arc, 0, LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_chg_arc, 0, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_chg_arc, 0, LV_PART_KNOB);
+
+    /* 环中心：大号百分比（montserrat_48）+ 状态文字 */
+    s_chg_percent = lv_label_create(root);
+    lv_label_set_text(s_chg_percent, "--%");
+    lv_obj_set_style_text_font(s_chg_percent, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(s_chg_percent, lv_color_white(), 0);
+    lv_obj_align(s_chg_percent, LV_ALIGN_CENTER, 0, -18);
+
+    s_chg_status = lv_label_create(root);
+    lv_label_set_text(s_chg_status, "正在充电");
+    lv_obj_set_style_text_font(s_chg_status, UI_SYSTEM_FONT, 0);
+    lv_obj_set_style_text_color(s_chg_status, lv_color_white(), 0);
+    lv_obj_align(s_chg_status, LV_ALIGN_CENTER, 0, 42);
+
+    /* 最下方小字：只在电池健康保护开启时显示；关闭时整条隐藏 */
+    s_chg_care = lv_label_create(root);
+    lv_obj_set_style_text_font(s_chg_care, UI_SMALL_FONT, 0);
+    lv_obj_set_style_text_color(s_chg_care, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_align(s_chg_care, LV_ALIGN_BOTTOM_MID, 0, -24);
+    if (config_store_get_batt_care()) {
+        lv_label_set_text(s_chg_care, "电池健康保护：开启");
+    } else {
+        lv_obj_add_flag(s_chg_care, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    battery_info_t info;
+    charging_ui_update((battery_read_info(&info) == ESP_OK) ? &info : NULL);
+
+    if (task_create_psram_stack(charging_monitor_task, "chg_mon", CHG_MON_STACK,
+                                NULL, CHG_MON_PRIO, NULL, CHG_MON_CORE) != pdPASS) {
+        ESP_LOGE(TAG, "create charging monitor task failed: charger-unplug "
+                      "shutdown will NOT work");
+    } else {
+        ESP_LOGW(TAG, "charge-only UI shown (unplug -> PMU off, hold 0.6s -> restart)");
+    }
 }
 
 /* ------------------------------------------------------------------ */

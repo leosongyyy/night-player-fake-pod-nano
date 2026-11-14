@@ -643,6 +643,16 @@ void pmu_charge_limit_tick(const axp2101_status_t *st)
 
 #### 10.5.5 本项目落地现状（改动量很小）
 
+> ⚠ **2026-11 真机实测补充（很重要）**：把 CV 降到**低于当前电池电压**（例如电池 4.17V、
+> CV 4.0V）时，PMU 会进入"电池高于目标/充电完成"状态：它自己把 `0x18[1]`（充电使能）
+> 清成 0，并**断开 BATFET**。这时插着 VBUS 系统还能跑（由 VBUS 供电），但**拔掉充电器
+> 的瞬间 VSYS 没有电池来源 → DCDC 欠压保护直接断电**（`0x21=0x20`）。
+> 所以"降 CV 做保养"只适合电池本来就低于目标电压的场合，正常使用会被坑；
+> 先把电放到 4.0V 以下再开保护也只能把问题推迟到下一次充满（到 4.0V 又会断 BATFET）。
+> 本项目最终采用 **CV 保持 4.2V + 软件 `0x18[1]=0` 停充（4.0V 停 / 3.9V 恢复）**，
+> 避免进入"完成"态、BATFET 保持导通；实现见
+> [`../POWER_OPTIONS_AND_CHARGE_BOOT.md`](../POWER_OPTIONS_AND_CHARGE_BOOT.md) §3。
+
 - 现有 `axp2101_configure_charge(uint16_t icc_ma, uint8_t iterm_code, bool cv_42v)` 的 CV 参数是 **bool**（4.2 V 或"不动"），要支持 4.0/4.1 V 得改成档位枚举（`000..101` 或 `axp2101_cv_t`）；
 - 现有 `axp2101.h` 只提供**读**寄存器（`axp2101_read_reg`），没有写 `0x18` 的接口；做方案 B 需新增 `axp2101_set_charge_enable(bool)`（读-改-写 bit1，**保留 bit3=1、bit0=0**）；
 - Kconfig 建议：`CONFIG_PMU_CHARGE_CV`（choice：4.0 / 4.1 / 4.2 V）与 `CONFIG_PMU_CHARGE_LIMIT_PERCENT`（0=关 / 80 / 90），默认都取"关/4.2 V"，避免改变现有行为。

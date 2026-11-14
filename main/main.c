@@ -12,6 +12,7 @@
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/audio/eq.h"
 #include "core/hardware/battery.h"
+#include "core/hardware/boot_reason.h"
 #include "core/hardware/button_service.h"
 #include "core/hardware/display.h"
 #include "core/hardware/hw_selftest.h"
@@ -132,6 +133,40 @@ void app_main(void)
     ESP_LOGI(TAG, "Initialize AXP2101 PMU (battery voltage / SOC / charge status)");
     battery_init();
     mem_trace_log("07-battery");
+
+    /* 开机原因：主控复位/深度睡眠唤醒原因 + PMU 本次开机来源
+       （按键开机 / 插电开机 / 电池插入…）。⚠ 必须在 battery_init 之后：
+       要读 AXP2101 的 0x20/0x21。 */
+    boot_reason_init();
+
+    /* 电池健康保护（NVS 配置 → 4.0V 软件限充）：PMU 每次上电都会把配置
+       恢复成 EFUSE 默认，所以每次开机都要重新下发；关闭时也会恢复充电。
+       ⚠ 不能把 CV 降到 4.0V：电池高于 CV 时 PMU 会断开 BATFET，拔电会硬断电。 */
+    battery_set_health_protection(config_store_get_batt_care());
+
+    /* 插充电器自动开机（PMU 0x20 bit2 置位 + 主控"上电类"复位）→ 只进
+       "正在充电"专用界面：不初始化 RTC / 音频 / 播放列表 / SD / 按键 / 电源
+       服务，既省电也不会在充电时放歌。app_main 到此返回，LVGL 任务与充电
+       监控任务继续工作（拔电 → PMU 关机；按住上键 0.6s → esp_restart 进系统）。 */
+    if (boot_reason_is_charger_boot()) {
+        ESP_LOGW(TAG, "charger boot: enter charge-only UI");
+        if (lvgl_port_lock(-1)) {
+            boot_flow_run_charger_mode();
+            lv_refr_now(NULL);
+
+            /* 充电界面至少半亮：配置亮度太低（16~127）时看起来像没开机 */
+            uint8_t chg_brightness = config_store_get_brightness();
+            if (chg_brightness < 128) {
+                chg_brightness = 128;
+            }
+            ESP_LOGI(TAG, "Turn on display (charging UI, brightness %d)",
+                     chg_brightness);
+            display_set_brightness(chg_brightness);
+            lvgl_port_unlock();
+        }
+        mem_trace_log("07c-charging_ui");
+        return;
+    }
 
     /* PCF85063A 实时时钟：必须在 touch_init() 之后（复用触摸建立的 I²C0 总线）。
        ⚠ 只在时间无效（OS=1/出厂默认/字段非法）时用"项目诞生日"校时，

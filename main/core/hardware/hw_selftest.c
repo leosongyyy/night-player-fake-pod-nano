@@ -112,6 +112,27 @@ static void test_pmu_soc_interp(void)
     test_check("pmu_soc_interp", ok);
 }
 
+static void test_pmu_ts_temp(void)
+{
+    bool ok = true;
+    int16_t c = 0;
+
+    /* datasheet Table 6-3 的锚点必须精确命中 */
+    ok &= axp2101_ts_mv_to_celsius(500, &c) && (c == 25);
+    ok &= axp2101_ts_mv_to_celsius(604, &c) && (c == 20);
+    ok &= axp2101_ts_mv_to_celsius(3150, &c) && (c == -20);
+    ok &= axp2101_ts_mv_to_celsius(152, &c) && (c == 60);
+
+    /* 中间值线性插值：500mV(25℃) 与 604mV(20℃) 之间 552mV → 约 22~23℃ */
+    ok &= axp2101_ts_mv_to_celsius(552, &c) && (c >= 22 && c <= 23);
+
+    /* 超出表格范围（TS 悬空 / 被固定电阻拉死）必须判为不可用，不能给假温度 */
+    ok &= !axp2101_ts_mv_to_celsius(3200, &c);
+    ok &= !axp2101_ts_mv_to_celsius(100, &c);
+
+    test_check("pmu_ts_temp", ok);
+}
+
 static void test_pmu_status_decode(void)
 {
     axp2101_status_t st;
@@ -372,13 +393,12 @@ static void test_pmu_hardware(void)
         test_skip("pmu_gauge_soc", esp_err_to_name(err));
     }
 
-    /* 5) TS 引脚：判断板上有没有 NTC（≈500mV=NTC，≈0V=下拉到地，其它=悬空） */
+    /* 5) TS 引脚（诊断）：本板 TS 接的是**固定电阻**（不是 NTC），电压读数恒定，
+          因此只打印电压确认 ADC/引脚工作；不显示、不推算温度（无物理意义）。 */
     uint16_t ts_mv = 0;
     if (axp2101_read_ts_mv(&ts_mv) == ESP_OK) {
-        ESP_LOGI(TAG, "TS pin = %u mV (%s)", ts_mv,
-                 (ts_mv < 50) ? "pulled to GND, no NTC"
-                              : (ts_mv > 300 && ts_mv < 800) ? "NTC present"
-                                                             : "floating/unexpected");
+        ESP_LOGI(TAG, "TS pin = %u mV (fixed resistor, no NTC; "
+                      "battery temperature not available)", ts_mv);
         test_pass("pmu_ts_pin");
     } else {
         test_fail("pmu_ts_pin", "read failed");
@@ -620,6 +640,7 @@ static void hw_selftest_task(void *arg)
 
     test_pmu_icc_encoding();
     test_pmu_soc_interp();
+    test_pmu_ts_temp();
     test_pmu_status_decode();
     test_pmu_key_levels_encode();
     test_rtc_bcd();

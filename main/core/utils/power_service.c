@@ -2,6 +2,7 @@
 
 #include <assert.h>
 
+#include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
@@ -96,6 +97,10 @@ static void power_service_task(void *arg)
     (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SVC_CHECK_MS));
+
+        /* 电池健康保护（4.0V 软件限充）：每秒检查一次，达到 4.0V 停充、
+           降到 3.9V 恢复；保护关闭时几乎零开销（快速返回）。 */
+        battery_health_protection_tick();
 
         /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒）；被 hold_awake
            抑制时（网络对时/长流程）跳过，避免进度界面中途黑屏 */

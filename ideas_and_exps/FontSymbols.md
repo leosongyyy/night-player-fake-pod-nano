@@ -1,6 +1,8 @@
 # 内嵌字库字形清单（重新生成 system_global_font_lite.c / system_smaller_font.c）
 
-> 2026-10-25 生成。**权威字符集文件：`ideas_and_exps/FontSymbols.symbols.txt`**（单行 383 字，
+> 2026-10-25 生成；**2026-11-14 重新统计并重生成**（457 字：新增「电源选项」电池信息、
+> 充电专用界面、时区/网络对时等此前遗漏的上屏字，含 `℃`、`·`、`Ω`、`…`）。
+> **权威字符集文件：`ideas_and_exps/FontSymbols.symbols.txt`**（单行 457 字，
 > 可直接喂给 `lv_font_conv --symbols`，不要在对话/文档里手工转抄——手抄漏过字）。
 >
 > 用途：TTF 主路径不可用时（font 分区为空/损坏、`CONFIG_UI_FONT_TTF=n`）界面会回退到**内嵌位图字体**，
@@ -74,6 +76,31 @@ lv_font_conv --bpp 2 --size 20 --no-compress --stride 1 --align 1 `
   `MiSans-Normal.ttf` / `MiSans-Bold.ttf` 即可（20px 原来用的是 **Bold**，Droid 只有常规字重）。
 - `--range 32-127` 必须保留（ASCII：数字、拉丁字母、半角标点）。
 - `--symbols` 一定要用 `.Trim()`（或手工粘贴时确认末尾没有多余换行/空格，否则会多出一个空白字形）。
+
+### 2026-11-14 重生成备注（lv_font_conv 1.5.3 与 2026-10 版本的行为差异）
+
+本次用 `npm install --prefix tempdir/npm-font lv_font_conv`（1.5.3）+ `tempdir/system.ttf`
+重新生成了两份字库（457 字）。与上面的命令有三处差异，重生成时**必须**手工补回：
+
+1. 1.5.3 **不再支持** `--stride` / `--align`（会报 unrecognized arguments），去掉即可；
+   默认 bitmap 布局对 LVGL 没有影响。
+2. 1.5.3 生成的文件头**没有** `__has_include("lvgl.h")` 自动探测，会落到
+   `#include "lvgl/lvgl.h"`（本工程 include 目录里没有 `lvgl/` 前缀，直接编译失败）。
+   已把两份文件的 include 分支改成 `#include "lvgl.h"`（本工程统一写法）。
+3. 1.5.3 输出 `.fallback = NULL`，**必须**改回 `&lv_font_montserrat_24` /
+   `&lv_font_montserrat_20` 并补上 `extern const lv_font_t lv_font_montserrat_XX;`
+   （否则 `LV_SYMBOL_*` 图标全变方框，见下面"注意事项 1"）。
+
+生成命令（去掉 `--stride/--align`）：
+
+```powershell
+node tempdir/npm-font/node_modules/lv_font_conv/lv_font_conv.js `
+  --bpp 2 --size 24 --no-compress --font tempdir\system.ttf `
+  --symbols "$((Get-Content -Raw ideas_and_exps/FontSymbols.symbols.txt).Trim())" `
+  --range 32-127 --format lvgl -o main/core/fonts/system_global_font_lite.c
+```
+
+（20px 把 `--size 24` 改成 `20`、输出改 `system_smaller_font.c`。）
 
 ---
 

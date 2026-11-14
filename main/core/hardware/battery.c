@@ -2,6 +2,8 @@
 
 #include "core/hardware/touch.h"   /* touch_get_i2c_bus()：I²C0 总线属于触摸驱动 */
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "battery";
 
@@ -13,8 +15,25 @@ static const char *TAG = "battery";
    用户以为已经充满（充到 100% 后还有一段恒压涓流），只有阶段 DONE 才给 100 */
 #define BATT_CHG_MAX_DISPLAY 99
 
+/* 电池健康保护（4.0V 限充）阈值：充到 4.0V 停、放电到 3.9V 恢复。
+   ⚠ 为什么不用 CV=4.0V：PMU 在 VBAT **高于** CV 时会断开 BATFET（充电完成保护），
+     此时拔掉充电器 VSYS 没有来源 → DCDC 欠压保护硬断电（真机 0x21=0x20 已证实）。
+     保持 CV=4.2V + 软件停充（0x18[1]=0），PMU 不会进入"完成"态，BATFET 常闭，
+     正常使用拔电不会关机。 */
+#define BATT_CARE_STOP_MV    4000u
+#define BATT_CARE_RESUME_MV  3900u
+
+static bool              s_care_on = false;         /* 保护功能是否开启 */
+static bool              s_charge_stopped = false;  /* 是否由保护功能停充 */
+static SemaphoreHandle_t s_care_mux = NULL;         /* 保护状态互斥（LVGL/电源任务都会碰） */
+
 void battery_init(void)
 {
+    /* 保护状态的互斥锁：设置页（LVGL 任务）切换与电源任务 tick 可能并发 */
+    if (s_care_mux == NULL) {
+        s_care_mux = xSemaphoreCreateMutex();
+    }
+
     esp_err_t err = axp2101_init(touch_get_i2c_bus());
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "battery: AXP2101 ready (voltage + gauge + charge status)");
@@ -80,6 +99,89 @@ esp_err_t battery_read_info(battery_info_t *info)
              axp2101_current_dir_name(st.current_dir),
              axp2101_charge_stage_name(st.charge_stage));
     return ESP_OK;
+}
+
+/* 设置/取消软件停充；成功才更新缓存状态 */
+static esp_err_t care_set_stopped(bool stop)
+{
+    esp_err_t err = axp2101_set_charge_enable(!stop);
+    if (err == ESP_OK) {
+        s_charge_stopped = stop;
+    }
+    return err;
+}
+
+esp_err_t battery_set_health_protection(bool on)
+{
+    if (!axp2101_is_ready()) {
+        ESP_LOGW(TAG, "battery health protection: PMU unavailable");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_care_mux != NULL) {
+        xSemaphoreTake(s_care_mux, portMAX_DELAY);
+    }
+
+    s_care_on = on;
+    /* CV 始终保持在 4.2V：PMU 的充电目标电压不能低于当前电池电压，
+       限充由软件写 0x18[1]=0 完成（见 BATT_CARE_STOP_MV 注释）。 */
+    esp_err_t err = axp2101_set_charge_voltage(AXP2101_CV_4V2);
+    uint16_t mv = 0;
+    if (err == ESP_OK && axp2101_read_vbat_mv(&mv) == ESP_OK) {
+        err = care_set_stopped(on && mv >= BATT_CARE_STOP_MV);
+    } else if (err == ESP_OK) {
+        /* 读不到电压：保守起见恢复充电（关闭保护时也必须恢复充电） */
+        err = care_set_stopped(false);
+    }
+
+    if (s_care_mux != NULL) {
+        xSemaphoreGive(s_care_mux);
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "battery health protection %s (CV 4.2V, stop at %u mV, now %s)",
+                 on ? "ON" : "OFF", (unsigned)BATT_CARE_STOP_MV,
+                 s_charge_stopped ? "charging stopped" : "charging enabled");
+    }
+    return err;
+}
+
+bool battery_health_protection_is_stopped(void)
+{
+    /* 两个 bool 的读取无需加锁（人类操作频率，最坏情况是晚 1s 反映） */
+    return s_care_on && s_charge_stopped;
+}
+
+void battery_health_protection_tick(void)
+{
+    if (!axp2101_is_ready() || s_care_mux == NULL) {
+        return;
+    }
+    /* 快速路径：保护关闭且没有被停充过，就不用每秒读 I²C */
+    if (!s_care_on && !s_charge_stopped) {
+        return;
+    }
+    if (xSemaphoreTake(s_care_mux, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+
+    uint16_t mv = 0;
+    if (axp2101_read_vbat_mv(&mv) == ESP_OK) {
+        if (s_care_on) {
+            if (!s_charge_stopped && mv >= BATT_CARE_STOP_MV) {
+                ESP_LOGI(TAG, "battery care: %u mV >= %u mV -> stop charging",
+                         (unsigned)mv, (unsigned)BATT_CARE_STOP_MV);
+                care_set_stopped(true);
+            } else if (s_charge_stopped && mv <= BATT_CARE_RESUME_MV) {
+                ESP_LOGI(TAG, "battery care: %u mV <= %u mV -> resume charging",
+                         (unsigned)mv, (unsigned)BATT_CARE_RESUME_MV);
+                care_set_stopped(false);
+            }
+        } else if (s_charge_stopped) {
+            /* 保护已关闭但充电仍停着（并发/异常）：恢复充电 */
+            care_set_stopped(false);
+        }
+    }
+
+    xSemaphoreGive(s_care_mux);
 }
 
 uint8_t battery_read_percent(void)

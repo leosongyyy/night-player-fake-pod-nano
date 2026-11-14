@@ -4,6 +4,7 @@ set(MAIN_SRCS
     "core/hardware/display.c"
     "core/hardware/touch.c"
     "core/hardware/axp2101.c"
+    "core/hardware/boot_reason.c"
     "core/hardware/rtc.c"
     "core/hardware/battery.c"
     "core/hardware/button_service.c"

@@ -91,14 +91,15 @@ static void fake_shutdown_ui_show(const char *msg)
     }
 }
 
-/* 关机执行体（deep_worker 任务上下文，**内部 RAM 栈**，可安全写 flash） */
+/* 关机执行体（deep_worker 任务上下文，**内部 RAM 栈**，可安全写 flash）。
+   arg 可传一条自定义提示文案（const char*），NULL 用默认「正在关机...」。 */
 static void fake_shutdown_run(void *arg)
 {
-    (void)arg;
+    const char *msg = (arg != NULL) ? (const char *)arg : "正在关机...";
 
-    /* 1. 提示「正在关机...」并同步刷出 */
-    fake_shutdown_ui_show("正在关机...");
-    ESP_LOGI(TAG, "shutdown: UI shown, saving data");
+    /* 1. 提示并同步刷出 */
+    fake_shutdown_ui_show(msg);
+    ESP_LOGI(TAG, "shutdown: UI shown \"%s\", saving data", msg);
 
     /* 2. 保存现场：先存播放位置（内部会写一次配置槽位 blob），再补写
           "延迟落盘"的亮度/音量（顺序同旧版：反过来会多写一次 4KB 页）。 */
@@ -150,8 +151,9 @@ static void fake_shutdown_run(void *arg)
     s_shutting_down = false;
 }
 
-/* 统一入口：先亮屏（若已息屏），再委托 deep_worker 执行关机链 */
-static void fake_shutdown_start(const char *reason)
+/* 统一入口：先亮屏（若已息屏），再委托 deep_worker 执行关机链。
+   msg 为关机提示文案（NULL = 默认「正在关机...」）。 */
+static void fake_shutdown_start_msg(const char *reason, const char *msg)
 {
     if (s_shutting_down) {
         ESP_LOGW(TAG, "shutdown already in progress, ignore (%s)", reason);
@@ -170,11 +172,17 @@ static void fake_shutdown_start(const char *reason)
     }
 
     /* 关机链调用链深（LVGL 全屏刷 + NVS 写 + SD 卸载），统一交给
-       deep_worker 的内部 12KB 栈执行；本调用方只做浅投递。 */
-    if (!deep_worker_call(fake_shutdown_run, NULL)) {
+       deep_worker 的内部 12KB 栈执行；本调用方只做浅投递。
+       ⚠ msg 是字符串字面量（静态存储期），在 deep_worker 执行期间一直有效。 */
+    if (!deep_worker_call(fake_shutdown_run, (void *)msg)) {
         ESP_LOGE(TAG, "deep_worker unavailable, cannot run shutdown chain");
         s_shutting_down = false;
     }
+}
+
+static void fake_shutdown_start(const char *reason)
+{
+    fake_shutdown_start_msg(reason, NULL);
 }
 
 void fake_shutdown_enter(void)
@@ -187,4 +195,11 @@ void fake_shutdown_wait_power_off(void)
 {
     /* 电源键长按关机（PMU 按键事件调用）：走同一条「正在关机...」流程 */
     fake_shutdown_start("power key long press");
+}
+
+void fake_shutdown_charger_unplugged(void)
+{
+    /* 充电专用界面拔掉充电器：同一条流程，文案说明原因 */
+    fake_shutdown_start_msg("charger unplugged (charge-only boot)",
+                            "充电器已断开，正在关机...");
 }

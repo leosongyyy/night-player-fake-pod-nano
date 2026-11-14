@@ -33,6 +33,19 @@ void fake_shutdown_enter(void);
  */
 void fake_shutdown_wait_power_off(void);
 
+/**
+ * @brief 充电专用界面里"拔掉充电器"触发的关机
+ *
+ * 与普通关机走同一条流程（deep_worker 大栈执行、挂起 LVGL、写 PMU 0x10），
+ * 只是提示文案改为「充电器已断开，正在关机...」。
+ *
+ * ⚠ 专用于 boot_flow 的充电界面（插电开机）；该状态下播放器/SD/NVS 都未
+ *   初始化，流程里的保存现场/停播放/卸 SD 都是无操作（各函数内部有 ready
+ *   判断），真正生效的是"挂起 LVGL + PMU 断电"。
+ * ⚠ 与其它入口共用互斥标志；失败后不会自动重试（PMU 长按 4s 硬件兜底）。
+ */
+void fake_shutdown_charger_unplugged(void);
+
 #ifdef __cplusplus
 }
 #endif

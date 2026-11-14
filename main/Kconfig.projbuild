@@ -164,6 +164,17 @@ menu "FakePodNanoNightPlayer 应用配置"
               都打开，电量计 SOC 更新等事件会让 IRQ 线持续拉低，变成中断风暴。
             关闭后电源键仍由 PMU 硬件处理开关机，只是固件收不到按键事件。
 
+    config PMU_BAT_CAPACITY_MAH
+        int "电池典型容量（mAh，仅用于界面显示）"
+        default 600
+        range 100 5000
+        help
+            本机电池的**典型容量**（mAh），设置菜单 →「电源选项」里的
+            「典型容量」一行直接显示这个值（默认 600mAh，与 FakePodNano Pro
+            的 600mAh 电芯一致）。
+            ⚠ 纯展示值，不参与电量计算/续航估算；换电池后按实际容量修改即可
+              （idfc 的过期检测会自动重新配置构建）。
+
     config PMU_CHARGE_CONFIG
         bool "启动时下发 600mAh 电池充电参数（ICC 300mA / ITERM 50mA / CV 4.2V）"
         default n

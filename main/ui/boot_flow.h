@@ -33,6 +33,22 @@ void boot_splash_show(void);
  */
 void boot_flow_run(void);
 
+/**
+ * @brief 充电专用界面（插充电器自动开机时使用）
+ *
+ * 由 main.c 在 boot_reason_is_charger_boot() 为 true 时调用（**持 LVGL 锁**），
+ * 之后 app_main 直接返回：不初始化 RTC/音频/播放列表/SD/按键/电源服务，
+ * 设备只显示"正在充电 + 当前电量"。
+ *
+ * 行为：
+ *   · 每 1 秒刷新电量与充电状态（AXP2101 0x01[2:0] DONE → "已充满"）；
+ *   · **拔掉充电器**：宽限 1.5 秒后显示"正在关机..."并写 0x10[0]=1 由 PMU
+ *     真断电（本状态没有播放/SD/NVS 写入，断电安全）；
+ *   · **短按上键**：esp_restart() 进入正常系统——重启后主控复位原因是
+ *     ESP_RST_SW，boot_reason_is_charger_boot() 自然为 false，不会再回到本界面。
+ */
+void boot_flow_run_charger_mode(void);
+
 #ifdef __cplusplus
 }
 #endif

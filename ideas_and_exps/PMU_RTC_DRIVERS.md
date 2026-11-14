@@ -211,6 +211,16 @@ I hwst: [PASS] rtc_auto_init_project_epoch
       双键同时按下，`key_handler` 恢复 S3 映射（见 §8）。
 - [ ] RTC 时间只在日志里，状态栏尚未显示时间；没有手动校时 UI（当前只能靠首次校时/重新烧录）。
 - [ ] 电量融合没有做“每 60s ±2%”平滑；若实测跳变明显再加到 UI 层。
+- [x] 设置菜单 →「电源选项」已实现（典型容量/电量/充电中/电压/温度 + 电池健康保护），
+      并在开机时按主控复位原因 + PMU `0x20` 判断插电开机、进入充电专用界面；
+      设计/验证见 [`POWER_OPTIONS_AND_CHARGE_BOOT.md`](POWER_OPTIONS_AND_CHARGE_BOOT.md)。
+- [x] 充电专用界面的真机拔插/按键流程已由用户实测通过（插电开机进界面、10s 息屏、
+      按键亮屏、短按上键重启进系统、拔电显示关机提示后断电），见
+      [`POWER_OPTIONS_AND_CHARGE_BOOT.md`](POWER_OPTIONS_AND_CHARGE_BOOT.md) §7。
+- [x] 电池健康保护：**4.0V 软件限充**（CV 保持 4.2V，`0x18[1]=0` 停充、3.9V 恢复）。
+      ⚠ 一开始试过把 CV 降到 4.0V，真机发现电池高于 CV 时 PMU 会断开 BATFET，
+      正常使用拔充电器会 DCDC 欠压硬断电（`0x21=0x20`），已改掉，见
+      [`POWER_OPTIONS_AND_CHARGE_BOOT.md`](POWER_OPTIONS_AND_CHARGE_BOOT.md) §3。
 - [ ] `CONFIG_PMU_CHARGE_CONFIG` 默认关：首次上板先只读确认，确认电池规格后再打开。
 - [ ] RTC 是否有备用电源（纽扣电池/超级电容）本板未确认；若没有，每次冷启动 OS=1 →
       会重新写成项目诞生日（符合“未初始化时初始化”的预期）。

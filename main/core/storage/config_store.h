@@ -67,6 +67,11 @@ extern "C" {
  *     播放（.npd 元数据里的增益值不再应用），开=按元数据增益应用。播放设置页
  *     第 8 格切换并持久化；控制器轮询到变化后重新应用到音频链路（见
  *     player_controller 的开关同步），设置页底部文字随之显示"关闭"
+ *   - 电池健康保护 batt_care（bool，默认**关**）：设置菜单 →「电源选项」切换。
+ *     开启时把 AXP2101 的恒压充电目标从 4.2V 降到 **4.0V**（约 75~80% 电量，
+ *     减少满电存放对电芯的损耗），关闭则写回 4.2V。真正写 PMU 寄存器由
+ *     battery_set_health_protection() 完成（本模块只存储）；PMU 每次上电都会
+ *     回默认 CV，故 main.c 开机时按本配置重新下发。全局键，不进配置槽位。
  *   - 关机前播放状态 was_playing（bool，默认 true）：伪关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
@@ -173,6 +178,7 @@ typedef enum {
 } config_store_sleep_auto_t;
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
+#define CONFIG_STORE_BATT_CARE_DEFAULT    0u  /* 电池健康保护默认关（标准 4.2V 满电） */
 #define CONFIG_STORE_TIME_24H_DEFAULT     1u  /* 时间显示默认 24 小时制 */
 
 /* ------------------------------------------------------------------ */
@@ -309,6 +315,15 @@ bool config_store_get_touch_test(void);
 /** @brief 回放增益总开关（true=按 .npd 元数据增益应用；false=全部按 0dB 播放。
  *          默认开） */
 bool config_store_get_replay_gain(void);
+
+/**
+ * @brief 电池健康保护开关（true=PMU 恒压目标 4.0V，约 75~80% 电量；默认关）
+ *
+ * 读取后由 main.c 在开机时调用 battery_set_health_protection() 下发到 PMU；
+ * 设置菜单切换时也由页面回调立即下发。PMU 每次上电都会回 4.2V，故不能只
+ * 依赖"上次写过"。
+ */
+bool config_store_get_batt_care(void);
 
 /** @brief 时间显示是否 24 小时制（true=24h，默认；false=12h，不显示上下午） */
 bool config_store_get_time_24h(void);
@@ -477,6 +492,11 @@ void config_store_set_touch_test(bool on);
  *          立即生效：音频链路由控制器轮询到变化后重新应用增益；同时通知
  *          变更回调，让设置页底部文字立即显示"关闭"/增益值 */
 void config_store_set_replay_gain(bool on);
+
+/** @brief 设置电池健康保护开关并持久化（设置菜单「电源选项」）。
+ *          ⚠ 只存 NVS：PMU 的 CV 写入由调用方随后调用
+ *            battery_set_health_protection()（或开机时 main.c）完成 */
+void config_store_set_batt_care(bool on);
 
 /** @brief 设置时间显示制式并持久化（true=24h，false=12h；状态栏/下拉栏立即刷新） */
 void config_store_set_time_24h(bool on);

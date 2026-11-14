@@ -2,6 +2,7 @@
 
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/mp3_player.h"
+#include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/hardware/rtc.h"
 #include "core/player/player_controller.h"
@@ -93,6 +94,12 @@ static lv_obj_t *s_date_status         = NULL;
 static lv_obj_t *s_time_status         = NULL;
 static lv_obj_t *s_tz_status           = NULL;
 static lv_obj_t *s_time_fmt_status     = NULL;
+
+/* 「电源选项」页：电池信息四项 + 电池健康保护开关的右侧状态文字 */
+static lv_obj_t *s_batt_percent_status  = NULL;   /* 当前电量 XX% / 未知 */
+static lv_obj_t *s_batt_charging_status = NULL;   /* 充电中 是/否/未知 */
+static lv_obj_t *s_batt_voltage_status  = NULL;   /* 电池电压 xxxx mV */
+static lv_obj_t *s_batt_care_status     = NULL;   /* 电池健康保护 开/关 */
 
 /* ⚠ 虚拟 ClickWheel 的根行**不再显示开/关状态**（2026-09-11 用户要求）：
    行标题直接写「虚拟 ClickWheel 选项」，开启状态在子页第一行「开启」里看 */
@@ -352,6 +359,74 @@ static void time_date_tick_cb(lv_timer_t *timer)
         return;
     }
     menu_refresh_time_date();
+}
+
+/* 刷新「电源选项」页的电池信息（电量 / 充电中 / 电压 / 健康保护开关）。
+   PMU 不可用或读数无效时统一显示"未知"（不显示 0 mV / 0% 这种假数据）。
+   ⚠ 不显示电池温度：本板 TS 脚接的是固定电阻（无 NTC），读到的"温度"恒定无意义。 */
+static void menu_refresh_power(void)
+{
+    battery_info_t info;
+    const bool ok = (battery_read_info(&info) == ESP_OK);
+
+    if (s_batt_percent_status != NULL) {
+        if (ok && info.percent != 0xFF) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%u%%", (unsigned)info.percent);
+            lv_label_set_text(s_batt_percent_status, buf);
+        } else {
+            lv_label_set_text(s_batt_percent_status, "未知");
+        }
+    }
+    if (s_batt_charging_status != NULL) {
+        /* "充电中"严格按"是否仍在充电"判定：阶段 DONE 表示已充满，显示"否"，
+           而不是让充电图标/状态位（DONE 仍算 charging）误导用户。 */
+        const bool actively_charging = ok && info.charging
+                                       && info.charge_stage != AXP2101_CHG_DONE;
+        lv_label_set_text(s_batt_charging_status,
+                          ok ? (actively_charging ? "是" : "否") : "未知");
+    }
+    if (s_batt_voltage_status != NULL) {
+        if (ok && info.vbat_mv > 0) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%u mV", (unsigned)info.vbat_mv);
+            lv_label_set_text(s_batt_voltage_status, buf);
+        } else {
+            lv_label_set_text(s_batt_voltage_status, "未知");
+        }
+    }
+    if (s_batt_care_status != NULL) {
+        lv_label_set_text(s_batt_care_status,
+                          config_store_get_batt_care() ? "开" : "关");
+    }
+}
+
+/* 「电源选项」页每秒刷新一次（只在该页可见时才读 I²C / 更新 LVGL）。
+   充电中电压/电量变化慢，1s 足够；读取约 1~2ms。 */
+static void power_tick_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_power_page == NULL || !lv_obj_is_visible(s_power_page)) {
+        return;
+    }
+    menu_refresh_power();
+}
+
+/* 电池健康保护开关：点击切换 → 写 NVS → 立即下发 PMU（CV 4.0V / 4.2V）。
+   不需要重启即可生效；PMU 不在时只保存配置并打日志。 */
+static void batt_care_row_cb(lv_event_t *e)
+{
+    (void)e;
+    const bool on = !config_store_get_batt_care();
+    config_store_set_batt_care(on);
+    esp_err_t err = battery_set_health_protection(on);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "battery health protection apply failed: %s",
+                 esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "battery health protection -> %s (4.0V charge limit: %s)",
+             on ? "on" : "off", on ? "stop at 4.0V" : "standard 4.2V");
+    menu_refresh_power();
 }
 
 /* 睡眠定时「开机自动开启」三档的显示文字（下标 = config_store_sleep_auto_t） */
@@ -1075,8 +1150,11 @@ static lv_obj_t *time_date_page_build(void)
     return page;
 }
 
-/* 5. 电源选项子页（占位）：本轮按需求**完全空白**，后续会话继续写。
-      只建空页面，不放任何行/说明。 */
+/* 5. 电源选项子页（2026-11）：
+      · 电池信息（无分组标题）：典型容量（Kconfig 固定值，仅展示）/ 当前电量 /
+        充电中 / 电池电压；后三项每 1 秒刷新（仅本页可见时读 PMU）。
+      · 电池健康保护开关（4.0V 软件限充），点击立即生效；下方只有一条说明。
+      ⚠ PMU 不可用 / 读数越界时统一显示"未知"，不显示假的 0。 */
 static lv_obj_t *power_page_build(void)
 {
     if (s_power_page != NULL) {
@@ -1084,8 +1162,45 @@ static lv_obj_t *power_page_build(void)
     }
     lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"电源选项");
     page_style_apply(page);
+
+    /* 典型容量：编译期配置（CONFIG_PMU_BAT_CAPACITY_MAH，默认 600mAh），
+       纯展示，给用户一个"这机器电池多大"的参考 */
+    lv_obj_t *cap_status = NULL;
+    menu_row_create(page, NULL, "典型容量", &cap_status);
+    if (cap_status != NULL) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%d mAh", CONFIG_PMU_BAT_CAPACITY_MAH);
+        lv_label_set_text(cap_status, buf);
+    }
+
+    lv_obj_t *percent_row = menu_row_create(page, NULL, "当前电量",
+                                            &s_batt_percent_status);
+    lv_obj_add_flag(percent_row, LV_OBJ_FLAG_CLICKABLE);   /* 可点（无动作），
+                                                              只为跟其它行一致的按压反馈 */
+    lv_obj_t *charging_row = menu_row_create(page, NULL, "充电中",
+                                             &s_batt_charging_status);
+    lv_obj_add_flag(charging_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *voltage_row = menu_row_create(page, NULL, "电池电压",
+                                            &s_batt_voltage_status);
+    lv_obj_add_flag(voltage_row, LV_OBJ_FLAG_CLICKABLE);
+    /* ⚠ 不显示「电池温度」：本板 TS 脚是固定电阻（无 NTC），读数恒定、没有意义 */
+
+    lv_obj_t *care_row = menu_row_create(page, NULL, "电池健康保护",
+                                         &s_batt_care_status);
+    lv_obj_add_flag(care_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(care_row, batt_care_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 只保留一条说明（用户指定文案，不要拆成多段/不要加温度说明） */
+    menu_note_row_create(page,
+        "开启电池健康保护后，充电会限制在约80%-90%左右，以延长电池寿命。"
+        "建议定期充满一次来校准电量显示。");
+
+    /* 初始刷新 + 每秒刷新（仅本页可见时） */
+    menu_refresh_power();
+    lv_timer_create(power_tick_cb, 1000, NULL);
+
     s_power_page = page;
-    ESP_LOGI(TAG, "power options page built (placeholder, empty)");
+    ESP_LOGI(TAG, "power options page built (battery info + health protection)");
     return page;
 }
 

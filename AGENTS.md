@@ -19,7 +19,7 @@
 - 存储：**16MB Flash + 16MB Octal PSRAM（200MHz）**
 - 屏幕：**CO5300** AMOLED，**460x460**，QSPI（`esp_lcd_qspi_amoled` 通用驱动），窗口 X 偏移 10；**VCI_EN=GPIO44** 必须提前拉高
 - 触摸：**CST820**，I²C0（SDA48/SCL47/INT45/RST46）
-- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——**AXP2101 / PCF85063 驱动已接入**（电压/电量/充电状态/电源键 IRQ、RTC 读时间/首次校时、**PMU 软关机（真关机）**；低电策略与 IMU 未接，见 `ideas_and_exps/PMU_RTC_DRIVERS.md`）
+- 电源：**AXP2101**（I²C0 0x34，电源键也接它）、**PCF85063 RTC**（0x51）、**QMI8658 IMU**（0x6b）——**AXP2101 / PCF85063 驱动已接入**（电压/电量/充电状态/温度/电源键 IRQ、RTC 读时间/首次校时、**PMU 软关机（真关机）**、**开机原因（按键/插电）与插电开机的充电专用界面**、**电池健康保护（4.0V 软件限充）**；低电策略与 IMU 未接，见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 与 `ideas_and_exps/POWER_OPTIONS_AND_CHARGE_BOOT.md`）
 - 耳放芯片：CS43131，**I²C1**（SDA55/SCL54，0x30），I²S1（BCK52/WS51/DIN50，RST53），24.576MHz 板载晶振
 - SD：SDMMC 4-bit，CLK24/CMD25/D0 20/D1 21/D2 22/D3 23
 - 按键：**上键 = AXP2101 PWRON 电源键**（无主控 GPIO，经 GPIO49 中断维护按下/抬起状态）+ **下键 = GPIO61 独立按键**——`button_service` 统一生成"上/下键短按、长按、双键同时按下"五类事件，`key_handler` 恢复 S3 映射：亮屏上/下=音量±1、下键长按=音量-10、上键长按=关机、双键=息屏；息屏上键短按=播放/暂停、下键短按=下一曲、下键长按=上一曲、上键长按=关机、双键=亮屏
@@ -179,9 +179,12 @@ main/
     hardware/               # 与应用无关的底层硬件驱动
       display.h/.c          # AMOLED LCD（QSPI 总线/面板）+ 屏幕尺寸配置 + 亮度控制
       touch.h/.c            # 触摸控制器（I2C + CST816/820/CHSC6417 按需选择，异步初始化）
-      axp2101.h/.c          # AXP2101 PMU 驱动（电压/电量计/充电状态/开机原因/电源键 IRQ/软关机 API）
+      axp2101.h/.c          # AXP2101 PMU 驱动（电压/电量计/充电状态/温度(TS)/开机原因/电源键 IRQ/软关机 API/CV 档位）
+      boot_reason.h/.c      # 开机原因：esp_reset_reason + esp_sleep wakeup causes + PMU 0x20/0x21
+                            #   判定"插电开机"（供 boot_flow 进充电专用界面）
       rtc.h/.c              # PCF85063A RTC 驱动（burst 读写时间/BCD/有效性/OS/首次校时）
-      battery.h/.c          # 电池应用层（AXP2101 电压 + 电量计融合 → 百分比/充电状态）
+      battery.h/.c          # 电池应用层（AXP2101 电压 + 电量计融合 → 百分比/充电状态；
+                            #   电池健康保护：4.0V 软件限充（0x18[1] 停充/3.9V 恢复））
       hw_selftest.h/.c      # AXP2101/PCF85063A 驱动自检（CONFIG_HW_SELFTEST，**不测断电**）
       button_service.h/.c   # 双键服务（上=PMU PWRON 按住状态 + 下=GPIO61 轮询；去抖、短/长按、双键同时按下）
       sd_card.h/.c          # SD 卡驱动（SDMMC 4-bit + FAT/exFAT 挂载 /sdcard）
@@ -268,7 +271,7 @@ main/
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
     now_playing.h/.c        # 正在播放页（全屏封面 + 标题栏 + 控制栏/进度条，点击封面隐藏呼出）
     settings_page.h/.c      # 播放设置页（九宫格：1循环/2随机/3睡眠定时/4 EQ/5回放增益/9配置切换，6~8 预留）
-    settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/虚拟ClickWheel/时间与日期/电源选项占位/
+    settings_menu.h/.c      # 全屏设置菜单（睡眠/息屏/虚拟ClickWheel/时间与日期/电源选项/
                             #   按键帮助/关于+开发者选项/重新扫描）；**分级懒加载**：外壳+根页面
                             #   首次打开时建（44ms），子页首次进入才建，不占开机路径（见 DONE_PLANS #44）
     time_date_popup.h/.c    # 时间与日期的滚轮弹窗：设置日期/时间/时区（挂 lv_layer_top；日期

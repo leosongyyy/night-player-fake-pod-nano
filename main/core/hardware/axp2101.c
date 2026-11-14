@@ -102,7 +102,16 @@ esp_err_t axp2101_read_vbus_mv(uint16_t *mv)
 
 esp_err_t axp2101_read_ts_mv(uint16_t *mv)
 {
-    return axp2101_read_adc14(AXP2101_REG_TS_H, mv);
+    uint16_t raw = 0;
+    esp_err_t err = axp2101_read_adc14(AXP2101_REG_TS_H, &raw);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* ⚠ TS 通道的 ADC 是 **0.5 mV/LSB**（datasheet Table 6-5），
+       VBAT/VBUS/VSYS 才是 1 mV/LSB；以前这里把原始码直接当 mV 返回，
+       会把 300mV 读成 600。 */
+    *mv = (uint16_t)((raw + 1u) >> 1);
+    return ESP_OK;
 }
 
 esp_err_t axp2101_read_soc(uint8_t *percent)
@@ -142,7 +151,8 @@ esp_err_t axp2101_read_status(axp2101_status_t *st)
         return err;
     }
 
-    /* VSYS / 电量计是"有更好、没有也能活"的辅助信息：失败不返回错误 */
+    /* VSYS / 电量计是"有更好、没有也能活"的辅助信息：失败不返回错误。
+       ⚠ 不读 TS：本板 TS 是固定电阻、没有 NTC，温度无意义（见 axp2101_read_ts_mv）。 */
     uint16_t vsys = 0;
     if (axp2101_read_vsys_mv(&vsys) == ESP_OK) {
         st->vsys_mv = vsys;
@@ -497,13 +507,72 @@ esp_err_t axp2101_configure_charge(uint16_t icc_ma, uint8_t iterm_code, bool cv_
 
     if (cv_42v) {
         /* 0x64[2:0] = 011b 对应 4.2 V（600 mAh 电芯满电电压，不要设 4.35/4.4） */
-        err = axp2101_write_masked(AXP2101_REG_CV, 0x07, 0x03);
+        err = axp2101_set_charge_voltage(AXP2101_CV_4V2);
     }
 
     ESP_LOGI(TAG, "charge config: ICC %u mA (code 0x%02X), ITERM code 0x%X, CV %s",
              axp2101_icc_ma_from_code(icc_code), icc_code, (unsigned)(iterm_code & 0x0F),
              cv_42v ? "4.2V" : "unchanged");
     return err;
+}
+
+esp_err_t axp2101_set_charge_voltage(axp2101_cv_t cv)
+{
+    if (s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* 只用 4.0 / 4.1 / 4.2V 三档；100b(4.35V)/101b(4.4V)/000b(手册标 5.0V)
+       对单节 4.2V 电芯都是错误档位，直接拒绝，避免过充。 */
+    if (cv != AXP2101_CV_4V0 && cv != AXP2101_CV_4V1 && cv != AXP2101_CV_4V2) {
+        ESP_LOGE(TAG, "refuse unsafe CV code %d (only 4.0/4.1/4.2V allowed)",
+                 (int)cv);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = axp2101_write_masked(AXP2101_REG_CV, 0x07, (uint8_t)cv);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "charge CV -> %.1f V%s", cv == AXP2101_CV_4V0 ? 4.0
+                                        : cv == AXP2101_CV_4V1 ? 4.1 : 4.2,
+                 cv == AXP2101_CV_4V0 ? " (battery health protection)" : "");
+    } else {
+        ESP_LOGW(TAG, "set charge CV failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t axp2101_set_charge_enable(bool enable)
+{
+    if (s_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t v = 0;
+    esp_err_t err = axp2101_read_reg(AXP2101_REG_GAUGE_CFG, &v);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* 只改 bit1（充电使能）：bit3 电量计保持 1、bit0 看门狗保持 0 */
+    const uint8_t nv = enable ? (uint8_t)(v | 0x02u) : (uint8_t)(v & ~0x02u);
+    if (nv != v) {
+        err = axp2101_write_reg(AXP2101_REG_GAUGE_CFG, nv);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    ESP_LOGI(TAG, "charge %s (0x18: 0x%02X -> 0x%02X)",
+             enable ? "enabled" : "disabled (4.0V limit)", v, nv);
+    return ESP_OK;
+}
+
+bool axp2101_is_charge_enabled(void)
+{
+    if (s_dev == NULL) {
+        return true;
+    }
+    uint8_t v = 0;
+    if (axp2101_read_reg(AXP2101_REG_GAUGE_CFG, &v) != ESP_OK) {
+        return true;   /* 读不到时按"已使能"处理，避免误停充电 */
+    }
+    return (v & 0x02u) != 0;
 }
 
 esp_err_t axp2101_power_off(void)
@@ -584,6 +653,41 @@ uint8_t axp2101_soc_from_mv(uint16_t mv)
         }
     }
     return 0;
+}
+
+bool axp2101_ts_mv_to_celsius(uint16_t ts_mv, int16_t *out_c)
+{
+    /* AXP2101 datasheet §6.7.4.4 Table 6-3（10kΩ NTC @25℃ + 50µA 恒流）：
+       温度从 -20℃ 到 60℃，对应 TS 电压从 3150mV 降到 152mV。
+       两列都按"温度升序"排列，查表后线性插值。 */
+    static const uint16_t ts_mv_tab[] = {
+        3150, 2508, 2013, 1628, 1325, 1084, 889, 732, 604,
+        500, 416, 348, 292, 246, 209, 177, 152,
+    };
+    static const int16_t ts_c_tab[] = {
+        -20, -15, -10, -5, 0, 5, 10, 15, 20,
+        25, 30, 35, 40, 45, 50, 55, 60,
+    };
+    const size_t n = sizeof(ts_mv_tab) / sizeof(ts_mv_tab[0]);
+
+    if (out_c == NULL) {
+        return false;
+    }
+    if (ts_mv > ts_mv_tab[0] || ts_mv < ts_mv_tab[n - 1]) {
+        return false;   /* 低于 -20℃ / 高于 60℃，或 TS 悬空/被拉死 */
+    }
+
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (ts_mv <= ts_mv_tab[i] && ts_mv >= ts_mv_tab[i + 1]) {
+            int dv = (int)ts_mv_tab[i] - (int)ts_mv_tab[i + 1];
+            int dt = (int)ts_c_tab[i + 1] - (int)ts_c_tab[i];
+            int c = (int)ts_c_tab[i]
+                    + ((int)ts_mv_tab[i] - (int)ts_mv) * dt / (dv > 0 ? dv : 1);
+            *out_c = (int16_t)c;
+            return true;
+        }
+    }
+    return false;
 }
 
 const char *axp2101_charge_stage_name(axp2101_charge_stage_t stage)

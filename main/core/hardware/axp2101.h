@@ -90,6 +90,21 @@ typedef enum {
     AXP2101_CURRENT_DISCHARGING = 2,
 } axp2101_current_dir_t;
 
+/**
+ * @brief 恒压充电目标电压档位（0x64[2:0]，编码值直接就是寄存器值）
+ *
+ * ⚠ 本板是 4.2V 满电的单节锂电：**只能**用 4.0 / 4.1 / 4.2V 三档。
+ *   4.35V(100b) / 4.4V(101b) 是高压电芯专用，000b（手册标 5.0V）更是错误档，
+ *   写错没有 BMS 兜底会直接过充。
+ * ⚠ 每次 PMU 上电（POR/System Reset）都会回 EFUSE 默认（本板实测 4.2V），
+ *   所以"电池健康保护"之类的设置必须在开机时重新下发。
+ */
+typedef enum {
+    AXP2101_CV_4V0 = 1,   /* 001b = 4.0 V（⚠ 低于电池电压会让 PMU 断开 BATFET，慎用） */
+    AXP2101_CV_4V1 = 2,   /* 010b = 4.1 V（约 85~90%） */
+    AXP2101_CV_4V2 = 3,   /* 011b = 4.2 V（本板标准满电，出厂默认） */
+} axp2101_cv_t;
+
 /** 一次状态读取的结果（电压类字段单位 mV） */
 typedef struct {
     uint8_t  raw_status1;               /* 0x00 原始值，便于日志/诊断 */
@@ -99,7 +114,7 @@ typedef struct {
     bool     batfet_closed;             /* 0x00[4]==0 表示 BATFET 导通（电池供电） */
     bool     gauge_enabled;             /* 0x18[3] 电量计使能（只读确认，默认 1） */
     uint16_t vbat_mv;                   /* 0x34/0x35，1 mV/LSB */
-    uint16_t vsys_mv;                   /* 0x3A/0x3B，可选诊断 */
+    uint16_t vsys_mv;                   /* 0x3A/0x3B，1 mV/LSB（诊断；0=读失败） */
     uint8_t  soc_percent;               /* 0xA4；0xFF = 电量计不可用/读数越界 */
     axp2101_current_dir_t  current_dir; /* 0x01[6:5] */
     axp2101_charge_stage_t charge_stage;/* 0x01[2:0] */
@@ -152,7 +167,13 @@ esp_err_t axp2101_read_vsys_mv(uint16_t *mv);
 /** @brief 读 VBUS 电压（0x38/0x39，1 mV/LSB） */
 esp_err_t axp2101_read_vbus_mv(uint16_t *mv);
 
-/** @brief 读电池温度 TS 引脚电压（0x36/0x37，1 mV/LSB，用于判断有没有 NTC） */
+/**
+ * @brief 读电池温度 TS 引脚电压（0x36/0x37，**0.5 mV/LSB**，换算成 mV 返回）
+ *
+ * ⚠ 本板 TS 脚接的是**固定电阻**（原理图确认，没有 NTC），读到的电压恒定，
+ *   换算出的"温度"没有物理意义——界面不显示电池温度，本接口只用于驱动自检/
+ *   诊断。若以后换用带 NTC 的电池，可直接接上 axp2101_ts_mv_to_celsius()。
+ */
 esp_err_t axp2101_read_ts_mv(uint16_t *mv);
 
 /** @brief 读 E-Gauge 电量百分比（0xA4，0~100；越界视为不可用返回 ESP_ERR_INVALID_RESPONSE） */
@@ -213,6 +234,38 @@ esp_err_t axp2101_set_key_levels(uint8_t onlevel, uint8_t offlevel, uint8_t irql
 esp_err_t axp2101_configure_charge(uint16_t icc_ma, uint8_t iterm_code, bool cv_42v);
 
 /**
+ * @brief 设置恒压充电目标电压（0x64[2:0]，读-改-写）
+ *
+ * ⚠ **"电池健康保护"不要用本函数降到 4.0V**：电池电压高于 CV 时 PMU 会断开
+ *   BATFET（充电完成保护），此时拔掉充电器 VSYS 无来源 → DCDC 欠压硬断电
+ *   （真机已复现）。电池健康保护走 `axp2101_set_charge_enable(false)` 软件停充，
+ *   CV 保持 4.2V。本函数保留给"把满电目标整体改低"（如换 4.1V 电芯）的场景。
+ *
+ * ⚠ 只接受 4.0 / 4.1 / 4.2V 三档；其它值（4.35/4.4/5.0V）直接返回
+ *   ESP_ERR_INVALID_ARG，防止把 4.2V 电芯写坏。
+ *
+ * @param cv 目标档位（axp2101_cv_t）
+ * @return ESP_OK / ESP_ERR_INVALID_STATE（芯片未初始化）/ ESP_ERR_INVALID_ARG
+ */
+esp_err_t axp2101_set_charge_voltage(axp2101_cv_t cv);
+
+/**
+ * @brief 软件开/关充电（0x18[1]，读-改-写，保留电量计使能与看门狗位）
+ *
+ * "电池健康保护"用它做 **4.0V 限充**：CV 保持 4.2V（不降低充电目标电压），
+ * 充到约 4.0V 时关闭充电、降到约 3.9V 再打开。这样 PMU 不会进入
+ * "充到 target 以上/完成"的状态，**BATFET 不会断开**——否则电池高于 CV 时
+ * 拔掉充电器会因 VSYS 无来源触发 DCDC 欠压保护而直接断电。
+ *
+ * ⚠ 只关充电，不断系统供电；`0x18` 的 bit3（电量计，默认 1）与 bit0（看门狗，
+ *   必须保持 0）都原样保留。
+ */
+esp_err_t axp2101_set_charge_enable(bool enable);
+
+/** @brief 当前充电使能位（0x18[1]）；读失败按"已使能"返回 true（保守） */
+bool axp2101_is_charge_enabled(void);
+
+/**
  * @brief 软件关机（写 0x10[0]=1，PMU 关掉除 RTCLDO 外全部电源）
  *
  * ⚠ 调用前必须停掉播放/扫描并 flush NVS，否则正在写 flash 时断电会写坏数据。
@@ -231,6 +284,24 @@ uint16_t axp2101_icc_ma_from_code(uint8_t code);
 
 /** @brief 由电池静置电压估算 SOC（0~100，按 600mAh 电芯 OCV 表线性插值） */
 uint8_t axp2101_soc_from_mv(uint16_t mv);
+
+/**
+ * @brief 把 TS 引脚电压（mV）换算成电池温度（℃，纯函数，可自检）
+ *
+ * 依据 AXP2101 datasheet §6.7.4.4 的 Table 6-3：10kΩ NTC（25℃）+ 50µA
+ * 恒流源时，TS 电压与温度的对应表（-20℃/3.150V … 25℃/0.500V … 60℃/0.152V）。
+ * 本函数按该表**线性插值**换算。
+ *
+ * ⚠ 本板当前 TS 脚是**固定电阻（无 NTC）**，温度恒定无意义，界面**不显示**
+ *   电池温度；本函数保留给以后换带 NTC 的电池/自检换算使用。
+ * ⚠ 电压超出表格范围（>3150mV 或 <152mV）时返回 false，调用方应显示"未知"
+ *   而不是瞎猜的温度。
+ *
+ * @param ts_mv  TS 引脚电压（mV）
+ * @param out_c  输出温度（℃）；仅返回 true 时有效
+ * @return true 换算成功；false 超出可换算范围
+ */
+bool axp2101_ts_mv_to_celsius(uint16_t ts_mv, int16_t *out_c);
 
 /** @brief 解析 0x00/0x01 两个状态字节（纯函数，不访问总线） */
 void axp2101_parse_status(uint8_t status1, uint8_t status2, axp2101_status_t *st);

@@ -42,6 +42,7 @@ static const char *TAG = "config_store";
 #define KEY_EQ_NAME          "eqname"
 #define KEY_EQ_DATA          "eqdata"
 #define KEY_REPLAY_GAIN      "replaygain"   /* 回放增益总开关：0=关，1=开 */
+#define KEY_BATT_CARE        "battcare"     /* 电池健康保护：1=CV 4.0V，0=4.2V */
 
 /* ---------- 配置槽位（SAVE1~SAVE4，见 config_store.h 文件头"配置槽位"） ----------
    ⚠ 上面那批"可切换字段"的旧全局键**保留不删**：活跃槽位从未保存过时仍读写
@@ -136,7 +137,9 @@ static bool     s_was_playing = true;
    设置页第 5 格切换并持久化；控制器轮询到变化后重新应用（见
    player_controller 的开关同步），故通知回调让设置页立即刷新文本 */
 static bool     s_replay_gain = (CONFIG_STORE_REPLAY_GAIN_DEFAULT != 0);
-
+/* 电池健康保护（默认关）：true=把 PMU 的恒压目标限制到 4.0V（约 75~80% 电量），
+   false=标准 4.2V 满电。全局键，不进配置槽位；设置菜单「电源选项」切换。 */
+static bool     s_batt_care = (CONFIG_STORE_BATT_CARE_DEFAULT != 0);
 /* ---------- 延迟落盘（NVS 写预算，见 ideas_and_exps/NVS_WRITE_BUDGET.md） ----------
  *
  * 背景：一次 nvs_commit() 要写一整页 flash（4KB）并关掉两颗核的外部缓存
@@ -740,6 +743,13 @@ void config_store_init(void)
     } else {
         s_replay_gain = (replay_gain != 0);
     }
+    /* 电池健康保护：无记录（首次烧录/升级）时默认关闭（标准 4.2V 满电） */
+    uint8_t batt_care = 0;
+    if (nvs_get_u8(s_nvs, KEY_BATT_CARE, &batt_care) != ESP_OK) {
+        s_batt_care = (CONFIG_STORE_BATT_CARE_DEFAULT != 0);
+    } else {
+        s_batt_care = (batt_care != 0);
+    }
     /* 关机前播放状态：无记录（首次烧录/升级）时保持默认 true（自动播放） */
     uint8_t was_play = 1;
     if (nvs_get_u8(s_nvs, KEY_WAS_PLAYING, &was_play) != ESP_OK) {
@@ -1070,6 +1080,11 @@ bool config_store_get_replay_gain(void)
     return s_replay_gain;
 }
 
+bool config_store_get_batt_care(void)
+{
+    return s_batt_care;
+}
+
 bool config_store_get_touch_test(void)
 {
     return s_touch_test;
@@ -1358,6 +1373,18 @@ void config_store_set_replay_gain(bool on)
     s_replay_gain = on;
     cfg_write_u8(KEY_REPLAY_GAIN, on ? 1 : 0);
     config_notify();
+}
+
+/* 电池健康保护（设置菜单「电源选项」）：只存 NVS，不通知回调——页面自身的
+   状态文字由点击回调就地刷新；PMU 的 CV 写入由调用方随后
+   battery_set_health_protection() 完成。 */
+void config_store_set_batt_care(bool on)
+{
+    if (on == s_batt_care) {
+        return;
+    }
+    s_batt_care = on;
+    cfg_write_u8(KEY_BATT_CARE, on ? 1 : 0);
 }
 
 /* 虚拟 ClickWheel 开关：立即生效（UI 侧回调隐藏/显示速滑按钮），故通知回调 */
