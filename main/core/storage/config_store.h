@@ -38,6 +38,9 @@ extern "C" {
  *   - 自动息屏超时 screen_off_s（秒，默认 30）：亮屏状态无操作（按键/触摸）
  *     超过该时长后自动息屏（见 core/utils/power_service），设置页可调。
  *     ⚠ 全局键（screenoff），**不进配置槽位**：切换 SAVE1~SAVE4 不会改变它。
+ *   - 时区 tzoff（UTC 偏移分钟数，默认 480 = UTC+8）：设置菜单 → 时间与日期
+ *     → 时区设置 可改；网络对时用它把 NTP 的 UTC 换算成本地时间。全局键，
+ *     不进配置槽位。
  *   - 虚拟 ClickWheel click_wheel（bool，默认**开**）：长列表右下角速滑按钮
  *     是否启用（见 core/ui/click_wheel）。设置菜单 →「虚拟 ClickWheel」子页
  *     切换，三项均立即生效（无需重启）：
@@ -120,6 +123,13 @@ extern "C" {
 #define CONFIG_STORE_SLEEP_DEF_ON_DEFAULT 0u  /* 开机默认不自动开启睡眠定时 */
 #define CONFIG_STORE_SLEEP_AWAKE_DEFAULT 1u   /* 睡眠清醒感知默认开启（NightPlayer 行为） */
 #define CONFIG_STORE_SCREEN_OFF_DEFAULT 30u  /* 自动息屏超时默认 30 秒 */
+/* 时区（UTC 偏移，单位分钟）：默认 +480 = UTC+8（北京时间）。
+   设置菜单 → 时间与日期 → 时区设置 可改（滚轮，15 分钟粒度）。
+   ⚠ 全局键（tzoff），不进配置槽位；RTC 里存的是**本地墙钟时间**，
+     网络对时按该偏移把 NTP 的 UTC 换算成本地时间后写入 RTC。 */
+#define CONFIG_STORE_TZ_OFFSET_DEFAULT  480
+#define CONFIG_STORE_TZ_OFFSET_MIN     (-720)   /* UTC-12:00 */
+#define CONFIG_STORE_TZ_OFFSET_MAX      840     /* UTC+14:00 */
 #define CONFIG_STORE_CLICK_WHEEL_DEFAULT 1u  /* 虚拟 ClickWheel 默认启用 */
 #define CONFIG_STORE_CW_REVERSE_DEFAULT  0u  /* 滑动方向默认"正常"（顺时针向下滚） */
 #define CONFIG_STORE_CW_SPEED_DEFAULT    0u  /* 速度档位默认"普通"（圈数不折减） */
@@ -243,6 +253,15 @@ bool config_store_get_sleep_awake(void);
 
 /** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
 uint32_t config_store_get_screen_off_s(void);
+
+/**
+ * @brief 时区（UTC 偏移，单位分钟；默认 +480 = UTC+8）
+ *
+ * RTC 存的是本地墙钟时间，网络对时按 `UTC + 本偏移` 写入；手动修改时间/日期
+ * 直接按用户看到的本地时间写 RTC。修改本值时由 UI 负责同步平移 RTC（保持
+ * 绝对时刻不变），见 ui/time_date_popup.c。
+ */
+int config_store_get_tz_offset_min(void);
 
 /** @brief 虚拟 ClickWheel 速滑按钮开关（true=长列表显示速滑按钮；默认开） */
 bool config_store_get_click_wheel(void);
@@ -385,6 +404,14 @@ void config_store_set_sleep_awake(bool on);
 
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);
+
+/**
+ * @brief 设置时区偏移并持久化（分钟，自动收敛到 -720~840，按 15 分钟取整）
+ *
+ * ⚠ 本函数只改配置，不移动 RTC：需要"改时区后钟面跟着变"的调用方
+ *   （ui/time_date_popup.c）负责把 RTC 平移 (new - old) 分钟。
+ */
+void config_store_set_tz_offset_min(int minutes);
 
 /** @brief 设置虚拟 ClickWheel 开关并持久化（设置菜单 → 虚拟 ClickWheel 子页）。
  *          与"重启生效"的开发者选项不同，本项立即生效：调用方随后

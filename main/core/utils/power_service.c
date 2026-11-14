@@ -59,6 +59,10 @@ static SemaphoreHandle_t s_mux = NULL;
    守护任务读取。volatile 保证跨任务可见性（单字节/64 位写原子）。 */
 static volatile int64_t s_last_activity_us = 0;
 
+/* "保持亮屏"抑制标志（网络对时等长流程）：true 时跳过无操作自动息屏检查。
+   只影响自动息屏，手动/按键息屏照常。 */
+static volatile bool s_hold_awake = false;
+
 /* 固定 CPU 频率（esp_pm_configure 强制 max=min=目标值）：
    返回 ESP_OK 成功；CONFIG_PM_ENABLE 未开启时返回 ESP_ERR_NOT_SUPPORTED，
    调用方降级（不调频，其余息屏功能正常）。 */
@@ -93,8 +97,9 @@ static void power_service_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SVC_CHECK_MS));
 
-        /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒） */
-        if (!s_screen_off) {
+        /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒）；被 hold_awake
+           抑制时（网络对时/长流程）跳过，避免进度界面中途黑屏 */
+        if (!s_screen_off && !s_hold_awake) {
             uint32_t timeout_s = config_store_get_screen_off_s();
             if (timeout_s != 0
                     && esp_timer_get_time() - s_last_activity_us
@@ -293,6 +298,15 @@ bool power_service_is_screen_off(void)
 void power_service_note_activity(void)
 {
     s_last_activity_us = esp_timer_get_time();
+}
+
+void power_service_set_hold_awake(bool hold)
+{
+    if (hold) {
+        /* 置位时同时刷新计时基准：否则守护任务下次醒来仍按旧时间判超时 */
+        s_last_activity_us = esp_timer_get_time();
+    }
+    s_hold_awake = hold;
 }
 
 uint32_t power_service_get_idle_sec(void)

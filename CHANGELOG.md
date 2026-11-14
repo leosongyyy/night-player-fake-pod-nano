@@ -11,13 +11,15 @@
 1. 系统字体改回**位图**：NPF1 预烘焙全字库（Droid Sans Fallback 24px/bpp2、34,461 码位），放在独立的 font 分区、运行时内存映射直读，**移除 TTF / FreeType 整条链路**。字形更清晰、不再有光栅化开销。
    ⚠ 字体镜像不在固件里，刷完固件需另刷一次字体分区（`esptool write_flash 0x600000 spiffs/system.npf`），或用全量固件。
 2. **封面改用 ESP32-S31 的硬件 JPEG 解码器**（DMA2D 直写 PSRAM）：460×460 封面解码从 100~300ms 降到 **20ms 量级**，切歌换封面基本无感。硬件路径失败会自动退回原来的软件解码，封面不会丢。
+3. 设置菜单新增 **「时间与日期」** 与 **「电源选项」** 两个入口（插在「按键帮助」之前）。时间与日期支持手动设置日期/时间（滚轮弹窗）、时区设置（UTC-12 ~ +14 常用档位，默认 UTC+8）以及**网络对时**：读取 SD 卡 `/sdcard/.ecov/wifi.txt`（第一行 SSID、第二行密码、可选第三行 NTP 服务器，默认 `ntp.aliyun.com`），WiFi 最多尝试 3 次、NTP 最多 5 次，全程显示全屏进度并可取消，成功后写入 PCF85063A RTC。电源选项本轮为空白占位页，后续版本补充。
 
 ### Bug 修复
 1. **拖动控制中心的亮度/音量竖条一顿一顿**：`config_store` 的变更通知是 100ms 延迟派发的，竖条本身也被限速成 10Hz（手指 30Hz 移动、进度条 10Hz 跳格）。改为拖动时立即刷新本面板控件，延迟派发只负责其它模块同步。
 2. **关掉「开机默认开启睡眠定时器」后每次开机定时器仍会自动开启**（切一次配置槽位也会）：根因是"睡眠定时时长"被当成配置槽位字段，两条自动路径把"记忆的时长"当成了"恢复定时的指令"。现时长与开关都改为纯全局配置，切换 SAVE1~SAVE4 完全不碰睡眠定时。槽位 blob 布局未变，升级不丢槽位。
+3. **偶发开机 panic（Cache error，发生在 NVS 初始化）**：根因不是 BOYA flash 颗粒，而是 ESP32-S31 双核分支预测器 / cache 竞态（espressif/esp-idf#18948 / IDFGH-18107）：flash 操作 suspend cache 期间，另一核的分支预测器仍会投机取指到 flash。IDF 6.1.0 快照不含上游修复，现把 `spi_flash` 组件复制进 `components/spi_flash/` 并在 `cache_utils.c` 的 flash 操作窗口内关闭/恢复分支预测（详见 `ideas_and_exps/S31_FLASH_CACHE_RACE.md`）。BOYA 专用驱动已回退，开机日志的 generic driver 提示属正常。
 
 ### 构建
-1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件 155 → 89、编译单元 1665 → 1235（−25.8%），wifi / bt / lwip / wpa_supplicant / http / OTA / protocomm / openthread / unity / cmock 全部不再编译。
+1. 组件白名单（`COMPONENTS`）裁剪：参与构建的组件 155 → 89、编译单元 1665 → 1235（−25.8%），bt / http / OTA / protocomm / openthread / unity / cmock 全部不再编译。2026-11-14 为「WiFi 对时」重新加入 **esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant**（固件 +约 650KB，仍只占 factory 分区 34%），WiFi 只用于一次性对时，库代码从 IRAM 挪回 Flash、收发缓冲缩减以省内部 RAM（详见 `ideas_and_exps/WIFI_TIME_SYNC.md`）。
 2. 关闭 `MBEDTLS_CERTIFICATE_BUNDLE` 与 `MBEDTLS_PKCS7_C`（本项目不做任何网络/TLS）。
 
 ### 性能与内存

@@ -9,6 +9,11 @@ CONFIG_IDF_TARGET="esp32s31"
 CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# 本机 flash 是 BOYA 颗粒（ID 0x68 0x4018 = BY25Q128AS），但 2026-11 排查确认：
+# 开机偶发 Cache error **不是** BOYA 驱动问题（BOYA 驱动与通用驱动实现完全相同），
+# 而是 ESP32-S31 + IDF 6.1 的双核 branch-predictor/cache 竞态（IDFGH-18107）。
+# 修复方式：把 spi_flash 组件复制到 components/spi_flash 并打补丁，详见
+# ideas_and_exps/S31_FLASH_CACHE_RACE.md。BOYA 专用驱动不再启用（用通用驱动即可）。
 # ⚠ ESP32-S31 是 IDF 6.1 的 preview 目标，IDF 给 preview/bringup 目标默认打开
 # CONFIG_IDF_ENV_BRINGUP=y，而它会把 CONFIG_ESPTOOLPY_NO_STUB 默认设为 y。
 # 无 stub 时 esptool 只能走 ROM loader 的 1KB 小块写：实测 1.79MB 固件要 113 秒
@@ -69,13 +74,36 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_LOG_COLORS=y
 # ⚠ 以下 LWIP / WIFI / mbedtls 配置项：2026-11 起 wifi/bt/lwip/wpa_supplicant
-#   等组件已被 COMPONENTS 白名单移出构建（见根 CMakeLists.txt），这些项在当前
-#   构建里**不再起作用**；保留它们是因为随时可能重新引入，删掉反而要多记一笔。
-#   真正仍生效的是下面的 mbedtls 两条关闭项 —— mbedtls 摘不掉（bootloader_support
-#   与 nvs_flash 硬依赖，见 ideas_and_exps/MBEDTLS_BUILD_AUDIT.md），但项目不做
-#   任何网络/TLS，所以证书包与 PKCS#7 纯属浪费：关掉可少编 esp_crt_bundle.c 与
-#   pkcs7.c，并跳过 gen_crt_bundle.py 生成证书包这一步（零风险，量级很小）。
+#   等组件曾被 COMPONENTS 白名单移出构建（见根 CMakeLists.txt）；2026-11
+#   加入「自动对时」后又把 WiFi/SNTP 相关组件放回白名单，下面这些项重新生效。
+#   mbedtls 两条关闭项保持：项目不做 TLS，证书包与 PKCS#7 纯属浪费。
 CONFIG_LWIP_HOOK_IP6_INPUT_NONE=y
+# 自动对时只需要 STA + SNTP，关掉 AP/企业级认证/DHCP 服务器以省 Flash 与 RAM
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_LWIP_DHCPS=n
+# esp_netif 的 TCP/IP 栈必须显式选 LwIP：该组件以前没进构建，sdkconfig 里
+# 残留了 "ESP_NETIF_TCPIP_LWIP is not set" + LOOPBACK=y（旧默认），只靠 Kconfig
+# 默认值不会改回来，表现为链接时报 esp_netif_netstack_buf_* /
+# _g_esp_netif_netstack_default_wifi_sta 未定义。
+CONFIG_ESP_NETIF_TCPIP_LWIP=y
+# CONFIG_ESP_NETIF_LOOPBACK is not set
+# WiFi 只用于**一次性**的「自动对时」（连一次 AP、发几个 NTP 包就退出），
+# 因此可以把 WiFi 库从 IRAM 挪回 Flash、并缩减静态收发缓冲，换回约 40KB
+# 内部 RAM（与 DMA 池是同一块 SRAM）。代价只是对时过程慢一点，常规播放/UI
+# 路径完全不经过 WiFi，不值得为它常驻 IRAM。
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+# 静态 RX/TX 缓冲（默认 10/16，每个约 1.6KB，esp_wifi_init 时分配）
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=4
+# 动态 RX 缓冲上限（默认 32，运行期按帧大小从内部堆分配）
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+# 关掉 SNTP 的启动延时：默认会在 init 后等最多 5 秒才发第一个请求，
+# 对时界面会白等；关掉后立即请求（重试逻辑由 wifi_time_sync.c 自己控制）
+CONFIG_LWIP_SNTP_STARTUP_DELAY=n
 CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM=y
 # CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set
 # CONFIG_MBEDTLS_PKCS7_C is not set

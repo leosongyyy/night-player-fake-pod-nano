@@ -23,6 +23,7 @@ static const char *TAG = "config_store";
 #define KEY_SLEEP_DEF_ON     "sleepdefon"
 #define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
+#define KEY_TZ_OFFSET        "tzoff"    /* 时区 UTC 偏移（分钟 + 1440 编码为 u32） */
 #define KEY_CLICK_WHEEL      "clkwheel"
 #define KEY_CW_REVERSE       "clkwheel_rev"   /* 滑动方向：0=正常，1=反转 */
 #define KEY_CW_SPEED         "clkwheel_spd"   /* 速度档位：0=普通，1=快速，2=极速 */
@@ -108,6 +109,10 @@ static bool     s_sleep_def_on = CONFIG_STORE_SLEEP_DEF_ON_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;   /* 息屏超时：全局键
                                                                      screenoff，与配置槽位无关 */
+/* 时区（UTC 偏移分钟）：全局键 tzoff，与配置槽位无关。RTC 存本地墙钟时间，
+   网络对时按 UTC + 本偏移写入（见 settings_menu / time_date_popup）。
+   NVS 里以 (offset + 1440) 存成 u32，避免负数的有符号读写分支。 */
+static int      s_tz_offset_min = CONFIG_STORE_TZ_OFFSET_DEFAULT;
 /* 虚拟 ClickWheel 速滑按钮（默认开）：设置菜单 →「虚拟 ClickWheel 选项」子页
    切换。三项配套配置：开关 / 滑动方向（正常=顺时针向下滚，反转=顺时针向上滚）/
    速度档位（普通 ×1.00 / 快速 ×0.75 / 极速 ×0.50，点击循环），均立即生效 */
@@ -647,6 +652,17 @@ void config_store_init(void)
     if (nvs_get_u32(s_nvs, KEY_SCREEN_OFF, &s_screen_off) != ESP_OK) {
         s_screen_off = CONFIG_STORE_SCREEN_OFF_DEFAULT;
     }
+    /* 时区：无记录时用默认 UTC+8；越界/脏数据钳回默认值 */
+    uint32_t tz_raw = 0;
+    if (nvs_get_u32(s_nvs, KEY_TZ_OFFSET, &tz_raw) != ESP_OK) {
+        s_tz_offset_min = CONFIG_STORE_TZ_OFFSET_DEFAULT;
+    } else {
+        s_tz_offset_min = (int)tz_raw - 1440;
+        if (s_tz_offset_min < CONFIG_STORE_TZ_OFFSET_MIN
+                || s_tz_offset_min > CONFIG_STORE_TZ_OFFSET_MAX) {
+            s_tz_offset_min = CONFIG_STORE_TZ_OFFSET_DEFAULT;
+        }
+    }
     /* 虚拟 ClickWheel：无记录（首次烧录/升级）时默认启用 */
     uint8_t click_wheel = 0;
     if (nvs_get_u8(s_nvs, KEY_CLICK_WHEEL, &click_wheel) != ESP_OK) {
@@ -971,6 +987,11 @@ uint32_t config_store_get_screen_off_s(void)
     return s_screen_off;
 }
 
+int config_store_get_tz_offset_min(void)
+{
+    return s_tz_offset_min;
+}
+
 bool config_store_get_click_wheel(void)
 {
     return s_click_wheel;
@@ -1198,6 +1219,25 @@ void config_store_set_screen_off_s(uint32_t seconds)
     }
     s_screen_off = seconds;
     cfg_write_u32(KEY_SCREEN_OFF, seconds);
+    config_notify();
+}
+
+void config_store_set_tz_offset_min(int minutes)
+{
+    /* 收敛到 UTC-12:00 ~ UTC+14:00，并按 15 分钟取整（与滚轮档位一致） */
+    if (minutes < CONFIG_STORE_TZ_OFFSET_MIN) {
+        minutes = CONFIG_STORE_TZ_OFFSET_MIN;
+    }
+    if (minutes > CONFIG_STORE_TZ_OFFSET_MAX) {
+        minutes = CONFIG_STORE_TZ_OFFSET_MAX;
+    }
+    minutes = (minutes >= 0) ? ((minutes + 7) / 15 * 15)
+                             : -(((-minutes) + 7) / 15 * 15);
+    if (minutes == s_tz_offset_min) {
+        return;
+    }
+    s_tz_offset_min = minutes;
+    cfg_write_u32(KEY_TZ_OFFSET, (uint32_t)(minutes + 1440));
     config_notify();
 }
 

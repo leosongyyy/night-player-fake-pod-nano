@@ -34,6 +34,9 @@ set(IDF_TARGET "esp32s31")
 #      vfs / esp_partition … 都会缺）。所以下面逐个列出 main 用到的组件。
 #   2) 本仓库自带的 4 个本地组件（AMOLED + 3 个触摸驱动）**必须显式列出**：
 #      main 并不 REQUIRES 它们，今天是靠"全量构建 + main 链接全部组件"才编上。
+#      另有 components/spi_flash（IDF 组件 fork，带 S31 分支预测补丁）：它是
+#      esp_partition/nvs_flash 的依赖，由依赖图自动带入，不需要写进本列表；
+#      但**不要删除该目录**（详见 ideas_and_exps/S31_FLASH_CACHE_RACE.md）。
 #   3) 以后新增任何组件依赖，漏写进本列表就会**编译报错**（报错很明显，不算
 #      隐蔽），按报缺失的头文件补一行即可。写完记得 `idfc build` 并做一次
 #      全功能真机回归（SD/FATFS、NVS 配置、字体分区、音频、触摸、分区表）。
@@ -66,6 +69,16 @@ set(COMPONENTS
     fatfs                          # esp_vfs_fat.h（SD 卡挂载，exFAT 需 IDF 本体打补丁）
     vfs                            # 文件系统注册（fatfs 依赖，直接包含亦稳妥）
     sdmmc                          # sdmmc_cmd.h / sd_protocol_defs.h（SD 卡）
+
+    # ---- 网络对时（2026-11 新增，core/network/wifi_time_sync.c） ----
+    # 时间与日期 → 自动对时：WiFi STA 连 AP + SNTP。这几项原本被剪掉，
+    # 重新加入后固件明显变大（WiFi 协议栈 + wpa_supplicant），但也带来
+    # WiFi/BT 省电策略上的内部 RAM 压力（见 AGENTS.md）。
+    esp_wifi                       # esp_wifi.h（STA 连接）
+    esp_netif                      # esp_netif.h（默认 STA netif / DHCP）
+    esp_event                      # esp_event.h（WiFi/IP 事件）
+    lwip                           # esp_sntp.h / lwip/netdb.h（SNTP + DNS）
+    wpa_supplicant                 # WPA2/WPA3 握手（esp_wifi 的实现依赖）
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

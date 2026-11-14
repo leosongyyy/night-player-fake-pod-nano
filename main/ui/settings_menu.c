@@ -3,6 +3,7 @@
 #include "core/fonts/system_font.h"
 #include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/display.h"
+#include "core/hardware/rtc.h"
 #include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
 #include "core/storage/playlist.h"
@@ -15,6 +16,8 @@
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/now_playing.h"
+#include "ui/time_date_popup.h"
+#include "ui/time_sync_ui.h"
 
 #include <stdio.h>
 
@@ -84,6 +87,11 @@ static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
 static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
 static lv_obj_t *s_rescan_count_status = NULL;   /* 重新扫描（当前歌曲总数，
                                                     不含 .pl 歌单目录；进入菜单时统计一次） */
+/* 「时间与日期」页右侧状态：当前日期 / 当前时间 / 时区 */
+static lv_obj_t *s_date_status         = NULL;
+static lv_obj_t *s_time_status         = NULL;
+static lv_obj_t *s_tz_status           = NULL;
+
 /* ⚠ 虚拟 ClickWheel 的根行**不再显示开/关状态**（2026-09-11 用户要求）：
    行标题直接写「虚拟 ClickWheel 选项」，开启状态在子页第一行「开启」里看 */
 
@@ -113,6 +121,8 @@ static lv_obj_t *s_screen_off_rows[SCREEN_OFF_STEP_COUNT] = { NULL };
 static lv_obj_t *s_sleep_page      = NULL;   /* 睡眠定时器 */
 static lv_obj_t *s_screen_off_page = NULL;   /* 屏幕自动息屏 */
 static lv_obj_t *s_cw_page         = NULL;   /* 虚拟 ClickWheel */
+static lv_obj_t *s_time_page       = NULL;   /* 时间与日期 */
+static lv_obj_t *s_power_page      = NULL;   /* 电源选项（占位） */
 static lv_obj_t *s_help_page       = NULL;   /* 按键帮助 */
 static lv_obj_t *s_about_page      = NULL;   /* 关于 */
 static lv_obj_t *s_dev_page        = NULL;   /* 开发者选项（关于页的子页） */
@@ -295,6 +305,49 @@ static void rescan_count_refresh_once(void)
              (unsigned)n);
 }
 
+/* 刷新「时间与日期」页右侧的日期/时间/时区文字。
+   RTC 不可用（未就绪/读失败/时间非法）时日期与时间显示 "--:--:--"；
+   时区来自 config_store，始终可显示。 */
+static void menu_refresh_time_date(void)
+{
+    rtc_time_t t;
+    bool ok = rtc_is_ready() && (rtc_get_time(&t) == ESP_OK)
+           && rtc_time_is_sane(&t);
+    char buf[20];
+
+    if (s_date_status != NULL) {
+        if (ok) {
+            time_date_format_date(&t, buf, sizeof(buf));
+        } else {
+            snprintf(buf, sizeof(buf), "---- -- --");
+        }
+        lv_label_set_text(s_date_status, buf);
+    }
+    if (s_time_status != NULL) {
+        if (ok) {
+            time_date_format_time(&t, buf, sizeof(buf));
+        } else {
+            snprintf(buf, sizeof(buf), "--:--:--");
+        }
+        lv_label_set_text(s_time_status, buf);
+    }
+    if (s_tz_status != NULL) {
+        time_date_format_tz(config_store_get_tz_offset_min(), buf, sizeof(buf));
+        lv_label_set_text(s_tz_status, buf);
+    }
+}
+
+/* 「时间与日期」页每秒刷新一次（只在该页可见时读 RTC，I²C 读取 ~1ms）。
+   ⚠ 定时器常驻，但 LVGL 在息屏时被挂起，不会在息屏期间读总线。 */
+static void time_date_tick_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_time_page == NULL || !lv_obj_is_visible(s_time_page)) {
+        return;
+    }
+    menu_refresh_time_date();
+}
+
 /* 刷新根页面各行的状态文字（打开菜单/开关切换后调用） */
 static void menu_refresh_root(void)
 {
@@ -324,6 +377,7 @@ static void menu_refresh_root(void)
         lv_label_set_text(s_cw_speed_status,
                           CW_SPEED_TXT[config_store_get_click_wheel_speed()]);
     }
+    menu_refresh_time_date();
 }
 
 /* 刷新息屏档位子页的选中高亮（进入子页/切换档位后调用）。
@@ -686,6 +740,8 @@ static lv_obj_t *dev_page_build(void)
 static lv_obj_t *sleep_page_build(void);
 static lv_obj_t *screen_off_page_build(void);
 static lv_obj_t *cw_page_build(void);
+static lv_obj_t *time_date_page_build(void);
+static lv_obj_t *power_page_build(void);
 static lv_obj_t *help_page_build(void);
 static lv_obj_t *about_page_build(void);
 static lv_obj_t *dev_page_build(void);
@@ -693,7 +749,7 @@ static lv_obj_t *rescan_page_build(void);
 
 /* 懒加载入口表：行的事件 user_data 传**下标**（C 不允许函数指针与 void*
    互转，故不走"指针塞 user_data"那条路） */
-#define LAZY_ENTRY_MAX  8
+#define LAZY_ENTRY_MAX  12
 static lv_obj_t *(*s_lazy_builders[LAZY_ENTRY_MAX])(void);
 static uint8_t s_lazy_count = 0;
 
@@ -732,8 +788,9 @@ static lv_obj_t *lazy_row_create(lv_obj_t *parent, const char *icon,
     return row;
 }
 
-/* 根页面：6 个功能行（睡眠定时器 / 屏幕自动息屏 / 虚拟 ClickWheel /
-   按键帮助 / 关于 / 重新扫描），全部为子页入口（子页懒加载，见上）。
+/* 根页面：8 个功能行（睡眠定时器 / 屏幕自动息屏 / 虚拟 ClickWheel /
+   时间与日期 / 电源选项 / 按键帮助 / 关于 / 重新扫描），全部为子页入口
+   （子页懒加载，见上）。
    ⚠ 行数增加后根页面内容高度超过可视区（实测 6 行需 426px、可视 357px），
    页面会出现滚动条——这是预期行为，不再压缩行距。 */
 static void root_page_build(void)
@@ -752,6 +809,12 @@ static void root_page_build(void)
        标题直接点明是"选项"页——2026-09-11 用户要求 */
     lazy_row_create(s_root_page, LV_SYMBOL_REFRESH, "虚拟 ClickWheel 选项",
                     NULL, cw_page_build);
+    /* 时间与日期 / 电源选项：按要求插在「按键帮助」之前。
+       电源选项本轮先占位（空白页），后续会话继续写 */
+    lazy_row_create(s_root_page, LV_SYMBOL_EDIT, "时间与日期",
+                    NULL, time_date_page_build);
+    lazy_row_create(s_root_page, LV_SYMBOL_BATTERY_FULL, "电源选项",
+                    NULL, power_page_build);
     lazy_row_create(s_root_page, LV_SYMBOL_KEYBOARD, "按键帮助",
                     NULL, help_page_build);
     lazy_row_create(s_root_page, LV_SYMBOL_SETTINGS, "关于",
@@ -872,7 +935,96 @@ static lv_obj_t *cw_page_build(void)
     return cw_page;
 }
 
-/* 4. 按键帮助子页：静态说明。
+/* 时间与日期页四行的点击回调：前三项打开滚轮弹窗 / 全屏对时，
+   弹窗与进度界面都挂在 lv_layer_top()，覆盖菜单与状态栏 */
+static void time_date_date_row_cb(lv_event_t *e)
+{
+    (void)e;
+    time_date_popup_show_date();
+}
+
+static void time_date_time_row_cb(lv_event_t *e)
+{
+    (void)e;
+    time_date_popup_show_time();
+}
+
+static void time_date_sync_row_cb(lv_event_t *e)
+{
+    (void)e;
+    time_sync_ui_start();
+}
+
+static void time_date_tz_row_cb(lv_event_t *e)
+{
+    (void)e;
+    time_date_popup_show_tz();
+}
+
+/* 4. 时间与日期子页（2026-11 新增）：
+      设置日期 / 时间设置 / WiFi对时 / 时区设置 四项，右侧显示当前值。
+      日期/时间/时区点击后弹出滚轮弹窗（ui/time_date_popup.c）；
+      WiFi对时进入全屏进度界面（ui/time_sync_ui.c），读取
+      /sdcard/.ecov/wifi.txt 连 WiFi 并做 NTP。
+      RTC 里存的是本地墙钟时间，时区只影响网络对时的 UTC 换算；
+      改时区时由弹窗把 RTC 平移，保持绝对时刻不变。 */
+static lv_obj_t *time_date_page_build(void)
+{
+    if (s_time_page != NULL) {
+        return s_time_page;
+    }
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"时间与日期");
+    page_style_apply(page);
+
+    lv_obj_t *date_row = menu_row_create(page, NULL, "设置日期",
+                                         &s_date_status);
+    lv_obj_add_flag(date_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(date_row, time_date_date_row_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *time_row = menu_row_create(page, NULL, "时间设置",
+                                         &s_time_status);
+    lv_obj_add_flag(time_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(time_row, time_date_time_row_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *sync_row = menu_row_create(page, LV_SYMBOL_WIFI, "WiFi对时", NULL);
+    lv_obj_add_flag(sync_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(sync_row, time_date_sync_row_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *tz_row = menu_row_create(page, NULL, "时区设置", &s_tz_status);
+    lv_obj_add_flag(tz_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(tz_row, time_date_tz_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 只保留一句简短说明：WiFi 配置由电脑版工具写入，本页不再堆细节
+       （2026-11-14 用户要求删掉原来的两段长说明） */
+    menu_note_row_create(page, "* WiFi对时可在电脑版工具里配置");
+
+    /* 弹窗保存/对时成功后刷新本页右侧状态 */
+    time_date_popup_set_refresh_cb(menu_refresh_time_date);
+    menu_refresh_time_date();
+
+    /* 每秒刷新"时间设置"右侧的秒数（仅本页可见时才真正读 RTC） */
+    lv_timer_create(time_date_tick_cb, 1000, NULL);
+
+    s_time_page = page;
+    ESP_LOGI(TAG, "time & date page built");
+    return page;
+}
+
+/* 5. 电源选项子页（占位）：本轮按需求**完全空白**，后续会话继续写。
+      只建空页面，不放任何行/说明。 */
+static lv_obj_t *power_page_build(void)
+{
+    if (s_power_page != NULL) {
+        return s_power_page;
+    }
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"电源选项");
+    page_style_apply(page);
+    s_power_page = page;
+    ESP_LOGI(TAG, "power options page built (placeholder, empty)");
+    return page;
+}
+
+/* 6. 按键帮助子页：静态说明。
     按键命名用社区通用说法：上键 = A 键（电源键），下键 = B 键；
     "关机"指长按上键进入关机流程（约 3 秒彻底断电）。 */
 static lv_obj_t *help_page_build(void)
@@ -893,7 +1045,7 @@ static lv_obj_t *help_page_build(void)
     return help_page;
 }
 
-/* 5. 关于子页：作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
+/* 7. 关于子页：作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
     最下方追加"开发者选项"入口子页（同样懒加载，见 dev_page_build） */
 static lv_obj_t *about_page_build(void)
 {
@@ -915,7 +1067,7 @@ static lv_obj_t *about_page_build(void)
     return about_page;
 }
 
-/* 6. 重新扫描子页：确认（是=停止播放+数据无效化+重启重新扫描；否=返回上一级） */
+/* 8. 重新扫描子页：确认（是=停止播放+数据无效化+重启重新扫描；否=返回上一级） */
 static lv_obj_t *rescan_page_build(void)
 {
     if (s_rescan_page != NULL) {

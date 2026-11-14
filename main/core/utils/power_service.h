@@ -75,6 +75,17 @@ void power_service_note_activity(void);
  */
 uint32_t power_service_get_idle_sec(void);
 
+/**
+ * @brief 暂时禁止"无操作自动息屏"（按住唤醒），用于网络对时等长流程
+ *
+ * true = 保持亮屏（内部同时刷新活动时间，避免刚置位就超时），直到调用方
+ * 置回 false。仅影响自动息屏，手动息屏/双键息屏不受影响。
+ *
+ * ⚠ 这是"抑制"而不是"重置计时"：网络对时最长可达一分多钟，期间没有
+ *   触摸活动，单靠 note_activity() 只能撑过一个超时周期。
+ */
+void power_service_set_hold_awake(bool hold);
+
 #ifdef __cplusplus
 }
 #endif
