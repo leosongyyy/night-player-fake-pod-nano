@@ -287,7 +287,7 @@ static esp_err_t pmu_read_adc14(i2c_master_dev_handle_t dev, uint8_t reg_h, uint
 
 ### 6.4 600 mAh 电芯的 OCV–SOC 参考表（25 ℃ 静置）
 
-> 典型 4.2 V 钴酸锂/三元小电芯的**静置开路电压**，用于兜底估算。**必须实测校准**（本项目已删除 S3 时代的 `battery_logger`，可用 `CONFIG_HW_SELFTEST` 打印的静置电压 + 手动记录来修正；详见 `ideas_and_exps/PMU_RTC_DRIVERS.md`）。
+> 典型 4.2 V 钴酸锂/三元小电芯的**静置开路电压**，用于兜底估算。**必须实测校准**（本项目已删除 S3 时代的 `battery_logger`，可用 `battery_read_voltage_mv()` 的串口日志/开发者选项 + 手动记录来修正；详见 `ideas_and_exps/PMU_RTC_DRIVERS.md`）。
 
 | SOC % | OCV (mV) | SOC % | OCV (mV) |
 | --- | --- | --- | --- |

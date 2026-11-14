@@ -15,7 +15,6 @@
 #include "core/hardware/boot_reason.h"
 #include "core/hardware/button_service.h"
 #include "core/hardware/display.h"
-#include "core/hardware/hw_selftest.h"
 #include "core/hardware/pldata.h"
 #include "core/hardware/rtc.h"
 #include "core/hardware/sd_card.h"
@@ -274,14 +273,6 @@ void app_main(void)
     // 低电/暂停自动关机随 S31 迁移移除（关机交给 AXP2101）。需在 LVGL 之后。
     power_service_init();
     mem_trace_log("15-power_service");
-
-#ifdef CONFIG_HW_SELFTEST
-    /* AXP2101 / PCF85063A 驱动自检（后台任务，串口打印 [PASS]/[FAIL]/[SKIP]
-       与 HWST summary）。⚠ 不测试断电功能：不调用 axp2101_power_off()、
-       不写 0x10、不碰 DCDC/LDO 电源轨。 */
-    hw_selftest_run();
-    mem_trace_log("16-hw_selftest");
-#endif
 
     // 启动性能监视（内存 + 双核 CPU 使用率），Kconfig CONFIG_PERFORMANCE_MONITOR 控制
 #ifdef CONFIG_PERFORMANCE_MONITOR

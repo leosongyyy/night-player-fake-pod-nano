@@ -171,7 +171,7 @@ esp_err_t axp2101_read_vbus_mv(uint16_t *mv);
  * @brief 读电池温度 TS 引脚电压（0x36/0x37，**0.5 mV/LSB**，换算成 mV 返回）
  *
  * ⚠ 本板 TS 脚接的是**固定电阻**（原理图确认，没有 NTC），读到的电压恒定，
- *   换算出的"温度"没有物理意义——界面不显示电池温度，本接口只用于驱动自检/
+ *   换算出的"温度"没有物理意义——界面不显示电池温度，本接口只用于诊断/
  *   诊断。若以后换用带 NTC 的电池，可直接接上 axp2101_ts_mv_to_celsius()。
  */
 esp_err_t axp2101_read_ts_mv(uint16_t *mv);
@@ -269,8 +269,8 @@ bool axp2101_is_charge_enabled(void);
  * @brief 软件关机（写 0x10[0]=1，PMU 关掉除 RTCLDO 外全部电源）
  *
  * ⚠ 调用前必须停掉播放/扫描并 flush NVS，否则正在写 flash 时断电会写坏数据。
- * ⚠ 本函数**当前没有被任何代码调用**，硬件自检也刻意不测试它（断电功能
- *   需要单独排期验证），保留给后续 fake_shutdown 迁移。
+ * ⚠ 本函数**当前没有被任何代码调用**（断电功能需要单独验证），保留给后续
+ *   fake_shutdown 迁移/复用。
  */
 esp_err_t axp2101_power_off(void);
 

@@ -10,8 +10,8 @@
 
 > ⚠ S3 时代的“电池电压采样日志”（`battlog` / `battmin`、`battery_logger.c`）
 > 已随 AXP2101 适配**整体删除**：S31 有 PMU，电池信息是“随时可读的电压 + 电量计”，
-> 不再需要写 SD 卡日志去反推放电曲线。电池自检见 `CONFIG_HW_SELFTEST`
-> （Kconfig，非运行时开关，见 `ideas_and_exps/PMU_RTC_DRIVERS.md`）。
+> 不再需要写 SD 卡日志去反推放电曲线。原 `CONFIG_HW_SELFTEST` 驱动自检已于
+> 2026-11-14 移除（见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 顶部说明）。
 
 ## 存储（config_store / NVS，命名空间 "config"）
 

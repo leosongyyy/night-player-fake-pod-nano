@@ -9,7 +9,13 @@
 
 还没想好
 
-## 47. 虚拟列表滚动性能：重绑策略之后的下一步
+## 47. 虚拟列表滚动性能：重绑策略之后的下一步 ⏸ 暂不实现（2026-11-14 关闭）
+
+> **⏸ 2026-11-14 决策：暂不实现（整条 47 含 47.1 一并关闭）**。理由：
+> S3 有旧版 IRAM 兜底（`legacy_s3` 分支保留原方案），S31 本身性能足够
+> （当前列表快速滚动 24~36 fps、慢速滚动 20+ fps，用户确认可接受），
+> 不再继续投入虚拟列表滚动性能优化。以下调查/实验记录仅作留档；
+> §47.1 的 `listview_perf_improvement` 实验分支也不合并回主干。
 
 **来源**：`DONE_PLANS` 第 34 点的尾巴（`IRAM_AUDIT_LVGL9.md` §13.4 第 2 条）
 ——「若要继续提速，方向在别处（绘制管线、虚拟列表的重绑策略等），不是继续钉对象」。
@@ -121,7 +127,10 @@
 
 ---
 
-## 47.1 2026-11 更新：S2' 视口画布已在实验分支实现并实测
+## 47.1 2026-11 更新：S2' 视口画布已在实验分支实现并实测 ⏸ 随 §47 暂不实现
+
+> ⏸ **2026-11-14：随 §47 一并暂不实现**。实验分支 `listview_perf_improvement`
+> 保留观察，不合并回主干；本节的实测数据/踩坑记录仅作留档。
 
 > 实验分支 **`listview_perf_improvement`**（基线 `f73d3b2`）。完整材料都在该分支上：
 > `ROUND_REVIEW_LISTVIEW_PERF.md`（本轮完整审阅：规整性代价 + 可回灌清单 + 残留风险）、
@@ -183,24 +192,27 @@
 
 ---
 
-## 48. 移除硬件自检/调试代码（等硬件调试完成后）
+## 48. 移除硬件自检/调试代码 ✅ 已完成（2026-11-14）
 
 **背景**：2026-11 接入 AXP2101 / PCF85063A 时为上板调试加了**硬件自检**
 （`CONFIG_HW_SELFTEST`，开机后台跑纯逻辑 + 真机只读/无损测试并打印寄存器转储）
 与**破坏性 RTC 首次校时验证**（`CONFIG_RTC_SELFTEST_AUTO_INIT`，默认关）。
-目前硬件还没有完全调试完成（电量计曲线、充电、断电/开机恢复、TS/NTC 等都还要观察），
-**先保留，以后再移除**。
+硬件调试（电量计曲线、充电、断电/开机恢复、TS/NTC 等）已完成，按本条移除。
 
-**以后移除的内容**：
+**已完成（2026-11-14）——已移除的内容**：
 
 - `main/core/hardware/hw_selftest.c` / `hw_selftest.h`（自检任务与全部测试项）；
 - `main/CMakeLists.txt` 里 `if(CONFIG_HW_SELFTEST)` 的条件编译条目；
-- `main/main.c` 里的 `hw_selftest_run()` 调用与 `16-hw_selftest` 内存快照；
+- `main/main.c` 里的 `hw_selftest_run()` 调用、include 与 `16-hw_selftest` 内存快照；
 - `main/Kconfig.projbuild` 里的 `CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT`；
-- `sdkconfig.defaults.release` 里的 `# CONFIG_HW_SELFTEST is not set` 注释行。
+- `sdkconfig.defaults.release` 里的 `# CONFIG_HW_SELFTEST is not set` 注释行；
+- `performance_monitor` 的任务栈监视表里的 `hw_selftest` 项。
+
+debug / release 均重新构建通过（仅剩触摸驱动组件的既有 warning）。
+移除后 release 行为不变；debug 开机日志少掉 `HWST summary` 一段。
 
 **保留（属于正常运行期功能，不要一起删）**：`axp2101.c` / `rtc.c` / `battery.c` 驱动本身、
 `CONFIG_PMU_KEY_IRQ`、`CONFIG_PMU_CHARGE_CONFIG`、`CONFIG_RTC_AUTO_INIT_PROJECT_EPOCH`。
 
-**触发条件**：硬件调试完成、不再需要每次开机跑 `[PASS]/[FAIL]` 自检与 PMU/RTC 寄存器转储时。
-移除后 release 构建本来就不含自检，行为不变；debug 构建开机日志会少掉 `HWST summary` 一段。
+**触发条件**：硬件调试完成、不再需要每次开机跑 `[PASS]/[FAIL]` 自检与 PMU/RTC 寄存器转储时
+（2026-11-14 已满足）。

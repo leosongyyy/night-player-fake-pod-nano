@@ -47,7 +47,7 @@ sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（配置矩阵 overlay�
 > 设置菜单 → 关于 → 开发者选项（config_store/NVS，**默认关**，开机检查、修改需重启生效），
 > 详见 `main/core/storage/config_store`、`main/core/ui/touch_test`。
 > **S3 时代的电池电压采样日志已整体删除**（S31 由 AXP2101 直接给百分比）；
-> 硬件自检是 Kconfig 开关 `CONFIG_HW_SELFTEST`（debug 默认开、release 关）。
+> 硬件自检（`CONFIG_HW_SELFTEST`）已于 2026-11-14 按 `FUTURE_PLAN.md` #48 移除。
 
 ## 3. 构建命令
 
@@ -141,7 +141,7 @@ idfc monitor --grep "MEM:"                # 只显示匹配行
 
 - **debug / releasecandidate 版**应看到每 2s 一条 `MEM: heap=... cpu0=..% cpu1=..%`（performance_monitor），屏幕角落有 LVGL FPS 计数；其中 **releasecandidate 版**的 `MEM: heap=` 数值会比 debug 版低约 2.9MB（完整字体占用的 PSRAM），正好用于观察低内存环境下的运行状况
 - **release 版**无上述日志（性能监视等编译级调试功能关闭）
-- 触摸测试白点为运行时开关，**默认关闭**：开启需在设置菜单 → 关于 → 开发者选项中打开并重启（可看到 `touch_test: Touch test created` 日志）；驱动自检 `HWST summary` 只在 `CONFIG_HW_SELFTEST=y` 的 debug 构建出现
+- 触摸测试白点为运行时开关，**默认关闭**：开启需在设置菜单 → 关于 → 开发者选项中打开并重启（可看到 `touch_test: Touch test created` 日志）；驱动自检（`HWST summary`）已于 2026-11-14 移除
 
 ## 6. 工作原理（为什么可以多配置共存）
 

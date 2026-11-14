@@ -16,7 +16,7 @@ static const char *TAG = "axp2101";
 static i2c_master_dev_handle_t s_dev = NULL;
 static bool s_ready = false;
 
-/* 中断状态"读 + 写 1 清"需要跨事务互斥：事件任务与自检都会调用，若不串行，
+/* 中断状态"读 + 写 1 清"需要跨事务互斥：事件任务与其它调用方都会用到，若不串行，
    后一次读会把前一次已读到的位再读一遍（重复上报），或者把别人刚读到、
    尚未处理的状态位清掉（丢事件）。 */
 static SemaphoreHandle_t s_irq_lock = NULL;

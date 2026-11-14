@@ -89,7 +89,7 @@ static void mem_report_stack_hwm(void)
     static const char *names[] = {
         "deep_worker", "button_svc", "power_svc", "LVGL", "player_ctrl",
         "sleep_timer", "mem_monitor", "cpu_coll0", "cpu_coll1",
-        "mp3_play", "mp3_out", "cover_load", "hw_selftest", "pmu_irq",
+        "mp3_play", "mp3_out", "cover_load", "pmu_irq",
         "touch_init", "boot_scan", "rescan",
     };
     char buf[320];

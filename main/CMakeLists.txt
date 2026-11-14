@@ -76,13 +76,6 @@ if(CONFIG_MEM_TRACE)
     list(APPEND MAIN_SRCS "core/utils/mem_trace.c")
 endif()
 
-# 硬件自检（AXP2101 / PCF85063A 驱动）：纯逻辑 + 真机只读/无损测试，
-# 串口打印 [PASS]/[FAIL]/[SKIP] 与 HWST summary。**不测试断电功能**。
-# release 构建默认关闭（见 sdkconfig.defaults.release）。
-if(CONFIG_HW_SELFTEST)
-    list(APPEND MAIN_SRCS "core/hardware/hw_selftest.c")
-endif()
-
 # 系统字体：NPF1 全字库在 font 分区里（运行时 mmap，见 core/fonts/font_npf.c），
 # 固件内只编译精简字库做兜底（system_global_font_lite）——两者都常驻 MAIN_SRCS。
 # 20px 小字体（system_smaller_font）也常驻，供状态栏时间/两行文字图标使用。

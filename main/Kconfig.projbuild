@@ -137,20 +137,6 @@ menu "FakePodNanoNightPlayer 应用配置"
             完整数据与复现方法见 ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md。
             若以后真机觉得列表滚动不可接受，把本项改回 y 即可恢复（无需改代码）。
 
-    config HW_SELFTEST
-        bool "硬件自检（AXP2101 / PCF85063A 驱动，串口打印 PASS/FAIL）"
-        default y
-        help
-            开机后启动一个后台自检任务（栈放 PSRAM），对两颗新芯片做：
-              · 纯逻辑测试：BCD/星期/时间合法性、ICC 电流编码、电压→SOC
-                插值、状态位解析、按键阈值编码、电量融合规则；
-              · 真机只读/无损测试：I²C 通信、电池电压/电量/充放电状态、
-                TS 电压、长按阈值、开机原因、中断状态读+清；RTC 读时间/
-                有效性、CLKOUT、RAM_byte 写读回（恢复原值）、走时 1 秒校验。
-            结果以 [PASS]/[FAIL]/[SKIP] + 一行 HWST summary 打印。
-            ⚠ **不测试断电功能**（不调用 pmu_power_off、不写 0x10、不碰电源轨）。
-            自检失败只打日志，不影响开机。release 构建默认关闭。
-
     config PMU_KEY_IRQ
         bool "AXP2101 电源键中断（GPIO49 短按/长按/按下/抬起）"
         default y
@@ -194,19 +180,6 @@ menu "FakePodNanoNightPlayer 应用配置"
             (+0800)——作为首次校时，避免界面显示 2000-01-01 或停走的时间。
             ⚠ 只在无效时写，绝不覆盖备用电源保住的走时；也绝不发软件复位。
             ⚠ 这不是固件编译时间（编译时间会随每次构建变化）。
-
-    config RTC_SELFTEST_AUTO_INIT
-        bool "RTC 首次校时自检（破坏性：会把 RTC 改写成项目诞生日）"
-        depends on HW_SELFTEST && RTC_AUTO_INIT_PROJECT_EPOCH
-        default n
-        help
-            仅在验证"首次校时"路径时临时打开：自检会先把 RTC 的 OS 位置 1
-            （模拟从未校时/振荡停止），确认 rtc_is_valid() 变 false，再调用
-            rtc_init_time_if_invalid()，校验时间被写成 2026-08-30 13:45:41
-            且 OS 已清除。
-            ⚠ **破坏性**：会把设备 RTC 时间真的改成项目诞生日（当前没有校时
-              UI，只能靠重新烧录/后续加校时入口恢复），所以默认关闭。
-            验证完请改回 n，避免每次开机都重置时间。
 
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"

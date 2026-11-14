@@ -5,6 +5,9 @@
 > 与下键（GPIO61）整合成 S3 时代的双键映射**；`fake_shutdown` 名字保留，但已改为
 > **AXP2101 软关机真断电**（显示「正在关机...」→保存→写 `0x10[0]=1`）。
 > ⚠ 真机断电效果由用户实测；本文 §5 的自检记录是**加入断电流程之前**跑的只读/无损测试。
+> ⚠ **2026-11-14：硬件自检代码已按 `FUTURE_PLAN.md` #48 移除**（`hw_selftest.c/.h`、
+> `CONFIG_HW_SELFTEST`、`CONFIG_RTC_SELFTEST_AUTO_INIT` 均删除）；§5/§6 的 HWST 记录
+> 仅作历史留档，正常开机不再打印 `HWST summary`。
 > 设计依据：[`reference_docs/pmu_axp2101.md`](reference_docs/pmu_axp2101.md)、
 > [`reference_docs/rtc_pcf85063a.md`](reference_docs/rtc_pcf85063a.md)
 > （原厂 PDF 在 `tempdir/newhwadapter/`，未入库）。
@@ -18,7 +21,7 @@
 | `main/core/hardware/axp2101.h/.c` | AXP2101 纯寄存器驱动：电压/电量计/充放电状态/开机原因/长按阈值/中断、电源键 IRQ、软关机 API（**未被调用**） |
 | `main/core/hardware/rtc.h/.c` | PCF85063A 驱动：一次 burst 读写时间、BCD/星期/有效性、OS 标志、Offset、`struct tm` 互转、首次校时 |
 | `main/core/hardware/battery.h/.c` | 应用层封装：电压/电量融合、充电状态；保留 `battery_init()` / `battery_read_voltage_mv()` 旧符号 |
-| `main/core/hardware/hw_selftest.h/.c` | 驱动自检（纯逻辑 + 真机只读/无损），`CONFIG_HW_SELFTEST` 控制编译 |
+| ~~`main/core/hardware/hw_selftest.h/.c`~~ | **2026-11-14 已移除**（见 `FUTURE_PLAN.md` #48） |
 | `main/ui/battery_indicator.h/.c` | 状态栏 / 控制中心共用的“图标 + 百分比”文本生成（≤20% 黄、≤10% 红、充电闪电） |
 | `main/ui/app.c` | 顶部状态栏右侧新增电池百分比 label（5s 刷新） |
 | `main/ui/notification_panel.c` | 下拉控制中心顶部右侧新增电池百分比（同规则，5s 刷新） |
@@ -151,6 +154,8 @@ UI：状态栏右侧与下拉控制中心顶部右侧显示 `图标 + 百分比`
 
 ## 5. 真机自检结果（2026-11-14，COM3，debug）
 
+> ⚠ 自检代码已于 2026-11-14 按 `FUTURE_PLAN.md` #48 移除；以下为当时的历史记录，不可再按此复现。
+
 固件：`idfc build` + `idfc flash`，`idfc monitor --wait-for "HWST RESULT"`。
 
 ```
@@ -194,11 +199,11 @@ I hwst: [PASS] rtc_auto_init_project_epoch
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `CONFIG_HW_SELFTEST` | y（release 关） | 驱动自检任务（PSRAM 栈），串口打印 PASS/FAIL/SKIP + `HWST summary` |
 | `CONFIG_PMU_KEY_IRQ` | y | GPIO49 电源键短按/长按/按下/抬起（供双键判定） |
 | `CONFIG_PMU_CHARGE_CONFIG` | n | 启动时下发 600mAh 充电参数（ICC/ITERM/CV） |
 | `CONFIG_RTC_AUTO_INIT_PROJECT_EPOCH` | y | RTC 无效时用项目诞生日首次校时 |
-| `CONFIG_RTC_SELFTEST_AUTO_INIT` | n | **破坏性**自检：验证首次校时路径（会把 RTC 改成项目诞生日） |
+
+> ⚠ `CONFIG_HW_SELFTEST` / `CONFIG_RTC_SELFTEST_AUTO_INIT` 已于 2026-11-14 随自检代码移除。
 
 ---
 
