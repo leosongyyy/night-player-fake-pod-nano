@@ -99,8 +99,8 @@ PCF85063A **没有时区概念**，项目约定 **RTC 里存本地墙钟时间**
 
 ```
 main/core/network/wifi_time_sync.h/.c   # WiFi + SNTP 核心（阻塞、可取消、无 UI）
-main/ui/time_date_popup.h/.c            # 日期/时间/时区三个滚轮弹窗（lv_layer_top）
-main/ui/time_sync_ui.h/.c               # WiFi对时全屏进度 + 内部 RAM 栈任务
+main/ui/time_date_popup.h/.c            # 日期/时间/时区三个滚轮弹窗（lv_layer_top，半透明遮罩）
+main/ui/time_sync_ui.h/.c               # WiFi对时全屏进度 + 内部 RAM 栈任务（屏幕层）
 main/ui/settings_menu.c                 # 根页面两个入口行 + 时间与日期子页
 main/core/storage/config_store.*        # tzoff 键
 main/core/utils/power_service.*         # power_service_set_hold_awake()
@@ -108,7 +108,13 @@ main/core/utils/power_service.*         # power_service_set_hold_awake()
 
 UI 约定：
 
-- 三个弹窗与进度界面都挂 `lv_layer_top()`，覆盖设置菜单（屏幕层）与状态栏；
+- **日期/时间/时区三个滚轮弹窗**挂 `lv_layer_top()`：它们是"半透明全屏遮罩 + 卡片"，
+  必须叠在屏幕层（设置菜单/状态栏）之上，且半透明父对象无法参与 LVGL 的覆盖判定
+  （放进屏幕树会丢失调暗），所以只能留在顶层；
+- **对时进度界面**是**全屏不透明**覆盖层，挂**屏幕层**（`lv_screen_active()`）：
+  顶层对象不在 `lv_refr_get_top_obj()` 的搜索范围内，会让被盖住的整屏内容每帧重绘
+  （见 `DONE_PLANS.md` 第 38 点）。对时固件里屏幕本身是空的，这一改动主要是防止
+  以后复用时踩坑；
 - 弹窗点击面板外 = 取消；
 - 时间页面有一个 1 s 的 `lv_timer` 刷新"时间设置"右侧秒数，只在
   `lv_obj_is_visible(page)` 为真时读 RTC（I²C 读一次约 1 ms）；

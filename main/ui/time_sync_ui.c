@@ -96,7 +96,12 @@ static void button_style(lv_obj_t *btn)
 
 static void sync_ui_create(void)
 {
-    s_root = lv_obj_create(lv_layer_top());
+    /* 全屏不透明覆盖层 → 挂**屏幕层**（当前屏幕），不挂 lv_layer_top()：
+       LVGL 的覆盖判定 lv_refr_get_top_obj() 只搜索屏幕的子对象树，顶层对象
+       不在其中 → 每个绘制块都要把下层再画一遍、再无条件画顶层。
+       本界面在屏幕上盖满整屏，放进屏幕树后它自己就是覆盖对象，下层被跳过
+       （同类事故见 DONE_PLANS.md 第 38 点）。 */
+    s_root = lv_obj_create(lv_screen_active());
     lv_obj_set_size(s_root, TS_SCREEN_W, TS_SCREEN_H);
     lv_obj_set_pos(s_root, 0, 0);
     lv_obj_set_style_bg_color(s_root, TS_BG, 0);
@@ -168,7 +173,7 @@ static void sync_ui_create(void)
     /* 事件只注册一次：按钮常驻复用，start 里重复注册会叠加回调 */
     lv_obj_add_event_cb(s_btn, cancel_btn_cb, LV_EVENT_CLICKED, NULL);
 
-    ESP_LOGI(TAG, "sync ui created on lv_layer_top");
+    ESP_LOGI(TAG, "sync ui created on screen layer");
 }
 
 /* ------------------------------------------------------------------ */

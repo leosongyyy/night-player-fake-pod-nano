@@ -1049,8 +1049,11 @@ static lv_obj_t *lazy_row_create(lv_obj_t *parent, const char *icon,
     return row;
 }
 
-/* 蓝牙入口行：打开独立的全屏蓝牙设置页（ui/bt_settings，挂在 lv_layer_top；
-   设置菜单保留在下层，返回后回到菜单）。 */
+/* 蓝牙入口行：打开独立的全屏蓝牙设置页（ui/bt_settings）。
+   ⚠ 该页与设置菜单**同处屏幕层**（lv_scr_act），打开时把本菜单与主界面
+   一起隐藏、关闭时恢复（从本菜单进来就回本菜单）：若让蓝牙页挂
+   lv_layer_top() 并保留菜单在下层，LVGL 的覆盖判定会失效，下层整屏每帧
+   重绘 → 蓝牙页滚动只有十几 fps（DONE_PLANS.md 第 38 点同类事故）。 */
 static void bt_row_cb(lv_event_t *e)
 {
     (void)e;
@@ -1284,7 +1287,9 @@ static lv_obj_t *cw_page_build(void)
 }
 
 /* 时间与日期页四行的点击回调：前三项打开滚轮弹窗 / 全屏对时，
-   弹窗与进度界面都挂在 lv_layer_top()，覆盖菜单与状态栏 */
+   滚轮弹窗是"半透明遮罩 + 卡片"，挂 lv_layer_top() 覆盖菜单与状态栏；
+   全屏对时确认框同理（半透明遮罩），对时进度界面本身是全屏不透明，
+   挂屏幕层（见 ui/time_sync_ui.c 与 main_ui.c 的图层规则注释） */
 static void time_date_date_row_cb(lv_event_t *e)
 {
     (void)e;
