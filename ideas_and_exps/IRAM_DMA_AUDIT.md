@@ -1,5 +1,9 @@
 # IRAM / DMA 内存审计（FUTURE_PLAN 第 34 点）
 
+> 📅 本文记录 **S3 时代（1.x / 2026-09）**的实测与结论，其中的芯片参数、内存数字、
+> `releasecandidate` 构建与"LVGL 对象吃 105KB 内部 RAM"均不代表 S31（2.x）现状
+> （master 只有 debug/release，LVGL 9 起对象堆在 PSRAM）；S31 现状见 AGENTS.md。
+
 > 测量时间：2026-09-10；固件基线：`42ed5a3`（LVGL 绘制缓冲已改回 `V_RES/10`）+ 本次新增的 `core/utils/mem_trace` 插桩。
 > 硬件：ESP32-S3 成品播放器，8MB Octal PSRAM，SD 卡 61000MB（曲库 171 目录 / 8899 首）。
 

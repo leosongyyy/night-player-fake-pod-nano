@@ -13,7 +13,7 @@
 | 设置菜单"重新扫描"点了没反应 | 任务创建失败（用户描述"提示无法分配栈内存"） |
 | 串口不再打印 `MEM:` 内存/CPU 行 | `mem_monitor`（4KB）、`cpu_coll0/1`（1KB）创建失败 |
 
-实测（debug 配置、内部堆 + DMA 堆统计）：
+实测（debug 配置、内部堆 + DMA 堆统计；**LVGL 8.4 时代**，当时 LVGL 对象堆还在内部 RAM）：
 
 ```
 启动瞬间   internal=273083  (各池: 234KB/32KB/21KB/8KB/7KB)
@@ -25,6 +25,10 @@ app_ui_create 后        internal=17523     ← LVGL 堆：几百个对象/样�
 
 即：**222KB 内部 RAM 被 LVGL 堆 + 播放引擎吃掉**，剩下不到 20KB 且碎片化
 （最大连续块 8.6KB），3~8KB 的任务栈就分不出来了。
+
+> ⚠ **2026-10 起 LVGL 9 把对象堆整体搬到 PSRAM**（`core/ui/lvgl_mem.c`），
+> `app_ui_create` 那一笔不再吃内部 RAM；上表数字只作"当年为什么会紧张"的历史依据，
+> 不代表现状（S31 上内部 RAM 宽裕得多，见 `IRAM_OBJECTS_PSRAM_S31.md`）。
 
 > 根因说明：`CONFIG_SPIRAM_USE_MALLOC=y` + `SPIRAM_MALLOC_ALWAYSINTERNAL=16384`
 > 下，**小于 16KB 的分配优先走内部 RAM**。LVGL 的 `LV_MEM_CUSTOM=stdlib`
@@ -130,12 +134,14 @@ static void rescan_do_deinit(void *arg) {   /* 在 deep_worker 内部栈上跑 *
 if (!deep_worker_call(rescan_do_deinit, NULL)) { rescan_do_deinit(NULL); }  /* 兜底 */
 ```
 
-deep_worker 栈保持 **8KB**（实测 HWM 约 7.4KB，够用）。⚠ 曾试图把它加到 12KB
+deep_worker 栈**现为 12KB**（`deep_worker.c` 的 `DEEP_WORKER_TASK_STACK = 12*1024`；2026-10 TTF
+迁移由 8KB 上调，见 `FontSystem.md` §5，实测 HWM 余约 11.5KB）。⚠ 历史上曾试图把它加到 12KB
 以给这条链留余量，结果**任务创建静默失败**（内部 RAM 碎片化，最大连续块
 约 8.6KB；当时未检查 `xTaskCreatePinnedToCore` 返回值）→ 任务根本不存在 →
 每次 `deep_worker_call` 都等满 5s 超时，表现为"按键息屏/亮屏延迟 5 秒"。
-修正：① 栈回到 8KB；② `deep_worker_init()` 提前到 `app_main` 早期
-（config_store 之后、硬件初始化之前，此时内部 RAM 充裕，8KB 必定成功）；
+修正：① 栈回到当年的 8KB；② `deep_worker_init()` 提前到 `app_main` 早期
+（config_store 之后、硬件初始化之前，此时内部 RAM 充裕，8KB 必定成功；**正是这条约束
+让后来 12KB 也能稳定分配**）；
 ③ 检查创建返回值并报错；④ `s_exec_task == NULL` 时 `deep_worker_call`
 直接返回 false（调用方就地兜底），不再白等超时；⑤ 超时时 dump 全部任务
 状态（`uxTaskGetSystemState`）便于定位。
@@ -180,8 +186,9 @@ flash 操作期间它照常触发；回调没加 `IRAM_ATTR`（在 flash 里）�
 2. **触发概率与 flash 写密度成正比**（单次写窗口约 1~10ms、采样周期 500ms →
    单次约 0.2%~2%）。本次是"切配置槽位"把 NVS 写密度抬高后才暴露的——**新增
    频繁写 NVS/flash 的功能时，要回头审一遍 ISR 回调是否都在 IRAM**。
-   该崩溃只在 `CONFIG_PERFORMANCE_MONITOR=y` 的构建（debug / releasecandidate）
-   存在，release 不带该模块故掩盖了这个 bug。
+   该崩溃只在 `CONFIG_PERFORMANCE_MONITOR=y` 的构建里存在（当时是 debug / releasecandidate；
+   2026-11 master 只剩 debug / release，即现在只有 debug 会带这个模块），
+   release 不带该模块故掩盖了这个 bug。
 
 > 🆕 2026-11：**LVGL 对象已搬进 PSRAM**，于是这条规则多了一层后果——ISR 里除了代码
 > 不能在 flash，**连碰 LVGL 对象都不行了**。全工程"谁会在关缓存窗口里跑"的完整清单
@@ -243,13 +250,15 @@ LVGL 后        171,603   ← 绘制缓冲吃掉 55KB
 
 | `EXAMPLE_LVGL_BUF_HEIGHT` | 双缓冲 DMA | 帧率 | SD 读 |
 |---|---|---|---|
-| `V_RES / 10`（原值） | ≈84.6KB | 满 30fps | ❌ 512B 都分配失败 → 误判坏曲 |
+| **`V_RES / 10`（当前，每块 460×46×2B = 42,320 B）** | 双缓冲 84,640 B（≈82.7 KiB） | 满 30fps | ✅ 2026-09-10 关掉 RC 堆毒化后稳定（DMA 稳态 19.4KB / 最大连续块 17.4KB） |
 | `V_RES / 20` | ≈42KB | ≈20fps | ✅ |
-| **`V_RES / 12`（当前）** | ≈70KB | 接近 30fps | ✅ 稳态 DMA 余量约 15KB |
+| `V_RES / 12` | ≈70KB | 接近 30fps | ✅ 稳态 DMA 余量约 15KB |
 
-定稿 `V_RES / 12`：帧率与 DMA 余量的折中。⚠ 460/12 = 38.33 会截断成 38
-（LVGL 内部再对齐到偶数），若在意"整数除不尽"可换成 `V_RES / 12` 的等价
-显式常量；调这个值**必须同时看帧率与 DMA 余量**。
+当前定稿 **`V_RES / 10`**（`lvgl_port.c` 的 `EXAMPLE_LVGL_BUF_HEIGHT`）：2026-09-10 关闭堆毒化、
+`IRAM_DMA_AUDIT.md` 第 34 点验收通过后已回到该值。⚠ 它当年在 releasecandidate 上触发
+"512B 都分配失败"，根因是堆毒化额外吃掉的 18~28KB，不是这个取值本身；`V_RES / 12`
+是毒化仍在时的折中（460/12 = 38.33 会截断成 38，LVGL 内部再对齐到偶数）。改这个值
+**必须同时看帧率、DMA 余量与内部 RAM 最大连续块**。
 
 ### 4.4 硬性约束：缓冲必须是 DMA 能力
 

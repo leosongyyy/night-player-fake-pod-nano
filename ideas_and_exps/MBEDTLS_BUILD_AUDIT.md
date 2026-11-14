@@ -120,6 +120,9 @@ map 里的证据：`libnvs_flash.a(nvs_encrypted_partition.cpp.obj) (esp_aes_xts
 全部来自 `main/idf_component.yml`），而 `main` 里照样能 include `nvs_flash.h` / `esp_vfs_fat.h` /
 `esp_adc/adc_oneshot.h` / `sdmmc_cmd.h` 等。
 
+> ⓘ 这一行是 2026-11 调研当时的依赖清单；后来 `freetype` 随 TTF→NPF1 删除、
+> `esp_lcd_sh8601` 也已从 `main/idf_component.yml` 移除（见 §9.5）。机制本身不变。
+
 ⚠ **这条机制是剪裁组件时最大的坑**（见 §5-B 的风险）。
 
 ## 4. 编译成本量化
@@ -260,9 +263,15 @@ python -c "import json;d=json.load(open('build/debug/project_description.json'))
 main
 esp_lcd_qspi_amoled esp_lcd_touch_cst816 esp_lcd_touch_cst820 esp_lcd_touch_chsc6417
 esp_lcd esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_spi esp_driver_sdmmc
-esp_driver_ppa esp_mm esp_partition esp_pm esp_timer esp_ringbuf
+esp_driver_ppa esp_driver_jpeg esp_mm esp_partition esp_pm esp_timer esp_ringbuf
 nvs_flash fatfs vfs sdmmc
+# 2026-11 追加：WiFi 对时（core/network/wifi_time_sync.c）
+esp_wifi esp_netif esp_event lwip wpa_supplicant
 ```
+
+> 与 2026-11-14 落地时的白名单相比只多了 `esp_driver_jpeg`（封面硬件解码）与 WiFi/SNTP 那 5 个
+> （`esp_wifi` / `esp_netif` / `esp_event` / `lwip` / `wpa_supplicant`，2026-11 为
+> 「WiFi对时」重新加入，见 `WIFI_TIME_SYNC.md` §6.1）。
 
 推导方法：把 `main/` 与 4 个本地组件里**所有 `#include` 的顶层头文件**列出来，
 反查每个头文件属于哪个 IDF 组件。`freertos / heap / log / soc / hal / esp_hw_support /
@@ -278,13 +287,17 @@ esp_rom / esp_common / esp_system / esp_stdio / cxx / esp_libc` 是 IDF 的
 
 ### 9.2 实测结果（结构指标，确定性可比）
 
-| 指标 | 剪裁前 | 剪裁后 | 变化 |
+| 指标 | 剪裁前 | 剪裁后（无 WiFi） | **当前（剪裁 + WiFi 对时）** |
 |---|---|---|---|
-| `build_components`（project_description.json） | **155** | **89** | −42.6 % |
-| 编译单元（compile_commands.json） | **1 665** | **1 235** | **−25.8 %** |
-| 其中 mbedtls | 153 | **152** | 摘不掉（§3） |
-| 其中 lvgl | 527 | 530 | 不变（托管组件，含 PPA 绘制单元） |
-| 移出构建的**大件** | wifi / bt / lwip(91) / wpa_supplicant(84) / esp_http_client / esp_https_ota / protocomm / openthread / unity / cmock | — | 全不编 |
+| `build_components`（project_description.json） | **155** | **89**（−42.6 %） | **98** |
+| 编译单元（compile_commands.json） | **1 665** | **1 235**（−25.8 %） | **1 469**（−11.8 %） |
+| 其中 mbedtls | 153 | **152** | ~152（摘不掉，§3） |
+| 其中 lvgl | 527 | 530 | 530（托管组件，含 PPA/JPEG 绘制单元） |
+| 移出构建的**大件** | wifi / bt / lwip(91) / wpa_supplicant(84) / esp_http_client / esp_https_ota / protocomm / openthread / unity / cmock | — | 仍不编：bt / http / OTA / protocomm / openthread / unity / cmock；**WiFi/SNTP 五件已重新加入**（esp_wifi / esp_netif / esp_event / lwip / wpa_supplicant） |
+
+> 前两列是 2026-11-14 落地时的数据（当时还没有网络对时）；第三列是当前 `build/debug`
+> 实测（`idfc build` 之后读 `build/debug/project_description.json` 与
+> `compile_commands.json`）。与 90 个组件的那次相比多 8 个：WiFi/SNTP 五件 + 它们的闭包。
 
 `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE` / `CONFIG_MBEDTLS_PKCS7_C` 关闭后，
 `esp_crt_bundle.c` 与 `pkcs7.c` 不再编译，`gen_crt_bundle.py` 也不再生成证书包
@@ -321,5 +334,7 @@ esp_rom / esp_common / esp_system / esp_stdio / cxx / esp_libc` 是 IDF 的
   ✅ **2026-11-14 已清理**：从 `main/idf_component.yml` 删掉该依赖，组件管理器随之
   重写 `dependencies.lock`、不再拉取 `managed_components/espressif__esp_lcd_sh8601`。
   组件数走势：剪裁后 89 → 加封面硬解的 `esp_driver_jpeg`（连带 `esp_hal_jpeg`）91
-  → 删 sh8601 后 **90 个组件 / 1238 个编译单元**。
+  → 删 sh8601 后 90 个组件 / 1238 个编译单元 → 2026-11 为「WiFi对时」加
+  `esp_wifi` / `esp_netif` / `esp_event` / `lwip` / `wpa_supplicant` 五件后
+  **98 个组件 / 1 469 个编译单元**（当前值，见 §9.2 第三列）。
 

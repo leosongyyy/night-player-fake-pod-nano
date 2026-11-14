@@ -1,5 +1,9 @@
 # RTOS 任务 + 内存分配全量审计（ESP32-S3, releasecandidate 构建）
 
+> 📅 本文记录 **S3 时代（1.x / 2026-09）**的任务清单与内存实测，其中的芯片参数、任务栈
+> 尺寸（LVGL 8KB、deep_worker 8KB…）、`releasecandidate` 构建与 `screen_sleep` 等均不代表
+> S31（2.x）现状；S31 现状见 AGENTS.md（LVGL 20KB、deep_worker 12KB、debug/release 两套）。
+
 > 审计对象：`build/releasecandidate` 产物（ESP-IDF 5.5.5, FreeRTOS-SMP, xtensa-esp32s3, StackType_t = **uint8_t**，`xTaskCreatePinnedToCore` 的栈参数即**字节数**，无需 ×4）。
 > 范围：main/ 下全部 16 处 `xTaskCreate`/`xTaskCreatePinnedToCore` 调用点；静态内存按 `.map`/`.elf` 实测；动态大头按代码确认。
 > 单位：表内所有栈/内存数值均为**字节**；地址前缀 0x3f…= 内部 DRAM（变量/静态），0x4002…/0x4037… = 指令侧（代码），0x3c…/0x4200… = flash/PSRAM 映射只读区（不占 SRAM）。

@@ -18,7 +18,7 @@
 | NVS 页缓冲在 PSRAM 吗？ | **不在**。IDF 用 `calloc` 申请 4KB 页，`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384` 让 ≤16KB 的 malloc 落内部 RAM。 |
 | 全项目 NVS 写入口？ | **唯一入口 `config_store.c`**（见 `FLASH_WRITE_VS_PSRAM.md` §3.1）。问题不在入口分散，而在**调用频率**。 |
 | 最严重的高频写？ | ① 亮度拖动（约 30 次/秒）；② 音量竖条拖动（一次最多 23 次，每次写整块 352B 槽位 blob）。 |
-| 优化效果？ | 亮度一次拖动从 **100~250 次 commit → 1 次**；音量一次拖动从 **≤23 次 → 1 次**；暂停/停止从 2 次 blob → 1 次；伪关机从 4 次 → 2 次；切槽位 blob+u8 合并为 1 次 commit。 |
+| 优化效果？ | 亮度一次拖动从 **100~250 次 commit → 1 次**；音量一次拖动从 **≤23 次 → 1 次**；暂停/停止从 2 次 blob → 1 次；关机保存从 4 次 → 2 次；切槽位 blob+u8 合并为 1 次 commit。 |
 
 ---
 
@@ -57,7 +57,7 @@ nvs_commit()
 | **音量竖条拖动** | `notification_panel.c` 音量条 → `config_store_set_volume` | 高：每 20px 一档，一次最多 23 次 | 1×352B blob + commit | **P1：延迟落盘** |
 | 音量按键 | `key_handler.c` | 低（单击一档） | 1×352B blob | 保留（低频） |
 | 暂停 / 停止 | `player_controller.c` `player_cmd_pause` / `CMD_STOP` | 中低（换歌后首次暂停） | **2×**352B blob | **P2：合并为 1 次** |
-| 伪关机保存 | `player_controller_save_last_position` | 低 | 4 次（sync 2 + was_playing 1 + slot 1） | **P2：2 次** |
+| 关机保存（AXP2101 真断电前） | `player_controller_save_last_position` | 低 | 4 次（sync 2 + was_playing 1 + slot 1） | **P2：2 次** |
 | 切配置槽位 | `config_store_switch_slot` | 低 | 旧槽位 blob + `slot_active` u8 = 2 次 | **P2：合并 1 次 commit** |
 | 设置菜单 / EQ / 随机开关 | settings_menu / eq_popup / player_controller | 极低 | 1 次 | 保留 |
 | 兼容层（首次保存槽位前） | `slot_persist_live` | 仅升级后第一次 | **9 次**（8 键各 commit + blob） | **P1：8 set + 1 commit** |
@@ -118,14 +118,14 @@ nvs_commit()
 4. **同一逻辑操作里的多次槽位修改**用 `*_ram` setter 合并，末尾调一次
    `config_store_save_active_slot()`。
 5. **不要为了“更保险”给拖动加 `nvs_commit`**：亮度/音量最多丢 500ms 内的
-   最后一次修改，而且伪关机/息屏/切槽位都会强制 flush，正常路径不会丢。
+   最后一次修改，而且关机/息屏/切槽位都会强制 flush，正常路径不会丢。
 
 ---
 
 ## 六、验证方法
 
 - 手感：拖动亮度/音量条应无卡顿、无周期性顿挫。
-- 落盘正确性：调完亮度 → 松手 → 长按 A 键伪关机 → 开机，亮度应保持。
+- 落盘正确性：调完亮度 → 松手 → 长按上键关机（AXP2101 真断电）→ 开机，亮度应保持。
 - 日志：拖动音量时串口**不应**出现大量 `SAVE1 saved to NVS`（每次 blob 写
   都会打这一行）；只在松手后出现一次。
 - 定量（可选）：在 `cfg_commit()` 前后打 `esp_timer_get_time()`，统计一次

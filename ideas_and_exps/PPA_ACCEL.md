@@ -233,8 +233,11 @@ PPA 帮不上的地方（与 `IRAM_AUDIT_LVGL9.md` 的结论一致）。
 
 1. **（推荐的下一步）降低每帧 draw task 数量**：滑动时两个页面每帧整页重绘，
    实测 ~170 次混合/帧。可行方向：页面滑动期间用 `lv_snapshot` 把两页各拍成
-   一张图，滑动只合成两张图；或把正在播放页的热对象也钉进内部 RAM
-   （`lvgl_mem_set_internal_prefer` 目前只覆盖两个列表页）。
+   一张图，滑动只合成两张图。~~或把正在播放页的热对象也钉进内部 RAM
+   （`lvgl_mem_set_internal_prefer` 目前只覆盖两个列表页）~~ —— ⚠ **这条已否决**：
+   2026-11 在 S31 上复测发现路径B 只钉得进约 20.8KB、且关掉它反而多出 20.5KB 内部 RAM
+   与 53KB 最大连续块（`CONFIG_UI_LVGL_PIN_HOT_OBJECTS` 现默认 n），见
+   `IRAM_OBJECTS_PSRAM_S31.md`。
 2. **异步 PPA 流水线**：收益面本来就窄（§6.2），不建议优先做。
 3. **换渲染架构**：全屏 PSRAM framebuffer + PPA 合成，40MHz QSPI 下全屏
    上限约 47fps，与本 UI 的局部刷新策略冲突。

@@ -18,7 +18,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `main/core/hardware/axp2101.h/.c` | AXP2101 纯寄存器驱动：电压/电量计/充放电状态/开机原因/长按阈值/中断、电源键 IRQ、软关机 API（**未被调用**） |
+| `main/core/hardware/axp2101.h/.c` | AXP2101 纯寄存器驱动：电压/电量计/充放电状态/开机原因/长按阈值/中断、电源键 IRQ、软关机 API（已由 `fake_shutdown.c` 调用） |
 | `main/core/hardware/rtc.h/.c` | PCF85063A 驱动：一次 burst 读写时间、BCD/星期/有效性、OS 标志、Offset、`struct tm` 互转、首次校时 |
 | `main/core/hardware/battery.h/.c` | 应用层封装：电压/电量融合、充电状态；保留 `battery_init()` / `battery_read_voltage_mv()` 旧符号 |
 | ~~`main/core/hardware/hw_selftest.h/.c`~~ | **2026-11-14 已移除**（见 `DONE_PLANS.md` #52） |
@@ -214,7 +214,7 @@ I hwst: [PASS] rtc_auto_init_project_epoch
 - [ ] 低电策略（拒启/自动关机）尚未接回 `power_service` / `boot_flow`；电压/电量接口已就绪。
 - [x] PMU 电源键已合并进 `key_handler`：`button_service` 统一生成上/下键短按、长按、
       双键同时按下，`key_handler` 恢复 S3 映射（见 §8）。
-- [ ] RTC 时间只在日志里，状态栏尚未显示时间；没有手动校时 UI（当前只能靠首次校时/重新烧录）。
+- [x] 时间显示与手动校时已完成：状态栏左格 HH:MM（`ui/clock_display.c`）、设置 →「时间与日期」的日期/时间/时区弹窗（`ui/time_date_popup.c`）、WiFi SNTP 对时（`core/network/wifi_time_sync.c`，见 `WIFI_TIME_SYNC.md`）。
 - [ ] 电量融合没有做“每 60s ±2%”平滑；若实测跳变明显再加到 UI 层。
 - [x] 设置菜单 →「电源选项」已实现（典型容量/电量/充电中/电压/温度 + 电池健康保护），
       并在开机时按主控复位原因 + PMU `0x20` 判断插电开机、进入充电专用界面；

@@ -216,7 +216,7 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
 
 | 项 | 值 | 说明 |
 |---|---|---|
-| 字体 | `UI_SYSTEM_FONT` | 跟随 `CONFIG_UI_SYSTEM_FONT_FULL` 切换完整/精简 |
+| 字体 | `UI_SYSTEM_FONT` | 固定为 NPF1 全字库（font 分区 mmap）；挂载失败时回退内嵌精简字库。2026-11 起不再有 `CONFIG_UI_SYSTEM_FONT_FULL` 这类完整/精简配置项 |
 | 按下背景色 | `0x7f7f00`（50% 黄 + 50% 黑） | 仅按下瞬间显示（`LV_STATE_PRESSED`），松开透明 |
 | 条目左右内边距 | `VLIST_PAD_H = 16` | 右侧留白避免压住滚动条 |
 | 条目上下内边距 | 顶部 `(item_height − 行高)/2`，底部 0 | 顶部留白使文本视觉居中；底部 0 保证内容区 ≥ 行高不裁切 |
@@ -247,12 +247,12 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
    （除 `CHILD_CREATED/DELETED` 外）。点击回调注册在 list 上，cell 必须带
    `LV_OBJ_FLAG_EVENT_BUBBLE` 才能让 `LV_EVENT_CLICKED` 冒泡上来。
 
-5. **字体行高不能超过 cell 内容区**：完整字体 `system_global_font` 的
-   `line_height = 33`，精简字体是 26。cell 内容区高度 = `item_height - 顶部内边距`
+5. **字体行高不能超过 cell 内容区**：系统字体（NPF1 24px）的 `line_height = 32`，
+   挂载失败回退的 `system_global_font_lite` 是 26。cell 内容区高度 = `item_height - 顶部内边距`
    （底部内边距为 0），顶部内边距 = `(item_height - 行高)/2`。
    若 `line_height > 内容区高度`，`LV_LABEL_LONG_SCROLL_CIRCULAR` 会误判纵向超长、
    变成**上下滚动**。当前歌曲列表用 56px（内容区 45px），目录列表 52px（内容区
-   43px，配合精简字体 26 行高足够；用完整字体请 ≥ 52px）。
+   43px；NPF 32 行高下仍够，但余量只剩 ~9px，再压行高前先复核）。
 
 6. **数据必须静态**：见第 1 节。数据变动后必须手动 `virtual_list_refresh()`。
 
@@ -266,5 +266,6 @@ void create_song_list(lv_obj_t *scr, uint32_t dir_index)
 1085 首超长歌曲列表、60 秒连续滚动实测：heap 稳定在基线 ±1KB 内波动（无泄漏），
 iram 同步稳定；cell 复用与 `set_text` 的分配/释放完全配对，连续滚动不累积内存。
 
-（完整字体固件因字体只读数据映射进 PSRAM，heap 基线比精简字体低约 2.5MB，属
-静态占用，与滚动无关。）
+（2026-11 起字体不再编进固件，而是独立 font 分区里的 `system.npf` 用 `esp_partition_mmap`
+直读——不再有"完整字体固件少 2.5MB heap 基线"这回事。当前 heap 基线只受 LVGL 对象/行槽数量影响，
+与滚动无关。）

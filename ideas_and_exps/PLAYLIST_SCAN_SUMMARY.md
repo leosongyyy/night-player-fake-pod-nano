@@ -7,7 +7,7 @@
 
 ## 1. 目标与背景
 
-- 设备：ESP32-S3（16MB Flash，8MB PSRAM），64GB SD 卡（FAT32）存放约 5000+ 首 mp3。
+- 设备：**ESP32-S31**（FakePodNano Pro V1，16MB Flash + 16MB Octal PSRAM），SD 卡（64GB，FAT32/exFAT）存放约 5000+ 首 mp3。
 - 需求：开机扫描 SD 卡，把**目录结构**与**用户自建的 `.pl` 播放列表**持久化到独立 Flash 分区，运行期通过**内存映射只读**访问（省 RAM）。
 - 数据源：`musics/` 下的音频文件 + 根目录/`playlists/` 下的 `.pl` 歌单文件。
 
@@ -73,7 +73,7 @@ name_str(4) + path_str(4)
 | `core/storage/playlist.h/.c` | 读取/解析 API（mmap 或内存 buffer） |
 | `core/storage/playlist_store.h/.c` | 泛化持久化层（中断安全整体保存，见另文档） |
 | `core/hardware/pldata.h/.c` | 4MB 数据分区底层读写 + mmap |
-| `main/main.c` | 开机后台任务触发扫描 + 内存读回验证 |
+| `main/ui/boot_flow.c` | 开机流程 / 扫描界面：启动后台扫描任务、刷新进度、按结果切界面 |
 
 ### 关键接口
 - `playlist_build_from_sd(stats)`：扫描 + 写回分区。
@@ -182,10 +182,10 @@ scan done: dirs=168 songs=8828 str_len=349169 total=611313 truncated=0
 - [x] 读取/解析 API（mmap 省 RAM）
 - [x] 内存模式（仅扫描不写回）用于测试
 - [x] 真机验证（168 目录 / 8828 首歌，无截断）
+- [x] 播放列表 UI：目录/歌单列表 → 歌曲列表 → 播放
+- [x] 持久化写回验证（`playlist_build_from_sd` 写回 pldata 后重启读取，开机流程实际启用）
 
 ### 待办 / 规划
-- [ ] 播放列表 UI：目录/歌单列表 → 歌曲列表 → 播放
-- [ ] 持久化写回验证（`playlist_build_from_sd` 写回 pldata 后重启读取）
 - [ ] （可选）扫描逻辑做成 Kconfig 开关
 - [ ] 播放引擎仅支持 mp3（已过滤），后续如需其它格式需扩展解码
 

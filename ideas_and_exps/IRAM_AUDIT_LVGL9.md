@@ -1,5 +1,9 @@
 # IRAM / 内部 RAM 占用审计（LVGL 9.4 + TTF 迁移之后）
 
+> 📅 本文记录 **S3 时代（1.x / 2026-10）**的 IRAM 实测与结论（8MB PSRAM、TTF 字体、
+> IRAM/DRAM 别名、82.8KB blend 等），其中的芯片参数、内存数字与"路径B"方案不代表
+> S31（2.x）现状；S31 现状见 `IRAM_OBJECTS_PSRAM_S31.md` 与 AGENTS.md。
+
 > 测量时间：2026-10-16；固件基线：`04b144a`（工作区干净）+ `build/cs43131.ttffont.debug`（debug / cs43131 / ttffont）。
 > 硬件：ESP32-S3 成品播放器，8MB Octal PSRAM @80MHz，16MB Flash。
 > 起因：LVGL 8.4 → 9.4、字体换成 TTF 之后，LVGL 对象已全部搬到 PSRAM，但"日常可用的 IRAM"看起来没有改善。

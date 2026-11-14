@@ -2,12 +2,14 @@
 
 > ⚠ **2026-11 更新（master）**：本文档描述的 overlay 维度（`dac_chip` / `font`）已从本项目的 `idfc_buildconfig.json` 中移除，现在只保留 debug / release 两套构建类型（`releasecandidate` 也已移除），构建目录为 `build/<variant>`。本文档本身仍是 idfc 该功能的定义与实现说明，保留不变；`legacy_s3` 分支仍按旧矩阵构建。
 
-> **状态**：固件侧（本仓库）**已就绪**（配置项 + overlay 配置 + `idfc_buildconfig.json` 均已入库），
-> idfc 侧**尚未实现**（当前已安装的 `idfc.exe` 不读 `idfc_buildconfig.json`，仍然只认 `.idfc/idfc_config.json` + `sdkconfig.defaults.<variant>`）。
+> **状态（2026-11 更新）**：idfc 侧**已按本文档实现并验收**（见 §7 实测记录，`idfc.exe` 会读 `idfc_buildconfig.json`）；
+> **但 master（2.x）的 `idfc_buildconfig.json` 已不再定义 overlay 维度**——只剩 `variant` 一维（debug / release），
+> 构建目录 `build/{variant}`，DAC 固定 CS43131、字体固定 NPF1 位图全字库。
+> 本文档因此保留为**该功能的规格与实现说明（S3 时代 1.x 的用法）**。
 >
 > **本文档的用途**：给 idfc 仓库（`Q:\Projects\CSharp\idf-client-cli\`，代码基线 **commit `85a73ab`（2026-10-01，工作区干净）**）写的一份实现说明书。第 1 节定义"配置矩阵是什么"，第 2 节定义配置文件格式，第 3 节定义命令行行为，第 4 节**逐文件、逐调用点**列出修改点，第 5 节是兼容性与失败模式，第 6 节是实施顺序与自测清单。
 >
-> 固件侧的使用说明（本项目的 `dac_chip` 维度、DAC 配置项、构建命令）见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 AGENTS.md 第 6 节。
+> 固件侧的使用说明（📅 S3 时代的 `dac_chip` 维度、DAC 配置项、构建命令）见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 AGENTS.md 第 6 节。
 
 ---
 
@@ -15,7 +17,7 @@
 
 ### 1.1 现状与动机
 
-现在 idfc 只认识**一维**的"构建类型"（build variant）：`debug` / `releasecandidate` / `release`，一个 variant 对应
+📅 写本文时（S3 时代）idfc 只认识**一维**的"构建类型"（build variant）：`debug` / `releasecandidate` / `release`（master 现在只有 `debug` / `release`），一个 variant 对应
 
 ```
 构建目录   build/<variant>/
@@ -31,7 +33,7 @@
 
 | 术语 | 含义 | 本项目实例 |
 |---|---|---|
-| **构建矩阵 / 配置矩阵** | 由一个 variant 维度与 N 个 overlay 维度构成的笛卡尔积 | 3 × 2 = 6 格 |
+| **构建矩阵 / 配置矩阵** | 由一个 variant 维度与 N 个 overlay 维度构成的笛卡尔积 | S3 时代 3 × 2 = 6 格（master 现为 2 格） |
 | **BuildVariant（构建类型）** | 主维度的一个取值，对应 `sdkconfig.defaults.<Name>` | `debug`、`releasecandidate`、`release` |
 | **Overlay 维度** | 除构建类型外的一个正交维度，**单选**（每格只取一个类型） | `dac_chip` |
 | **OverlayType（维度类型）** | 某个 overlay 维度的取值，可携带自己的配置文件 | `cs43131`、`pcm5102` |
@@ -105,16 +107,16 @@ sdkconfig.dac_chip.<类型>                ← overlay 维度（多个维度时�
 - `ActiveOverlays`：**新增**，维度名 → 类型名；对应 `-o`。缺失的维度用矩阵里的 `DefaultType`。
 - 命令行 `-t` / `-o` 优先级高于这两个字段（与今天 `-t` 的语义一致）。
 
-### 1.7 本项目的当前矩阵（实例）
+### 1.7 本项目的矩阵（实例）
 
-`idfc_buildconfig.json`（本仓库根目录）当前定义：
+📅 **以下为 S3 时代（`legacy_s3`，1.x）的 `idfc_buildconfig.json` 定义**：
 
 - variant 维度：`debug` / `releasecandidate` / `release`
 - overlay 维度 1：`dac_chip`，类型 `cs43131`（默认）/ `pcm5102`
 - overlay 维度 2：`font`，类型 `ttffont`（默认）/ `binfont`（2026-10-25 新增）
 - `OutputDir`：`build/{dac_chip}.{font}.{variant}`
 
-共 **12 个单元格**。为节省篇幅，下面按"配置链 = 公共前缀 + 两个 overlay + variant"归纳（后缀顺序固定为
+共 **12 个单元格**（下表）。**master（2.x）现在只剩 `variant` 一维（debug / release）、`OutputDir` 为 `build/{variant}`，共 2 格**。为节省篇幅，下面按"配置链 = 公共前缀 + 两个 overlay + variant"归纳（后缀顺序固定为
 `dac_chip` → `font` → `variant`，与矩阵里 `Overlays[]` 的声明顺序一致）：
 
 | cell 目录 | 配置链（`-D SDKCONFIG_DEFAULTS=` 的分号列表） |
@@ -213,7 +215,7 @@ sdkconfig.dac_chip.<类型>                ← overlay 维度（多个维度时�
 - 分隔符统一写 `/`（Windows 下实例化时替换为 `Path.DirectorySeparatorChar`），与现有代码 `GetBuildDirName()` 的风格一致。
 - 允许带子目录，例如 `build/{variant}/{dac_chip}`（此时 cell 名取最后一段 `pcm5102`，可能与别的 cell 重名 → **建议**要求实例化后的目录名唯一，重名直接报错）。
 
-### 2.6 完整示例（本仓库当前内容，可直接作为 schema 的参考实现）
+### 2.6 完整示例（📅 S3 时代本仓库的内容，可作为 schema 的参考实现；master 现为单维 `build/{variant}`）
 
 ```json
 {
@@ -686,10 +688,10 @@ cmdLine.Append(cell.GetCommonIDFArgsPrefix());
 
 **本仓库（固件侧）**
 
-- `idfc_buildconfig.json` —— 矩阵定义（本文档 §2 的实例）
+- `idfc_buildconfig.json` —— 矩阵定义（本文档 §2 的实例；master 现在只有 `variant` 一维）
 - `sdkconfig.defaults` / `sdkconfig.defaults.<variant>` —— BaseConfig 与 variant 维度
-- `sdkconfig.dac_chip.cs43131` / `sdkconfig.dac_chip.pcm5102` —— overlay 维度配置
-- `main/Kconfig.projbuild`（`AUDIO_DAC_CS43131` / `AUDIO_DAC_PCM5102`）、`main/main.c`（`#if/#error` 兜底）
+- `sdkconfig.dac_chip.cs43131` / `sdkconfig.dac_chip.pcm5102` —— overlay 维度配置（📅 S3 时代文件，master 已删除）
+- `main/Kconfig.projbuild`（`AUDIO_DAC_CS43131` / `AUDIO_DAC_PCM5102`）、`main/main.c`（`#if/#error` 兜底）（📅 S3 时代配置项，master 已删除，DAC 固定 CS43131）
 - `ideas_and_exps/BUILD_CONFIG.md` §8 —— 固件侧使用说明；`ideas_and_exps/IDFC_USAGE.md` —— idfc 现有用法
 
 **idfc 仓库（`Q:\Projects\CSharp\idf-client-cli\`，基线 commit `85a73ab`）**

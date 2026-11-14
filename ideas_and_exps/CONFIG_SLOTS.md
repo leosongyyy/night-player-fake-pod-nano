@@ -91,7 +91,7 @@ config_store（core/storage/config_store.c）
 | --- | --- | --- |
 | 每次 `set_xxx` | `slot_persist_live()` | **增量存回当前活跃槽位**。同一 blob 反复覆盖写，NVS 分页复用，不会无限增长；这样"改完直接长按关机/断电"也不丢 |
 | 切换槽位前 | `config_slots_switch()` → `player_controller_sync_config()` → `config_store_switch_slot()` 第 1 步 | 先把**播放现场**（当前歌曲 / 随机位置 / 列表名）同步进活跃槽位，再整份存回**旧**槽位 |
-| 伪关机 | `player_controller_save_last_position()` | 同一个 `player_sync_config()` 同步现场后存回当前槽位（"后续关机时会自动保存到当前配置"） |
+| 关机（AXP2101 真断电） | `player_controller_save_last_position()` | 同一个 `player_sync_config()` 同步现场后存回当前槽位（"后续关机时会自动保存到当前配置"） |
 
 "记忆使用的配置" = 切换时把下标写进 NVS 键 `slot_active`，开机
 `config_store_load_active_slot()` 读回来并整份载入。
@@ -250,7 +250,7 @@ config_store（core/storage/config_store.c）
    `CMD_PLAY_SONG`，旧实现只 `player_play_global()`，**不调用 `player_save_new_song()`**。
    于是 `config_store` 里的 `last_global` 仍是上一首；切走时存下去的就是上一首，
    切回来当然播回原来那首。
-   而**伪关机走的是 `player_controller_save_last_position()`，它读控制器实时状态
+   而**关机前走的是 `player_controller_save_last_position()`，它读控制器实时状态
    `s_cur_global`** → 所以"关机再开机一次就对了"。这条差异正是现象的来源。
 2. **空槽位存不进列表名**：`config_store_set_slot_list_name()` 旧实现写在槽位缓存里、
    且要求"槽位已有数据"。空槽位第一次保存时名字被丢掉，弹窗只显示 `SAVE2`
@@ -263,7 +263,7 @@ config_store（core/storage/config_store.c）
   一起写进活跃槽位）。
 - 新增公开接口 **`player_controller_sync_config()`**，`config_slots_switch()` 在
   `config_store_switch_slot()` **之前**调用它 → 存入旧槽位的一定是"此刻真正在播的歌"；
-  伪关机保存也复用它（不再各写一遍）。
+  关机保存也复用它（不再各写一遍）。
   ⚠ **不要**为了"记住歌曲"去给 `CMD_PLAY_SONG` / 切歌路径加落盘（第一版就是这么修的，
   随后按 §七.3 收敛掉了）：切换前的那一次同步已经把"切走时记住这首歌"完全覆盖。
 - `config_store.c`：把 `last_list_name` 收进 `config_live_t s_live`（与 `last_global`
@@ -283,20 +283,20 @@ config_store（core/storage/config_store.c）
 
 | 路径 | 现在是否写 NVS | 说明 |
 | --- | --- | --- |
-| 点歌（`CMD_PLAY_SONG`）/ 上一曲 / 下一曲 / 自然播完 / 坏曲跳过 | **否** | 只更新内存里的 `s_cur_global`；切槽位前同步 1 次、伪关机时同步 1 次就够 |
+| 点歌（`CMD_PLAY_SONG`）/ 上一曲 / 下一曲 / 自然播完 / 坏曲跳过 | **否** | 只更新内存里的 `s_cur_global`；切槽位前同步 1 次、关机时同步 1 次就够 |
 | 切槽位（`CMD_RESTORE_CONFIG`） | 否 | 目标槽位内容刚载入，写入的是同样的值；随机位置也随同步/切换落盘 |
 | 暂停 / 停止 | 是 | 低频且是"暂停后直接断电"的最后保障，保留 |
 | 切随机开关 / 开机恢复随机起点 | 是 | 用户动作 / 每次开机一次，保留 |
-| 切槽位前、伪关机 | 是 | **唯一的两个"主动保存"时机**（`player_sync_config`） |
+| 切槽位前、关机 | 是 | **唯一的两个"主动保存"时机**（`player_sync_config`） |
 
-**代价（有意接受）**：非正常断电（拔电池、长按 A 键到 3s 由硬件硬切、崩溃重启）时，
-"上次播放的歌曲"会回退到上一次落盘点（暂停/停止/切槽位/伪关机）——正常走
-伪关机（睡眠定时、低电、A 键长按 1.2s）不受影响。**换来的收益**：点歌/翻页这条
+**代价（有意接受）**：非正常断电（拔电池、长按上键由 PMU 在 `OFFLEVEL`（约 4s）硬断电、崩溃重启）时，
+"上次播放的歌曲"会回退到上一次落盘点（暂停/停止/切槽位/关机）——正常走
+关机（睡眠定时到点、上键长按 1.2s）不受影响。**换来的收益**：点歌/翻页这条
 最高频路径完全不写 flash，"切走再切回"的正确性却与之前一模一样。
 
 > ✅ **这条行为已与用户确认为"预期"，不是缺陷**：原版 NightPlayer 就是这个语义
 > ——安卓版清后台、强制停止、应用崩溃都**不保存**，只有正常退出才保存。本固件里
-> "正常退出"对应**伪关机**（睡眠定时 / 低电 / A 键长按 1.2s），它一定会保存。
+> "正常退出"对应**关机**（睡眠定时到点 / 上键长按 1.2s，AXP2101 真断电），它一定会保存。
 > ⚠ **所以今后不要把它当 bug 去"加固"**：不要再给点歌/翻页/自然播完加落盘，
 > 也不要设计"崩溃前抢救一下"之类的机制。
 

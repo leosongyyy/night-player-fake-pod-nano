@@ -1,5 +1,9 @@
 # LVGL 8.4 → 9.4 迁移记录
 
+> 📅 本文记录 S3 时代（1.x / 2026-10）的迁移实测与结论，其中的行号、栈尺寸、固件体积与
+> 构建矩阵（`cs43131.debug`、12KB LVGL 栈等）为当时状态，不代表 S31（2.x）现状；
+> S31 现状见 AGENTS.md（LVGL 任务栈现为 20KB、构建只剩 debug/release）。
+
 > 状态：**已完成，debug 构建实机验证通过**（2026-10-15）
 > 目标：把 `lvgl/lvgl` 从 8.4.0 升到 9.4.0，先跑通 debug 构建
 > 相关文件：`main/idf_component.yml`、`sdkconfig.defaults`、`main/core/ui/lvgl_port.{c,h}`、

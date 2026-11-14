@@ -4,7 +4,7 @@
 
 > 📥 **下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**。下载后把 `idfc.exe` 放到 **PATH 中的某个目录**（例如 `C:\Users\<你>\ProgramFiles\bin\`），然后在**项目目录**里直接用 `idfc <子命令>` 调用即可（见 §3）。
 
-> 🆕 **2026-10-02 起：本项目启用了「配置矩阵」**（`idfc_buildconfig.json`，维度 = `variant` × `dac_chip` × `font`）。**构建目录从 `build/<variant>` 变成 `build/<cell>`（如 `build/cs43131.ttffont.debug`）**，并新增 `-o <维度>=<类型>` 参数与 `matrix` / `set-overlay` 命令。**本文档中凡出现 `-B build/<variant>`、`build/<cfg>` 的示例都属于矩阵之前的行为**（没有 `idfc_buildconfig.json` 的项目仍然如此，因此这些说明并未失效，只是不再是本项目的路径）。矩阵的定义、格式与实测记录见 `BUILD_MATRIX.md`；新版 `idfc help --all` 与 idfc 仓库 README 是权威说明。
+> 📅 **2026-11 起（master，2.x）：配置矩阵只剩 `variant` 一个维度**——只保留 `debug` / `release` 两套构建类型（`releasecandidate` 已删除），构建目录就是 **`build/<variant>`**（如 `build/debug`），`-t` 的取值只有这两个。旧的 `dac_chip` / `font` overlay 维度与 `-o` / `set-overlay` 用法属于 **S3 时代（`legacy_s3`，1.x）**，master 上已不可用；`matrix` 现在只有 2 格。矩阵的定义、格式与实测记录见 `BUILD_MATRIX.md`；`idfc help --all` 与 idfc 仓库 README 是权威说明。
 
 > ⚠ **本文档对应当前的「子命令版」idfc。**
 > 旧版语法（`--server` / `-B build/<cfg> build` / `-B ... reconfigure` / `raw-idf`）**已全部失效**，现在一律报 `没有这样的命令`（退出码 1）。历史对话、旧文档、旧笔记里的 idfc 命令**不要照抄**——先看 §1 的迁移对照。
@@ -25,7 +25,7 @@
 | `idfc raw-idf <参数>` | `idfc idfpy <参数>` |
 | `idfc menuconfig` | `idfc idfpy menuconfig` |
 
-**迁移的实质**：旧版是「什么都透传给 idf.py」，多配置的 `-B` 与 `-D` 全靠使用者每次敲对；新版把「本项目是三套配置构建」这件事**内建进了工具**，`build`/`flash`/`monitor`/`run`/`size` 会自动拼好参数并做过期检测；需要原样透传时走 `idfpy`。
+**迁移的实质**：旧版是「什么都透传给 idf.py」，多配置的 `-B` 与 `-D` 全靠使用者每次敲对；新版把「本项目是 debug / release 两套配置构建」这件事**内建进了工具**，`build`/`flash`/`monitor`/`run`/`size` 会自动拼好参数并做过期检测；需要原样透传时走 `idfpy`。
 
 ---
 
@@ -55,7 +55,7 @@
 ## 3. 前置条件
 
 - 已安装 ESP-IDF（含工具链、Python 虚拟环境）。
-- 已具备一份 **ESP-IDF 激活脚本**（`.ps1`），例如 `C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1`（本项目中可能是 5.5.4 或 5.5.5）。
+- 已具备一份 **ESP-IDF 激活脚本**（`.ps1`），本项目当前用的是 **ESP-IDF 6.1**：`C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1`（IDF 装于 `C:\esp\v6.1\esp-idf`；旧机上的 5.5.x 脚本只作回退用）。
 - **`idfc.exe` 必须放在 PATH 中的目录**（从上面的发布页下载）。这样在项目目录里直接 `idfc build` / `idfc start-server` 就能用。
 - ⚠ **不要把 `idfc.exe` 放在 DeepSeek Harness 的工作区里**：DSH v0.1.7-rc.1 起会给工作区打上可继承的 **Low 完整性标签**（`icacls` 可见 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`），而 Windows 派生进程的完整性取 `min(创建者令牌, 映像文件)`。工作区内的 exe 因此只能以 Low 启动，写不了 `%LOCALAPPDATA%`，服务器的权限自检会直接拒绝启动；**`danger-full-access` 也解决不了**（它只解除 DSH 沙箱，不解除完整性标签）。放到工作区外的 PATH 目录即可，**不需要管理员权限**。
 
@@ -76,7 +76,7 @@ idfc help --all          # 有输出即安装成功（注意：不要写 .\idfc.
 ### 4.1 首次配置项目（每个项目目录做一次）
 
 ```powershell
-idfc set-idfenv "C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1"
+idfc set-idfenv "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"
 idfc set-variant debug          # 需存在 sdkconfig.defaults.debug
 idfc ports                      # 列出串口（需服务器已启动）
 idfc set-port COM12
@@ -87,7 +87,7 @@ idfc status                     # 复核当前生效的构建类型与串口
 
 ```json
 {
-  "IdfActivationScript": "C:\\Espressif\\tools\\Microsoft.v5.5.5.PowerShell_profile.ps1",
+  "IdfActivationScript": "C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1",
   "LastComPort": "COM12",
   "ActiveBuildVariant": "debug"
 }
@@ -121,7 +121,7 @@ idfc flash                                 # 烧录到已保存的串口
 idfc monitor --wait-for "App started"      # 串口监视，命中后退出
 idfc run --monitor-wait-for "App started"  # 构建+体积+烧录+监视一条龙
 idfc menuconfig search "IRAM SPIRAM"        # 查配置项（标题/说明/当前值），纯客户端
-idfc menuconfig desc CONFIG_LOW_BATTERY_SHUTDOWN_SEC   # 单项详情（含 help 全文）
+idfc menuconfig desc CONFIG_PMU_KEY_IRQ                # 单项详情（含 help 全文）
 idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
 ```
 
@@ -141,10 +141,10 @@ idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 i
 | `size [-t T] [--detailed]` | 固件体积分析（`--detailed` 输出极长，谨慎） |
 | `menuconfig search "<关键词…>" [--page N]` / `menuconfig desc <名称>` | 查构建产物里的 menuconfig 配置项（标题 / 说明全文 / 当前值）——**纯客户端**，只读 `build/<T>/config/` 的两个 json，不触发构建 |
 | `run [-t T] [-p COMx] [--clean] [--no-size] [--verbose-build] [--verbose-flash] [--monitor-*]` | 构建+体积+烧录+监视一条龙 |
-| `clean [-t T] [-o …]` | 删除**当前单元格**的 `sdkconfig` 与 `config`（启用矩阵时是 `build/<cell>/…`） |
-| `fullclean [-t T] [-o …]` | 删除**当前单元格**整个目录（启用矩阵时是 `build/<cell>/`） |
-| `matrix [--json] [-t T] [-o …]` | 列出配置矩阵的全部单元格、状态与当前选择（纯客户端） |
-| `set-overlay <维度> <类型\|--default>` | 记住矩阵里某个 overlay 维度的类型（`--default` 清除） |
+| `clean [-t T]` | 删除当前构建目录的 `sdkconfig` 与 `config`（`build/<variant>/…`） |
+| `fullclean [-t T]` | 删除当前构建目录整个目录（`build/<variant>/`） |
+| `matrix [--json] [-t T]` | 列出配置矩阵的单元格、状态与当前选择（纯客户端；master 只有 `debug` / `release` 2 格） |
+| ~~`set-overlay <维度> <类型\|--default>`~~ | **master 已无 overlay 维度，本命令不可用**（S3 时代 `legacy_s3` 的用法） |
 | `status` | 查看项目配置与服务器状态 |
 | `ports` | 列出系统串口（含设备名与实例路径） |
 | `set-port COMx` / `set-idfenv <ps1>` / `set-variant <T>` | 记住项目默认配置 |
@@ -181,7 +181,7 @@ idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 i
 - **纯客户端命令**：只读 `build/<构建类型>/config/` 下的 `kconfig_menus.json`（全部选项 + 标题 + 说明全文 + 依赖）与 `sdkconfig.json`（当前生效值），**不经过 IDF 服务器、也不触发构建**。
 - ⚠ **必须先成功构建过一次**：这两个 json 由 ESP-IDF 在**配置阶段**生成（实测 debug 版 `kconfig_menus.json` 2.6MB / 4079 个节点、`sdkconfig.json` 1730 个键）。缺失时命令会提示先 `build` 并以退出码 1 退出。
 - 退出码：`0` 成功；`1` = 参数错误 / 缺少构建产物 / **没有匹配项** / 页码越界。
-- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `idfc menuconfig desc CONFIG_LOW_BATTERY_SHUTDOWN_SEC` 会连说明全文一起打出来。
+- 典型用处：改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先确认"这项是干什么的、现在是多少"，不必翻 IDF 源码或整份 `sdkconfig`。例如 `idfc menuconfig desc CONFIG_PMU_KEY_IRQ` 会连说明全文一起打出来。
 
 ---
 
@@ -191,7 +191,7 @@ idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 i
 
 ### 6.1 多配置构建：为什么必须带对 `-B`（历史事故）
 
-本项目是 **debug / releasecandidate / release 三套配置**构建。旧版工具要求每条命令手工带 `-B build/<cfg>`：不带时 idfc 会走**根目录 `build/` + 根 `sdkconfig`**（已被 `.gitignore` 忽略、内容陈旧），后果有两种：
+本项目是 **debug / release 两套配置**构建（📅 S3 时代是 debug / releasecandidate / release 三套）。旧版工具要求每条命令手工带 `-B build/<cfg>`：不带时 idfc 会走**根目录 `build/` + 根 `sdkconfig`**（已被 `.gitignore` 忽略、内容陈旧），后果有两种：
 
 - **`build` / `flash`：会拿旧配置去构建**，产物与 `sdkconfig.defaults` 链不一致。**曾经因此产出过"堆毒化仍开"的固件**——`sdkconfig.defaults.debug` 里明明写着关闭，实际固件里 `CONFIG_HEAP_POISONING_COMPREHENSIVE=y`，导致内部 RAM 紧张、任务建不起来、SD 读 DMA 失败。这类问题的症状（内存不足、外设偶发失败）会把排查方向带得很偏。
 - **`monitor`：日志开头会出现 `Running cmake in directory ...\build`**（白跑一轮 cmake 配置），而且 idf_monitor 取不到该配置的 `.elf`，**调试符号加载不正确**（栈回溯的函数名/行号失真甚至解不出来）。

@@ -17,8 +17,8 @@
 | --- | --- | --- |
 | I²C0 总线 | ✅ 已就绪 | `main/core/hardware/touch.c` 用新版 `i2c_new_master_bus()` 建立，`touch_get_i2c_bus()` 暴露 bus handle；**PMU/RTC/IMU 必须复用它**，不要再建第二条 I²C0 |
 | 触摸 CST820 | ✅ 已适配 | 0x15，异步初始化 |
-| AXP2101 | ✅ 驱动已接入 | `main/core/hardware/axp2101.c`：电压/电量计/充放电状态/开机原因/电源键 IRQ（GPIO49，含按下/抬起边沿）；`battery.c` 对外提供融合后的百分比；`fake_shutdown` 已改为写 `0x10[0]` 的**真关机**。⚠ 低电拒启/自动关机策略待接；软关机等待真机实测 |
-| PCF85063 | ✅ 驱动已接入 | `main/core/hardware/rtc.c`：一次 burst 读时间、关闭 CLKOUT、时间无效（OS=1/出厂默认）时用**项目诞生日**（仓库首个提交时间）首次校时；INT/CLKOUT 未接，无闹钟功能。暂无时间显示/手动校时 UI |
+| AXP2101 | ✅ 驱动已接入 | `main/core/hardware/axp2101.c`：电压/电量计/充放电状态/开机原因/电源键 IRQ（GPIO49，含按下/抬起边沿）；`battery.c` 对外提供融合后的百分比；`fake_shutdown` 已改为写 `0x10[0]` 的**真关机**。⚠ 低电拒启/自动关机策略待接；软关机已达真机实测（充电界面拔电关机走 `0x10[0]=1`，见 `POWER_OPTIONS_AND_CHARGE_BOOT.md` §7） |
+| PCF85063 | ✅ 驱动已接入 | `main/core/hardware/rtc.c`：一次 burst 读时间、关闭 CLKOUT、时间无效（OS=1/出厂默认）时用**项目诞生日**（仓库首个提交时间）首次校时；INT/CLKOUT 未接，无闹钟功能。**时间显示与手动校时已接入**：状态栏 HH:MM（`ui/clock_display.c`）、设置 →「时间与日期」日期/时间/时区弹窗（`ui/time_date_popup.c`）、WiFi SNTP 对时（`core/network/wifi_time_sync.c`） |
 | QMI8658 | ❌ 未适配 | 无任何代码（`hardware_v1.md` §9） |
 | 按键 | ✅ 已接入 | 上键=PMU PWRON、下键=GPIO61；`button_service` 统一生成上/下键短按、长按、**双键同时按下**五类事件，`key_handler` 恢复 S3 映射（亮屏音量±/下键长按-10、上键长按关机、双键息屏；息屏播放暂停/下一曲/上一曲、上键长按关机、双键亮屏） |
 
@@ -30,8 +30,8 @@
 2. ✅ **PMU 按键**：GPIO49 下降沿中断 + `0x49` 短按/长按/按下/抬起 + 清位；`button_service` 据此做双键判定。
 3. ✅ **PMU 上 UI**：状态栏 / 下拉控制中心显示电量百分比 + 充电图标（融合算法见 [pmu_axp2101.md](pmu_axp2101.md) §6.3）。
 4. ⬜ **低电策略**：把"低电拒启 / 低电自动关机"接回 `power_service` / `boot_flow`（§6.5）。
-5. ✅ **软关机**：`fake_shutdown` 已改为"正在关机... → 保存 → 写 `0x10[0]=1`"的真关机；**真机断电效果待用户实测**。
-6. ✅ **RTC 读时间/首次校时**：`rtc_init()` → 读时间 → 无效时项目诞生日校时；⬜ 状态栏时间显示与手动校时 UI 待做。
+5. ✅ **软关机**：`fake_shutdown` 已改为"正在关机... → 保存 → 写 `0x10[0]=1`"的真关机；充电界面拔电关机的真机流程已实测通过（`POWER_OPTIONS_AND_CHARGE_BOOT.md` §7）。
+6. ✅ **RTC 读时间/首次校时**：`rtc_init()` → 读时间 → 无效时项目诞生日校时；✅ 状态栏时间显示（`ui/clock_display.c`）与手动校时 UI（`ui/time_date_popup.c`）、WiFi 对时已完成。
 
 ## 上板前必须实测确认的问题
 

@@ -3,7 +3,7 @@
 > **本文依据**：`tempdir/newhwadapter/AXP2101_datasheet.pdf` —— X-Powers *AXP2101 Single Cell NVDC PMU with E-gauge*，Rev 1.4（2022-10-13），共 63 页。文中 `[p.N]` 指该 PDF 页码。
 > **适用硬件**：FakePodNano Pro V1（ESP32-S31），AXP2101 挂 **I²C0（7-bit 地址 `0x34`）**，PMU 中断接 **GPIO49**，上方电源键接 **PWRON**（无主控 GPIO）。引脚/总线定义见 [hardware_v1.md](hardware_v1.md)。
 > **本文覆盖**：① 读电池电压 / ② 读电量百分比 / ③ 读充放电状态与（缺失的）电流 / ④ 读电源键事件、配置长按开关机阈值 / ⑤ 软关机与开机来源 / ⑥ 充电参数（按 600 mAh、3.7 V 标称、4.2 V 满电整定）/ ⑦ 本项目落地设计。
-> **状态**：项目当前 `main/core/hardware/battery.c` 仍是**占位实现**（返回固定 3700 mV），AXP2101 尚未接入 —— 本文即适配前的设计依据。
+> **状态**：**AXP2101 已接入**——`main/core/hardware/axp2101.c` + `battery.c` 已实现电压 / E-Gauge 电量 / 充电状态 / 电源键 IRQ / 软关机 / 开机原因 / 电池健康保护（4.0V 软件限充），实现与真机实测见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 与 `POWER_OPTIONS_AND_CHARGE_BOOT.md`。本文其余内容保留为**适配前的设计依据**（S3 时代末期所写），寄存器/协议部分仍然有效。
 
 ---
 
@@ -441,7 +441,7 @@ i2c_master_transmit(dev, w, 2, 100);
 | 关机态 | 按住 > ONLEVEL（512 ms） | PMU 自己开机，固件无需参与 |
 | 任意 | 按住 > OFFLEVEL（6 s） | PMU **硬断电**（用户强制关机，固件无法拦截） |
 
-> ⚠ 现有 `button_service` 只处理下方 GPIO61 按键（A/B 双键）。PMU 键是**另一套事件源**，两者要在 `key_handler` 层合并，不要混进 `button_service`。
+> ⚠ 编写本文时 `button_service` 只处理下方 GPIO61 按键；**现状已合并**：`button_service` 用 `axp2101_is_power_key_pressed()` 维护上键（PMU PWRON）的按住状态，统一生成上/下键短按、长按与双键同时按下，`key_handler` 只做应用分发。
 
 ### 8.4 ISR / 任务模型（必须遵守）
 
@@ -460,11 +460,11 @@ GPIO49 下降沿 ISR（IRAM，极短）
 
 ---
 
-## 9. 功能⑤：软关机（替代当前的"伪关机 + deepsleep"）
+## 9. 功能⑤：软关机（替代 S3 时代的"伪关机 + deepsleep"）
 
 ### 9.1 为什么应该换
 
-项目现在的 `fake_shutdown` 是"停外设 + 进 deepsleep"，S3 上是为了省电（deep sleep 几十 µA）。S31 有 AXP2101 后：
+📅 S3 时代（1.x）的 `fake_shutdown` 是"停外设 + 进 deepsleep"（为了省电，deep sleep 几十 µA）。**S31（2.x）已改为 AXP2101 软关机真断电**（`fake_shutdown.c` 写 `0x10[0]=1`，文件名保留）。下表是当时的方案对比：
 
 | 方案 | 关机电流 | 唤醒方式 | 体验 |
 | --- | --- | --- | --- |
@@ -653,8 +653,7 @@ void pmu_charge_limit_tick(const axp2101_status_t *st)
 > 避免进入"完成"态、BATFET 保持导通；实现见
 > [`../POWER_OPTIONS_AND_CHARGE_BOOT.md`](../POWER_OPTIONS_AND_CHARGE_BOOT.md) §3。
 
-- 现有 `axp2101_configure_charge(uint16_t icc_ma, uint8_t iterm_code, bool cv_42v)` 的 CV 参数是 **bool**（4.2 V 或"不动"），要支持 4.0/4.1 V 得改成档位枚举（`000..101` 或 `axp2101_cv_t`）；
-- 现有 `axp2101.h` 只提供**读**寄存器（`axp2101_read_reg`），没有写 `0x18` 的接口；做方案 B 需新增 `axp2101_set_charge_enable(bool)`（读-改-写 bit1，**保留 bit3=1、bit0=0**）；
+- **已实现**：`axp2101_set_charge_voltage(axp2101_cv_t)`（CV 档位枚举）与 `axp2101_set_charge_enable(bool)`（读-改-写 `0x18` bit1，**保留 bit3=1、bit0=0**）都在 `main/core/hardware/axp2101.h` 里；电池健康保护就是"CV 保持 4.2 V + 4.0 V 写 `0x18[1]=0` 停充 / 3.9 V 恢复"，见 `POWER_OPTIONS_AND_CHARGE_BOOT.md` §3；
 - Kconfig 建议：`CONFIG_PMU_CHARGE_CV`（choice：4.0 / 4.1 / 4.2 V）与 `CONFIG_PMU_CHARGE_LIMIT_PERCENT`（0=关 / 80 / 90），默认都取"关/4.2 V"，避免改变现有行为。
 
 #### 10.5.6 明确走不通的思路
@@ -802,8 +801,8 @@ boot_flow_run         ← 用 pmu 的电压/SOC 做低电拒启
 
 ### 14.5 UI 对接
 
-- 顶部状态栏第三格现在是**电池电压**（旧 S3 语义），S31 上建议显示**百分比 + 充电图标**，长按/进设置可看电压细节；
-- 下拉控制中心的电池竖条接百分比；
+- 📅 写本文时顶部状态栏第三格是**电池电压**（S3 语义）；**现状已是百分比 + 充电图标**（`main/ui/battery_indicator.c`），左格显示 RTC 时间，电压细节在设置菜单 →「电源选项」；
+- 下拉控制中心顶部右侧同样显示百分比（已实现）；
 - 低电提示统一用现有 `toast`；
 - 充电中显示"⚡"；`0x01[2:0]==100` 显示"已充满"。
 

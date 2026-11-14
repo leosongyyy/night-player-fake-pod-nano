@@ -13,11 +13,11 @@
 
 | 偏移 | 大小 | 内容 | 来源 |
 | --- | --- | --- | --- |
-| `0x000000` | 15,536 B | bootloader | `build/<cell>/bootloader/bootloader.bin` |
-| `0x008000` | 3,072 B | 分区表 | `build/<cell>/partition_table/partition-table.bin` |
+| `0x000000` | 15,536 B | bootloader | `build/<variant>/bootloader/bootloader.bin` |
+| `0x008000` | 3,072 B | 分区表 | `build/<variant>/partition_table/partition-table.bin` |
 | `0x009000` | 24 KiB | `nvs` —— **0xFF（清空）** | 填充 |
 | `0x00F000` | 4 KiB | `phy_init` —— **0xFF（清空）** | 填充 |
-| `0x010000` | 2,195,872 B | 应用固件 `FakePodNanoNightPlayer.bin` | `build/<cell>/` |
+| `0x010000` | 2,195,872 B | 应用固件 `FakePodNanoNightPlayer.bin` | `build/<variant>/` |
 | `0x600000` | 4,653,106 B | 系统字体 `system.npf`（NPF1 位图全字库，裸镜像） | `spiffs/system.npf` |
 | `0xC00000` | 4 MiB | `pldata` —— **0xFF（清空）** | 填充 |
 | 其余空隙 | — | 0xFF（擦除态） | 填充 |
@@ -53,8 +53,9 @@ python tools/make_full_firmware.py -t debug                               # 另�
 python tools/make_full_firmware.py -t debug --build-dir build\debug       # 指定构建目录
 ```
 
-> ⚠ 2026-11 起构建矩阵只剩 `variant` 一个维度（`--dac-chip` / `--font` 参数已随
-> `dac_chip` / `font` 维度一起移除），构建目录就是 `build/<variant>`。
+> ⚠ 2026-11 起构建矩阵只剩 `variant` 一个维度（`--dac-chip` 参数已随 `dac_chip` 维度一起移除），
+> 构建目录就是 `build/<variant>`。`--font <路径>` **仍然可用**（默认 `spiffs/system.npf`），
+> 另有 `--no-font` 跳过合并字体。
 
 脚本不写死偏移：bootloader/分区表/app 的偏移来自构建目录的 `flasher_args.json`，
 `font` / `pldata` / `factory` 的位置和大小来自仓库根目录的 `partitions.csv`，
@@ -74,19 +75,19 @@ flash 大小取自 `flasher_args.json` 的 `flash_settings.flash_size`。
 
 ```powershell
 # esptool v5+（命令带连字符）
-esptool --chip esp32s3 -p COMx write-flash 0x0 dist\FakePodNanoNightPlayer_release_full_20261105.bin
+esptool --chip esp32s31 -p COMx write-flash 0x0 dist\FakePodNanoNightPlayer_release_full_20261105.bin
 
 # esptool v4.x（下划线写法）
-esptool.exe --chip esp32s3 --port COMx write_flash 0x0 dist\FakePodNanoNightPlayer_release_full_20261105.bin
+esptool.exe --chip esp32s31 --port COMx write_flash 0x0 dist\FakePodNanoNightPlayer_release_full_20261105.bin
 
 # 没有独立 esptool.exe 时，用 IDF 自带的：
-python -m esptool --chip esp32s3 -p COMx write-flash 0x0 dist\FakePodNanoNightPlayer_release_full_20261105.bin
+python -m esptool --chip esp32s31 -p COMx write-flash 0x0 dist\FakePodNanoNightPlayer_release_full_20261105.bin
 ```
 
-- 本机是 ESP32-S3 **内置 USB-Serial/JTAG**，esptool 会自动进下载模式，不用按键；
-  失败时按住 B 键（GPIO0）再插线。
+- 本机是 ESP32-S31 的 **USB-Serial/JTAG**，esptool 会自动进下载模式，不用按键；
+  失败时按住板上的 BOOT/电源键再上电（S31 没有 S3 时代那个「B 键 = GPIO0」的按键）。
 - 写入 16 MiB：全 `0xFF` 的区段会被 esptool 压缩传输，实际通常 **1~2.5 分钟**
-  （按本机 font 分区 3.55 MiB / 33.4 s ≈ 893 kbit/s 粗算，16 MiB 上限约 2.5 分钟），
+  （按本机字体 4.44 MiB / 28.9 s ≈ 1288 kbit/s 粗算，16 MiB 上限约 2.5 分钟），
   结束时出现 `Hash of data verified.` 即成功。
 - ⚠ `idfc flash` **不能**用它：idfc 是按分区逐段烧录的，不认"整片单文件烧 0x0"。
 
@@ -106,11 +107,11 @@ python -m esptool --chip esp32s3 -p COMx write-flash 0x0 dist\FakePodNanoNightPl
 | font 分区 | 不动（需另刷） | 已包含 |
 | 适用场景 | 日常迭代、保留配置 | 首次安装、发版、配置/数据彻底重置 |
 
-## 七、生成记录（2026-11-05，release）
+## 七、生成记录（2026-11-05，release；📅 S3 时代 1.x 的历史记录，当前 master 是 2.0.0.0-alpha-1）
 
-### v1.0.0.0（当前产物）
+### v1.0.0.0（📅 历史产物；当前版本号见 `CMakeLists.txt` 的 `PROJECT_VER`）
 
-- 构建：`build/cs43131.ttffont.release`（`idfc build -t release`）
+- 构建：`build/cs43131.ttffont.release`（当时的 cell 目录；现在只有 `build/<variant>`）
 - 镜像：`dist/FakePodNanoNightPlayer_v1.0.0.0_release_full_20261105.bin`，16,777,216 B
 - SHA256：`66b1da94e96928d81b0d42f36cbe5fbf580f3a06150983070f667c6d9e17c1ba`
 - 版本号：设置页「关于」= `1.0.0.0`（`CONFIG_FIRMWARE_VERSION_STRING`）；

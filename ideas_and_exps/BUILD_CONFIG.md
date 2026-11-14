@@ -1,10 +1,12 @@
 # BUILD_CONFIG —— 多配置构建与烧录指南
 
-> ⚠ **2026-11 更新（master）**：本项目的构建配置已简化为 **debug / release 两套**——`releasecandidate` 已删除（字体统一为 TTF 后它原本的"低内存 + 调试全开"手段已失去意义），`dac_chip` / `font` 两个 overlay 维度也已移除。下文 §1~§7 保留的是当时三套配置的完整记录（`legacy_s3` 分支仍按三套构建），§8 末尾附了移除说明。
+> ⚠ **2026-11 更新（master，2.x）**：本项目的构建配置已简化为 **debug / release 两套**——`releasecandidate` 已删除（字体统一后它原本的"低内存 + 调试全开"手段已失去意义），`dac_chip` / `font` 两个 overlay 维度也已移除；目标芯片是 **ESP32-S31**、系统字体是 **NPF1 位图全字库**。下文 §1~§7 保留的是 **S3 时代（`legacy_s3`，1.x）三套配置**的完整记录（该分支仍按三套构建），§8 末尾附了移除说明。
 
 本文档说明 FakePodNanoNightPlayer 的**多套构建配置**体系：配置文件、构建/烧录/监视命令、配置差异与工作原理。另见 §8：**配置矩阵**（在构建类型之外新增 DAC 芯片维度，`idfc_buildconfig.json` 描述；该机制在 master 上已移除，见 §8 开头说明）。
 
 ## 1. 概述
+
+📅 **以下 §1~§7 为 S3 时代（`legacy_s3`）的记录；master（2.x）只有 debug / release 两套。**
 
 项目支持三套独立构建配置，互不干扰，各自有独立的 `sdkconfig` 和构建产物目录：
 
@@ -19,18 +21,19 @@
 ## 2. 配置文件
 
 ```
-sdkconfig.defaults            公共配置（esp32s3、QIO 16MB Flash、PSRAM、分区、
-                              音频/屏幕/LVGL 等所有平台相关与功能配置）
+sdkconfig.defaults            公共配置（esp32s31、QIO 16MB Flash、16MB Octal PSRAM、
+                              分区、音频/屏幕/LVGL 等所有平台相关与功能配置）
 sdkconfig.defaults.debug      debug 差异配置（叠加在公共配置之后）
-sdkconfig.defaults.releasecandidate  RC 差异配置（叠加在公共配置之后）
 sdkconfig.defaults.release    release 差异配置（叠加在公共配置之后）
-sdkconfig.dac_chip.cs43131    dac_chip 维度 = cs43131（配置矩阵 overlay，见 §8）
-sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（配置矩阵 overlay，见 §8）
+# —— 以下为 S3 时代（legacy_s3）的文件，master 已删除 ——
+sdkconfig.defaults.releasecandidate  RC 差异配置（S3 时代，已删除）
+sdkconfig.dac_chip.cs43131    dac_chip 维度 = cs43131（S3 时代 overlay，已删除，见 §8）
+sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（S3 时代 overlay，已删除，见 §8）
 ```
 
 合并规则：`sdkconfig.defaults` + 差异文件按顺序合并生成各配置的最终 `sdkconfig`，**后加载的文件覆盖先加载的**。最终 sdkconfig 生成在各自构建目录（`build/debug/sdkconfig`、`build/releasecandidate/sdkconfig`、`build/release/sdkconfig`），根目录 `sdkconfig` 已移出版本控制、不参与多配置构建。
 
-### 三套配置的差异项
+### 三套配置的差异项（📅 S3 时代；master 只有 debug / release）
 
 | 配置项 | 含义 | debug | releasecandidate | release |
 |---|---|---|---|---|
@@ -61,8 +64,7 @@ sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（配置矩阵 overlay�
 
 ```powershell
 idfc build                      # 当前构建类型（.idfc 里保存的，默认 debug）
-idfc build -t releasecandidate  # 指定类型
-idfc build -t release
+idfc build -t release           # 指定类型（master 只有 debug / release 两套）
 ```
 
 > ⚠ 旧写法（`idfc -B build/debug -D SDKCONFIG_DEFAULTS="…" build`）**已全部失效**，
@@ -72,7 +74,6 @@ idfc build -t release
 
 ```powershell
 idfc build -t debug                     # debug 增量构建（默认类型，可省 -t）
-idfc build -t releasecandidate          # RC 增量构建
 idfc build -t release                   # release 增量构建
 ```
 
@@ -108,7 +109,6 @@ idfc clean -t debug             # 只删 build/debug/sdkconfig 与 build/debug/c
 
 ```powershell
 idfc flash                      # 烧录 .idfc 里保存的类型 + 串口（默认 debug / COM12）
-idfc flash -t releasecandidate -p COM12
 idfc flash -t release -p COM12
 ```
 
@@ -131,7 +131,7 @@ idfc set-port COM12      # 记住本项目的默认串口，之后 flash/monitor
 
 ```powershell
 idfc monitor                              # .idfc 里保存的类型与串口（默认 debug / COM12）
-idfc monitor -t releasecandidate -p COM12
+idfc monitor -t release -p COM12
 idfc monitor --wait-for "App started"     # 命中即退出（退出码 0），适合自动化
 idfc monitor --timeout 15000              # 到点退出（退出码 1）
 idfc monitor --grep "MEM:"                # 只显示匹配行
@@ -139,7 +139,7 @@ idfc monitor --grep "MEM:"                # 只显示匹配行
 
 退出：`Ctrl+]`（`--wait-for` / `--timeout` 会自行退出）。观察要点：
 
-- **debug / releasecandidate 版**应看到每 2s 一条 `MEM: heap=... cpu0=..% cpu1=..%`（performance_monitor），屏幕角落有 LVGL FPS 计数；其中 **releasecandidate 版**的 `MEM: heap=` 数值会比 debug 版低约 2.9MB（完整字体占用的 PSRAM），正好用于观察低内存环境下的运行状况
+- **debug 版**应看到每 2s 一条 `MEM: heap=... cpu0=..% cpu1=..%`（performance_monitor），屏幕角落有 LVGL FPS 计数（📅 S3 时代还有 releasecandidate 版，其 `MEM: heap=` 比 debug 低约 2.9MB）
 - **release 版**无上述日志（性能监视等编译级调试功能关闭）
 - 触摸测试白点为运行时开关，**默认关闭**：开启需在设置菜单 → 关于 → 开发者选项中打开并重启（可看到 `touch_test: Touch test created` 日志）；驱动自检（`HWST summary`）已于 2026-11-14 移除
 
@@ -159,12 +159,12 @@ idfc monitor --grep "MEM:"                # 只显示匹配行
 
 - **改了 `sdkconfig.defaults.*` 后不生效**：已有 sdkconfig 优先级高于 defaults，仅 reconfigure 不会覆盖旧值。**现在只需 `idfc build`**——它会自动检测过期并 clean + reconfigure（见 §3.4）；要手工处理才需要 `build --reconfigure` 或删掉 `build/<v>/sdkconfig`。
 - **换了新电脑/删了 build 目录**：直接 `idfc build -t <类型>` 即可，参数会重新生成（见 §3.1）。
-- **想调整某配置项**：编辑对应的 `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release`（只写差异项），或公共项编辑 `sdkconfig.defaults`。
+- **想调整某配置项**：编辑对应的 `sdkconfig.defaults.debug` / `sdkconfig.defaults.release`（只写差异项），或公共项编辑 `sdkconfig.defaults`（S3 时代的 `.releasecandidate` 已删除）。
 - **`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS` 与 performance_monitor 的关系**：release 关闭 performance_monitor 时也一并关闭了 runtime stats（`ulTaskGetIdleRunTimeCounter` 仅 performance_monitor 使用），二者必须同开同关。
 
 ## 8. 配置矩阵（`idfc_buildconfig.json`）
 
-> ⚠ **2026-11 起（master 分支）本节描述的 overlay 维度已被移除**：`idfc_buildconfig.json` 只剩 debug / release 两套构建类型（`releasecandidate` 也已随字体统一移除），DAC 固定 CS43131、字体固定 TTF（`AUDIO_DAC_*` / `UI_FONT_TTF` / `UI_SYSTEM_FONT_FULL` 等 Kconfig 项与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 已删除），构建目录回到 `build/<variant>`。以下内容保留为历史记录（`legacy_s3` 分支仍按旧矩阵构建）。
+> ⚠ **2026-11 起（master 分支）本节描述的 overlay 维度已被移除**：`idfc_buildconfig.json` 只剩 debug / release 两套构建类型（`releasecandidate` 也已随字体统一移除），DAC 固定 CS43131、字体固定为**位图 NPF1 全字库**（`AUDIO_DAC_*` / `UI_FONT_TTF` / `UI_SYSTEM_FONT_FULL` 等 Kconfig 项与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 均已删除，字体无构建期开关），构建目录回到 `build/<variant>`。**以下为 S3 时代（`legacy_s3`）的历史记录**，该分支仍按旧矩阵构建。
 
 > 📄 **矩阵的定义、`idfc_buildconfig.json` 的完整格式规范、给 idfc 仓库的逐文件修改说明，以及新版 idfc 的验收记录，见 `ideas_and_exps/BUILD_MATRIX.md`。** 本节只讲**本项目固件侧**的约定与用法。
 
@@ -189,7 +189,7 @@ Overlays         dac_chip: cs43131 / pcm5102          （ConfigFile: sdkconfig.d
 sdkconfig.defaults → sdkconfig.defaults.<variant> → sdkconfig.dac_chip.<类型> → sdkconfig.font.<类型>
 ```
 
-**`font` 维度（2026-10-25 新增，真切换）**：`ttffont`（默认）走 font 分区里的 TTF + FreeType；
+**`font` 维度（📅 2026-10-25 新增，S3 时代；master 已删除，字体固定为 NPF1 位图全字库）**：`ttffont`（默认）走 font 分区里的 TTF + FreeType；
 `binfont` 把完整版内嵌位图字库整份编进固件，关掉 `CONFIG_UI_FONT_TTF` 与整个 `CONFIG_LV_USE_FREETYPE`
 （`main/CMakeLists.txt` 里那段 FreeType 接线也随之跳过，连 `ttffont` 才需要的"手动刷字体"
 这一步也不需要）。实测 debug：
@@ -198,7 +198,7 @@ sdkconfig.defaults → sdkconfig.defaults.<variant> → sdkconfig.dac_chip.<类�
 编译那份 16MB 的字库源文件（实测 167 秒）。切换：`idfc build -o font=binfont`、
 `idfc set-overlay font binfont`。详见 `BUILD_MATRIX.md` §1.8 与 `FontSystem.md`。
 
-### 8.1 DAC 芯片选择（当前只打印日志）
+### 8.1 DAC 芯片选择（📅 S3 时代；master 已固定 CS43131，本章 Kconfig 项均已删除）
 
 | 配置项（`main/Kconfig.projbuild`） | cs43131 | pcm5102 |
 |---|---|---|
@@ -216,8 +216,8 @@ sdkconfig.defaults → sdkconfig.defaults.<variant> → sdkconfig.dac_chip.<类�
 
 ## 9. 相关文件
 
-- 配置矩阵：`idfc_buildconfig.json`（idfc 侧功能尚未实现，见 §8）
-- 配置：`sdkconfig.defaults` / `sdkconfig.defaults.debug` / `sdkconfig.defaults.releasecandidate` / `sdkconfig.defaults.release` / `sdkconfig.dac_chip.cs43131` / `sdkconfig.dac_chip.pcm5102`
-- 应用配置项定义：`main/Kconfig.projbuild`（`PERFORMANCE_MONITOR`、`UI_SYSTEM_FONT_FULL`、`UI_COVER_FLASH`、`AUDIO_DAC_CS43131`/`AUDIO_DAC_PCM5102` 等；触摸测试/电池日志已移除 Kconfig，改运行时开关，见上方说明）
-- 构建产物：`build/debug/`、`build/releasecandidate/`、`build/release/`（配置矩阵启用后另有 `build/<dac_chip>.<variant>/`）
-- 固件：`build/debug/FakePodNanoNightPlayer.bin`、`build/releasecandidate/FakePodNanoNightPlayer.bin`、`build/release/FakePodNanoNightPlayer.bin`
+- 配置矩阵：`idfc_buildconfig.json`（**idfc 侧已实现**，见 `BUILD_MATRIX.md` §7；master 里只有 `variant` 一维、2 格）
+- 配置：`sdkconfig.defaults` / `sdkconfig.defaults.debug` / `sdkconfig.defaults.release`（S3 时代的 `.releasecandidate` 与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 均已删除）
+- 应用配置项定义：`main/Kconfig.projbuild`（现为 `PERFORMANCE_MONITOR`、`MEM_TRACE`、封面（`UI_COVER_FLASH` / `UI_COVER_HW_JPEG` / PPA）、`UI_LVGL_PIN_HOT_OBJECTS`、PMU（`PMU_KEY_IRQ` / `PMU_BAT_CAPACITY_MAH` / `PMU_CHARGE_CONFIG`）、`RTC_AUTO_INIT_PROJECT_EPOCH` 等；`UI_SYSTEM_FONT_FULL` / `AUDIO_DAC_*` 与触摸测试/电池日志的 Kconfig 均已移除，见上方说明）
+- 构建产物：`build/debug/`、`build/release/`
+- 固件：`build/debug/FakePodNanoNightPlayer.bin`、`build/release/FakePodNanoNightPlayer.bin`

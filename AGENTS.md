@@ -28,7 +28,7 @@
 
 **2. 开发环境**
 
-- ESP-IDF **6.1**（安装于 `C:\esp\v6.1\esp-idf`，GCC 15.2.0），激活脚本 `C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1`。**2026-11 已从 5.5.5 迁移到 6.1，并已在真机逐项验证通过**（播放/音量/伪关机/唤醒/睡眠/息屏/CPU 频率/SD 扫描/无卡/低电压拒启全正常；迁移全过程、两次真机崩溃的根因见 **`ideas_and_exps/IDF6_MIGRATION.md`**，§9.1 是回归清单与"怎么测低电拒启"）；本机同时保留 `C:\esp\v5.5.5\esp-idf` 与对应激活脚本以备回退。这里统一使用idfc进行调用。
+- ESP-IDF **6.1**（安装于 `C:\esp\v6.1\esp-idf`，GCC 15.2.0），激活脚本 `C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1`。**2026-11 已从 5.5.5 迁移到 6.1，并已在真机逐项验证通过**（播放/音量/唤醒/睡眠/息屏/CPU 频率/SD 扫描/无卡；S31 移植后又逐项复验了一遍。⚠ S3 清单里的「伪关机 / 低电压拒启」在 S31 上已不存在，不再作为回归项）；迁移全过程、两次真机崩溃的根因见 **`ideas_and_exps/IDF6_MIGRATION.md`**（该文 §9.1 是 S3 时代的回归清单，其中低电拒启一项仅适用于 `legacy_s3`）；本机同时保留 `C:\esp\v5.5.5\esp-idf` 与对应激活脚本（供 `legacy_s3` 使用）。这里统一使用idfc进行调用。
   - ⚠ **有一处必要的改动不在本仓库里**：项目支持 exFAT 格式 SD 卡，需 IDF 本体的 FatFs 打开 exFAT —— `C:\esp\v6.1\esp-idf\components\fatfs\src\ffconf.h` 里 `FF_FS_EXFAT` 改为 `1`。**换电脑/重装 IDF 必须重打**，否则 SD 卡挂载失败（`failed to mount card (13)`）并进"无卡"界面（详见 IDF6_MIGRATION.md §6.7）。
   - ⚠ **托管组件有构建期补丁**（`patches/`，由 `main/CMakeLists.txt` 在配置阶段幂等回写；托管组件会被组件管理器覆盖，**必须**这样改）：
     1. `patches/lvgl_fast_mem_decl/` —— 修复 LVGL 把 `LV_ATTRIBUTE_FAST_MEM` 同时放在声明与定义上、与 IDF 6.1 的 `IRAM_ATTR`（带 `__COUNTER__` 的唯一子段）冲突导致的 `-Werror=attributes`（上游 lvgl PR #10737，9.6 仍未合入），补丁只去掉**声明**上的属性、不动定义，故函数仍进 IRAM、零性能损失；
@@ -85,12 +85,12 @@
   idfc idfpy <任意 idf.py 参数...>             # 逃生舱：原样透传给 idf.py
   ```
 - ⚠ 在使用 `idfc idfpy <任意 idf.py 参数...>` 之前，请务必阅读 IDFC_USAGE.md，查看此前旧版本踩过的坑。
-- 💡 **执行回显**：`build`/`flash`/`monitor`/`size`（以及 `run` 的各阶段）执行前会打印一行 `# Executing \`idfc idfpy -B build\<cell> -D SDKCONFIG_DEFAULTS="…" -D SDKCONFIG="…" <子命令>\``，即本次**实际使用**的完整命令——想确认"到底在构建哪一套"或手工复现，直接看这一行（启用配置矩阵后是单元格目录，如 `build\cs43131.debug`）。
-- ⚠ **`flash` 只警告、不重建**：若 `build/<cell>/sdkconfig` 早于 `sdkconfig.defaults*`、overlay 配置、`idfc_buildconfig.json` 或任何 `Kconfig`/`*.projbuild`，`flash` 会打印"当前构建目标 … 已经过时"的警告，**但仍会把旧产物烧进去**。要烧新配置就得先 `build`（或直接 `run`）。
+- 💡 **执行回显**：`build`/`flash`/`monitor`/`size`（以及 `run` 的各阶段）执行前会打印一行 `# Executing \`idfc idfpy -B build\<cell> -D SDKCONFIG_DEFAULTS="…" -D SDKCONFIG="…" <子命令>\``，即本次**实际使用**的完整命令——想确认"到底在构建哪一套"或手工复现，直接看这一行（配置矩阵只剩 `variant` 后就是 `build\<variant>`，如 `build\debug`）。
+- ⚠ **`flash` 只警告、不重建**：若 `build/<variant>/sdkconfig` 早于 `sdkconfig.defaults*`、`idfc_buildconfig.json` 或任何 `Kconfig`/`*.projbuild`，`flash` 会打印"当前构建目标 … 已经过时"的警告，**但仍会把旧产物烧进去**。要烧新配置就得先 `build`（或直接 `run`）。
 - 🔎 **查 menuconfig 配置项**（标题 / 说明全文 / 当前值，**纯客户端命令**，不触发构建）：
   ```powershell
   idfc menuconfig search "IRAM SPIRAM"          # 多关键词 AND 检索（每页 20 条，--page N 翻页）
-  idfc menuconfig desc CONFIG_LOW_BATTERY_SHUTDOWN_SEC   # 单项详情（含 help 全文）
+  idfc menuconfig desc CONFIG_PMU_KEY_IRQ   # 单项详情（含 help 全文）
   ```
   ⚠ 需要该构建类型**至少成功构建过一次**（`kconfig_menus.json` / `sdkconfig.json` 由 ESP-IDF 在配置阶段生成）；缺失时会提示先 `build` 并退出码 1。没有匹配项同样退出码 1。想改 `main/Kconfig.projbuild` 或调 `sdkconfig` 项之前，先用它确认"这项是干什么的、现在是多少"。
 - **⚠ 若提示 `IDF 服务器可能尚未运行（… 请求失败）`（退出码 -1）**：说明服务器未运行或被回收，需要**提示用户手动启动服务器**：在任意目录执行 `idfc start-server`（普通权限即可；也可以让用户开一个终端自己跑）。服务器是常驻进程、且**它的控制台就是启动它的那个窗口，窗口一关就停**，所以每次遇到连接错误都应先检查/提醒启动服务器。
@@ -140,7 +140,7 @@ idfc help --all            # 全部命令与参数
 **6. 构建配置**
 
 - `main/Kconfig.projbuild`：应用配置项（menuconfig）。配置项目请阅读该文件获得配置项的详细信息。常用配置组合均已使用 debug / release 两套构建配置切换。
-- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.release`）：esp32s3、QIO 16MB Flash、自定义分区表、8MB Octal PSRAM（含 XIP 指令/只读数据）、240MHz、64B 数据缓存线、FreeRTOS 1000Hz、**LVGL 9：`CONFIG_LV_DEF_REFR_PERIOD=33`（显示刷新与 indev 轮询在 v9 合并为这一个周期）、`CONFIG_LV_USE_CUSTOM_MALLOC=y`（LVGL 对象堆走 `core/ui/lvgl_mem.c` 进 PSRAM，见"关键技术要点"；该文件另有"热点对象窗口"接口，但 2026-11 S31 起由 `CONFIG_UI_LVGL_PIN_HOT_OBJECTS`（默认 n）控制，两个滚动列表页的对象也走 PSRAM，见 `IRAM_OBJECTS_PSRAM_S31.md`）、`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（blend 留在 IRAM；关掉可再省 83KB 内部 RAM、代价约 2fps）、裁掉 6 种用不到的颜色格式（`XRGB8888` / `ARGB8888_PREMULTIPLIED` / `L8` / `AL88` / `A8` / `I1`，保留 `RGB565`+`ARGB8888`+`RGB565A8`+`RGB888`；LVGL 的 IRAM 占用 82.8→25.3KB）、关 `CONFIG_LV_BUILD_EXAMPLES` / `LV_BUILD_DEMOS`（examples 下 250 个 .c 编了也会被 `--gc-sections` 全丢，纯省全量编译时间）、`CONFIG_LV_USE_CLIB_STRING=y`、`CONFIG_LV_USE_SYSMON=y`+`CONFIG_LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下，SYSMON 默认 n，不显式打开会被 Kconfig 静默丢弃）、字体 12/16/20/24/28/32/48 + 默认 18**、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、**字体固定为位图（无构建期开关）：不再有 `CONFIG_LV_USE_FREETYPE` / `LV_FREETYPE_*` 与 `espressif/freetype` 依赖（2026-11 从 TTF/FreeType 改回位图时整段删除）；系统字体走 font 分区的 `spiffs/system.npf`（NPF1 位图全字库，**字体镜像不在固件里——刷完固件要用 esptool 手动刷入**，没有 Kconfig 选项），20px 小字体用内嵌 `system_smaller_font`，NPF 挂载失败回退内嵌 `system_global_font_lite`；`CONFIG_LV_FONT_FMT_TXT_LARGE=y` 必须保持（NPF 的 glyph_dsc 是 LARGE 布局）**、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384`（TTF 迁移时由 8192 上调，见 `FontSystem.md` §5；改回位图后其实可回落，本次为稳妥保留）等
+- `sdkconfig.defaults`（+ `sdkconfig.defaults.debug` / `.release`）：esp32s31、QIO 16MB Flash、自定义分区表、16MB Octal PSRAM（200MHz，含 XIP 指令/只读数据）、320MHz、64B 数据缓存线、FreeRTOS 1000Hz、**LVGL 9：`CONFIG_LV_DEF_REFR_PERIOD=16`（16ms；显示刷新与 indev 轮询在 v9 合并为这一个周期）、`CONFIG_LV_USE_CUSTOM_MALLOC=y`（LVGL 对象堆走 `core/ui/lvgl_mem.c` 进 PSRAM，见"关键技术要点"；该文件另有"热点对象窗口"接口，但 2026-11 S31 起由 `CONFIG_UI_LVGL_PIN_HOT_OBJECTS`（默认 n）控制，两个滚动列表页的对象也走 PSRAM，见 `IRAM_OBJECTS_PSRAM_S31.md`）、`CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y`（blend 留在 IRAM；关掉可再省 83KB 内部 RAM、代价约 2fps）、裁掉 6 种用不到的颜色格式（`XRGB8888` / `ARGB8888_PREMULTIPLIED` / `L8` / `AL88` / `A8` / `I1`，保留 `RGB565`+`ARGB8888`+`RGB565A8`+`RGB888`；LVGL 的 IRAM 占用 82.8→25.3KB）、关 `CONFIG_LV_BUILD_EXAMPLES` / `LV_BUILD_DEMOS`（examples 下 250 个 .c 编了也会被 `--gc-sections` 全丢，纯省全量编译时间）、`CONFIG_LV_USE_CLIB_STRING=y`、`CONFIG_LV_USE_SYSMON=y`+`CONFIG_LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下，SYSMON 默认 n，不显式打开会被 Kconfig 静默丢弃）、字体 12/16/20/24/28/32/48 + 默认 18**、开启 FreeRTOS 运行时统计（`GENERATE_RUN_TIME_STATS`，performance_monitor 依赖）、FATFS codepage 936 + UTF-8、`CONFIG_UI_COVER_FLASH=y`（公共默认即极速版封面）、**字体固定为位图（无构建期开关）：不再有 `CONFIG_LV_USE_FREETYPE` / `LV_FREETYPE_*` 与 `espressif/freetype` 依赖（2026-11 从 TTF/FreeType 改回位图时整段删除）；系统字体走 font 分区的 `spiffs/system.npf`（NPF1 位图全字库，**字体镜像不在固件里——刷完固件要用 esptool 手动刷入**，没有 Kconfig 选项），20px 小字体用内嵌 `system_smaller_font`，NPF 挂载失败回退内嵌 `system_global_font_lite`；`CONFIG_LV_FONT_FMT_TXT_LARGE=y` 必须保持（NPF 的 glyph_dsc 是 LARGE 布局）**、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384`（TTF 迁移时由 8192 上调，见 `FontSystem.md` §5；改回位图后其实可回落，本次为稳妥保留）等
   - ⚠ v8 的 `LV_COLOR_16_SWAP` / `LV_COLOR_SCREEN_TRANSP` / `LV_DISP_DEF_REFR_PERIOD` / `LV_INDEV_DEF_READ_PERIOD` / `LV_USE_LARGE_COORD` 在 v9 已删除或改名，逐项对照表见 `ideas_and_exps/LVGL9_MIGRATION.md` §2
 - **版本管理：配置事实源只有 `sdkconfig.defaults*`、`idfc_buildconfig.json` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<variant>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。每套构建类型持有自己的 sdkconfig（`-D SDKCONFIG=build/<variant>/sdkconfig` 指定）；`fullclean` 只清当前构建目录。改配置的正确姿势：改 `sdkconfig.defaults*` / `idfc_buildconfig.json` / `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
 - ⚠ **ESP32-S31 + IDF 6.1 的 flash cache 竞态（IDFGH-18107 / espressif/esp-idf#18948）**：一颗核 suspend cache 做 flash 操作时，另一核在 `spi_flash_op_block_func` 自旋里的分支预测器仍会投机取指到 flash，偶发 `Cache error` panic（本机表现为开机第一次读 NVS 时重启）。**这不是 BOYA flash 颗粒问题**（BOYA 驱动与通用驱动实现相同，已回退 `CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP`）。本地 IDF 6.1.0 快照不含上游修复，因此仓库内 **fork 了 `components/spi_flash/`**，在 `cache_utils.c` 的 flash 操作窗口内关闭/恢复分支预测。**不要删除该目录**；升级 IDF 时若上游已合入 `esp_cpu_branch_prediction_disable()` 修复，再删掉本地 fork。完整调查、芯片对比与 DIY 换 flash 兼容性见 **`ideas_and_exps/S31_FLASH_CACHE_RACE.md`**。
@@ -152,7 +152,7 @@ idfc help --all            # 全部命令与参数
 
 **FakePodNanoNightPlayer —— FakePodNano 播放器的第三方固件**
 
-> 本项目目标：为成品开源播放器 **FakePodNano**（ESP32-S3 + AMOLED + CS43131 + 触摸）开发**更好用、专注于音乐播放**的第三方固件，替代/改进原厂固件的使用体验。
+> 本项目目标：为成品开源播放器 **FakePodNano Pro**（ESP32-S31 + CO5300 AMOLED + CS43131 + 触摸；初代 S3 版见 `legacy_s3` 分支）开发**更好用、专注于音乐播放**的第三方固件，替代/改进原厂固件的使用体验。
 
 **项目现状**：核心音乐播放体验已**基本完整**——本地 MP3 按文件夹/歌单浏览、四页滑动 UI、全屏封面正在播放页、下拉控制中心、睡眠定时、EQ、随机播放、记忆播放、电池百分比显示、**双键按键映射与 PMU 软关机**均已实现（低电自动关机策略待接）。剩余功能/规划见 `ideas_and_exps/FUTURE_PLAN.md`（可能实现也可能被砍掉）。
 
@@ -160,9 +160,9 @@ idfc help --all            # 全部命令与参数
 
 **当前实现状态：**
 - 播放核心：本地 MP3 播放（Helix 解码，实测 5000+ 首大曲库），按**文件夹**组织、支持 **`.pl` 文本歌单**；**循环模式**（全部/列表/单曲）+ **顺序/随机**；**无限确定性随机播放**（分块 + 确定性洗牌，断点续播）；回放增益；**EQ 均衡器**（10 段浮点 PeakEQ + 预增益，NightPlayer 兼容 `.eq` 文件）；**封面/歌曲信息**（`.npd` 元数据 + JPEG 封面解码）
-- 硬件层：AMOLED 显示（QSPI，支持 6 种屏幕尺寸配置切换，**全黑启动防开机白屏闪烁**）、触摸（CST816/820/CHSC6417 按屏幕自动选择，**异步初始化不阻塞开机**）、电池（**AXP2101**：真实电压 + E-Gauge 电量计 + 充放电状态，融合后显示百分比；S3 的分压 ADC 与电池日志已删除）、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
+- 硬件层：AMOLED 显示（QSPI，CO5300 460×460 单款配置、窗口 X 偏移 10，**全黑启动防开机白屏闪烁**）、触摸（CST820，I²C0 0x15，原始 460×460 坐标 + ×29/30 校准，**异步初始化不阻塞开机**）、电池（**AXP2101**：真实电压 + E-Gauge 电量计 + 充放电状态，融合后显示百分比；S3 的分压 ADC 与电池日志已删除）、音频（I2S 主机 + CS43131 DAC + 回放增益 + EQ）、SD 卡（SDMMC 4-bit + FAT/exFAT，挂载 `/sdcard`；⚠ exFAT 需给 IDF 本体的 FatFs 打补丁，见"开发环境"）
 - **任务核心布局：UI（LVGL）固定 Core0、播放解码（MP3/封面）固定 Core1，二者分核互不抢占（见使用技术 → 2. 任务核心布局）**
-- LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（33ms，x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/伪关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
+- LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（16ms，即 `CONFIG_LV_DEF_REFR_PERIOD`；x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
 - 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）。⚠ S3 时代的"低电拒启（<3.45V）"分支已随平台迁移删除；AXP2101 的电压/电量数据已就绪，策略待接回。
 - UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=当前时间 HH:MM（调音量时临时改显音量数值，停手 3 秒后回到时间）、中=当前页面名、右=电池百分比，≤20% 黄/≤10% 红/充电闪电图标；12/24 小时制在设置菜单 → 时间与日期 → 时间格式切换，12h 不显示上下午）、下拉控制中心（电量百分比/音量/时间、亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
 - **网络对时（2026-11）**：设置菜单 →「时间与日期」→「WiFi对时」读取 SD 卡 `/sdcard/.ecov/wifi.txt`（UTF-8：第 1 行 SSID、第 2 行密码、可选第 3 行 NTP 域名，默认 `ntp.aliyun.com`），WiFi STA 最多尝试 3 次、SNTP 最多 5 次，全屏进度 + 取消；成功后按 config_store 时区（默认 UTC+8）把 UTC 换算成本地时间写 PCF85063A。RTC 存本地墙钟时间，改时区会把 RTC 平移相同分钟数以保持绝对时刻。详见 **`ideas_and_exps/WIFI_TIME_SYNC.md`**。
@@ -178,7 +178,7 @@ main/
   core/
     hardware/               # 与应用无关的底层硬件驱动
       display.h/.c          # AMOLED LCD（QSPI 总线/面板）+ 屏幕尺寸配置 + 亮度控制
-      touch.h/.c            # 触摸控制器（I2C + CST816/820/CHSC6417 按需选择，异步初始化）
+      touch.h/.c            # 触摸控制器（CST820，I²C0；异步初始化不阻塞开机）
       axp2101.h/.c          # AXP2101 PMU 驱动（电压/电量计/充电状态/温度(TS)/开机原因/电源键 IRQ/软关机 API/CV 档位）
       boot_reason.h/.c      # 开机原因：esp_reset_reason + esp_sleep wakeup causes + PMU 0x20/0x21
                             #   判定"插电开机"（供 boot_flow 进充电专用界面）
@@ -205,7 +205,7 @@ main/
                             #   （config_store_notify_dispatch）在 LVGL 任务里跑——任何任务都能安全 set_xxx
                             # ⚠ **高频拖动（亮度/音量竖条）必须走 `*_deferred` + `config_store_flush_pending()`**：
                             #   一次 nvs_commit 要写 4KB 页并停核 5~20ms，拖动中每次落盘会直接卡死 UI。
-                            #   松手 flush(true)、100ms 定时器保底 flush(false)、息屏/伪关机/切槽位强制 flush。
+                            #   松手 flush(true)、100ms 定时器保底 flush(false)、息屏/关机/切槽位强制 flush。
                             #   ⚠ flush 只能由**内部 RAM 栈**任务调用（LVGL / deep_worker），PSRAM 栈任务写 flash 会断言。
                             #   见 ideas_and_exps/NVS_WRITE_BUDGET.md
       config_slots.h/.c     # 配置槽位切换的**运行时应用**：切换前先 player_controller_sync_config()
@@ -246,12 +246,12 @@ main/
     utils/
       performance_monitor.h/.c  # 双核 CPU/内存监视（从 OtoClock 移植，含 ISR 采样 CPU 频率）
       fake_shutdown.h/.c        # 关机（名字保留；实际走 AXP2101 软关机真断电：显示「正在关机...」→存数据→PMU 0x10[0]=1）
-      sleep_timer.h/.c          # 睡眠定时器（到点音量渐降后触发普通伪关机；清醒感知加时；
+      sleep_timer.h/.c          # 睡眠定时器（到点音量渐降后「暂停播放 + 息屏」；清醒感知加时；
                                 #   开机自动开启判定 sleep_timer_boot_autostart_min：
                                 #   总是关闭 / 按时间段（RTC 小时落在 start~end，支持跨零点）/
                                 #   总是开启，三档与时间段存 config_store 的 sleepauto/slprange_*）
       power_service.h/.c        # 电源服务（原 screen_sleep 改名）：息屏/亮屏 + 无操作自动息屏
-      deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/伪关机深调用链唯一执行者
+      deep_worker.h/.c          # 深路径执行器（大栈任务）：息屏/亮屏/关机深调用链唯一执行者
       task_psram.h/.c           # PSRAM 栈任务创建助手（task_create_psram_stack，失败自动回退内部 RAM）
   ui/                       # 应用 UI
     app.h/.c                # UI 组装入口 + 顶部状态栏（左时间/中页面名/右电量）
@@ -264,7 +264,7 @@ main/
                             #   的功能（静音、对时结果…）都走这里
     clock_text.h/.c         # "HH:MM" 文本格式化（读 RTC + 12/24h，RTC 无效时 --:--）
     battery_indicator.h/.c  # 状态栏/控制中心共用的电池图标+百分比文本（充电/低电配色）
-    boot_flow.h/.c          # 开机流程控制器（未插卡/扫描/进主界面；低电拒启策略待接 AXP2101）
+    boot_flow.h/.c          # 开机流程控制器（未插卡/扫描/插电充电界面/进主界面；低电拒启策略待接 AXP2101）
     main_ui.h/.c            # 主界面（四页滑动 tab：目录/歌曲/正在播放/播放设置）
     dir_list.h/.c           # 目录/歌单列表页（virtual_list，/sdcard 头部 + 行图标）
     playlist_page.h/.c      # 歌曲列表页（virtual_list，点击播放，当前曲目高亮）
@@ -351,7 +351,7 @@ patches/
 
 **2. 任务核心布局（UI Core0 / 音频 Core1）**
 - 动机：息屏时 UI 完全静止（挂起），把 **UI（LVGL）固定在 Core0**、**播放解码/封面解码固定在 Core1**，二者分核互不抢占。
-- **深链执行器 deep_worker**（`core/utils/deep_worker.h/.c`：常驻任务，栈 **12KB**（2026-10 TTF 迁移由 8KB 上调：息屏唤醒的 `lv_refr_now` 全屏重刷会光栅化字形，见 `FontSystem.md` §5）、prio 6、Core0，信号量驱动）：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）、伪关机（停外设 + 提示渲染 + deepsleep）、以及**需要内部栈的关缓存段**（如"重新扫描"的 playlist munmap/擦头）统一委托它串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递；勿回到"在小任务里直接跑深链"（历史爆栈记录）。⚠ **栈 12KB 且必须在 `app_main` 早期初始化**（config_store 之后、硬件初始化之前）：内部 RAM 开机末期碎片化（最大连续块约 8.6KB），放到 boot_flow 之后再创建会失败；历史上曾因把这种大栈任务挪到开机末期 + 未检查 `xTaskCreatePinnedToCore` 返回值而**静默失败** → 任务不存在 → 每次深调用等满 5s 超时（按键息屏/亮屏延迟 5 秒）。现已检查返回值并加 `s_exec_task == NULL` 快速失败（就地兜底执行）+ 超时时 dump 全部任务状态。⚠ **该"早期创建"约束也正是 12KB 能分配成功的前提**（早期内部 RAM 还有 ~200KB 空闲/118KB 连续；实测创建成功、HWM 余 11.5KB）。
+- **深链执行器 deep_worker**（`core/utils/deep_worker.h/.c`：常驻任务，栈 **12KB**（2026-10 TTF 迁移由 8KB 上调：息屏唤醒的 `lv_refr_now` 全屏重刷会光栅化字形，见 `FontSystem.md` §5）、prio 6、Core0，信号量驱动）：息屏/亮屏（esp_pm_configure + AMOLED 重初始化 + lv_refr_now 全屏重刷）、关机（停外设 + 提示渲染 + 写 AXP2101 `0x10[0]=1` 真断电）、以及**需要内部栈的关缓存段**（如"重新扫描"的 playlist munmap/擦头）统一委托它串行执行；业务任务只需 `deep_worker_call(fn, arg)` 投递并等待完成。⚠ 约定：fn 内禁止再 deep_worker_call；调用方禁止持 LVGL 锁投递；勿回到"在小任务里直接跑深链"（历史爆栈记录）。⚠ **栈 12KB 且必须在 `app_main` 早期初始化**（config_store 之后、硬件初始化之前）：内部 RAM 开机末期碎片化（最大连续块约 8.6KB），放到 boot_flow 之后再创建会失败；历史上曾因把这种大栈任务挪到开机末期 + 未检查 `xTaskCreatePinnedToCore` 返回值而**静默失败** → 任务不存在 → 每次深调用等满 5s 超时（按键息屏/亮屏延迟 5 秒）。现已检查返回值并加 `s_exec_task == NULL` 快速失败（就地兜底执行）+ 超时时 dump 全部任务状态。⚠ **该"早期创建"约束也正是 12KB 能分配成功的前提**（早期内部 RAM 还有 ~200KB 空闲/118KB 连续；实测创建成功、HWM 余 11.5KB）。
 - Core0：`LVGL`（lvgl_port_task）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0` 及系统 esp_timer 任务/ISR（sdkconfig 固定 CPU0）与全部驱动中断（app_main 于 Core0 初始化）。
 - Core1：`mp3_play`/`mp3_out`（解码输出，播放时建/常驻）、`cover_load`（封面解码，注册为 lvgl_port 辅助任务息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`；`boot_scan`/`rescan`（仅重扫场景）。
 - 不固定：`touch_init`（开机一次性自删）、`mem_monitor`（性能监视，CONFIG_PERFORMANCE_MONITOR 控制）、`pmu_irq`（PMU 电源键事件，PSRAM 栈，仅 CONFIG_PMU_KEY_IRQ）。
@@ -368,9 +368,9 @@ patches/
   - 详见 `ideas_and_exps/IRAM_AUDIT_LVGL9.md`：§10 四配置对照表、§11 两次失败实验（把对象全部搬回内部 RAM 会直接见底）、§13 路径B 的最终方案与注意点。
   - 🆕 **2026-11 S31 复测：路径B 默认关闭**（`CONFIG_UI_LVGL_PIN_HOT_OBJECTS=n`，对象全部走 PSRAM）。S31 上 `LVGL_INTERNAL_RESERVE`(40KB) 很早就触发，路径B 实际只钉得进 **20.8KB**（不是 S3 的 82.8KB），关掉后：内部 RAM 稳态 **147,175 → 167,707 B（+20.5KB）**、开机完成最大连续块 **31,744 → 86,016 B（+53KB）**；歌曲列表快速滚动 **24~36fps**，真机确认可接受。详见 `ideas_and_exps/IRAM_OBJECTS_PSRAM_S31.md`；`MEM:` 行现在末尾带 `fps=`（由 `lvgl_port_get_refr_count()` 统计，静止时 0 属正常）。
 - **⚠ 关缓存陷阱：栈在 PSRAM 的任务绝不能触发 Flash 缓存冻结**——`esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）都会先关外部内存缓存，此时 PSRAM 不可访问，IDF 在 `esp_cache_freeze_caches_disable_interrupts` 断言 `s_task_stack_is_sane_when_cache_frozen()`（要求 sp 在 DRAM），栈在 PSRAM 直接 panic。这类代码要么让任务栈留在内部 RAM，要么用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行——"重新扫描"就是这么做的（见 `ui/settings_menu.c` 的 `rescan_do_deinit`）。判据与实测数据见 `ideas_and_exps/PSRAM_TASK_STACK.md`。**「写 flash 与 PSRAM 的关系」已做完整审计，见 `ideas_and_exps/FLASH_WRITE_VS_PSRAM.md`**——要点：① 写 flash 期间两颗核都被停住、只屏蔽"非 IRAM"中断，所以**不会**与 LVGL 渲染并发，被冻结的核恢复后数据完好；② 真正的两条硬约束是"PSRAM 栈任务不许直接写 flash"（有断言）与"IRAM ISR 不许碰任何 PSRAM 数据 / `lv_*` / 播放列表与字体 mmap"（**无断言，靠纪律**；LVGL 对象搬进 PSRAM 后这条从"不规范"升级为"必崩"）；③ 全项目 NVS 写入口唯一（`config_store.c`）、调用栈全在内部 RAM；PSRAM 栈任务的关缓存段全部委托 deep_worker；④ PSRAM 缓冲写 flash 由 `esp_flash_write` 的 32B 栈弹跳兜住（能用，但慢）。
-- 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 240MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
+- 息屏（`power_service_screen_off`，经 deep_worker）：AMOLED SLEEP IN（DISPOFF 0x28 + SLEEP IN 0x10）→ `lvgl_port_suspend`（冻结 tick + 挂起 LVGL/封面任务）→ 固定 80MHz。亮屏（`power_service_screen_on`，经 deep_worker）：固定 320MHz → 持锁 `display_sleep_exit`（SLEEP OUT 0x11 + 120ms + `esp_lcd_panel_init` 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（须先于 LVGL resume，休眠中/刚唤醒面板不能接收刷屏数据）。
 - **自动关机策略：S31 迁移时已移除**（S3 时代的"息屏暂停超时 / 低电压持续 60s → 伪关机"依赖分压 ADC，代码已随平台迁移删除）。当前 `power_service` 只做"无操作自动息屏"；低电策略的**数据已就绪**（`battery_read_info()` 给电压/电量/充电状态），但**尚未接回** `power_service`/`boot_flow`，接回时优先用"电量 + 电压 AND"判据（见 `PMU_RTC_DRIVERS.md` §7）。
-- 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep 或走既有伪关机。
+- 🆕 🎯 **"息屏停掉 Core1"（esp_cpu_stall / `CONFIG_SCREEN_OFF_STOP_CORE1`）已从代码与 Kconfig 完全移除**：该方案曾实测失败（长期 esp_cpu_stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT 超时），代码不再保留该配置项。勿重新引入；真正的进一步省电方向：暂停/停止时 light sleep；关机走 PMU 软关机（真断电）。
 
 ### 关键技术要点与踩坑记录（务必遵守）
 
@@ -379,7 +379,7 @@ patches/
 > ⚠ **涉及 LVGL 时先看 `ideas_and_exps/LVGL9_MIGRATION.md`**：项目 2026-10 已从 LVGL 8.4 升到 9.4，部分历史文档（`MARQUEE_STYLE.md`、`VIRTUAL_LIST_USAGE.md`、`IRAM_DMA_AUDIT.md`、`DONE_PLANS.md` 等）里的 API/内存结论是 8.4 时代的，读到时请对照该迁移文档。
 
 - ⚠⚠ **LVGL 的 tick 由 `lv_tick_set_cb()` 直接读硬件时间（`esp_timer_get_time()`），绝不要再用 `esp_timer` 周期回调喂 `lv_tick_inc()`**（2026-11 真实事故，详见 `ideas_and_exps/DISPLAY_FREEZE_TRIAGE.md`）：IDF 6.1 把 esp_timer 拆成"任务派发/中断派发"两条 systimer alarm 通道，混用时其收尾逻辑会丢掉任务派发通道的闹钟，该通道上的定时器**从此永不到期**。而本项目 `performance_monitor.c` 正有一个 `ESP_TIMER_ISR`（中断派发）的采样定时器 —— 触发条件齐备。曾表现为**整屏定格、日志无异常、按键音频正常、息屏再亮屏才"恢复"**（因为 tick 停了 ⇒ LVGL 所有 timer 一起停）。两个必须记住的点：① `lv_tick_set_cb()` **必须在 `lv_init()` 之后调用**（`lv_init()` 会 `lv_memzero` 整个 `lv_global_t`，写在前面会被清掉 → `lv_tick_get()` 恒为 0 → 只在 `lv_refr_now` 时刷一帧）；② 若真的需要周期性回调，**不要依赖 esp_timer 任务派发**，用 `vTaskDelay` 任务或（只做极短操作的）`ESP_TIMER_ISR` + `IRAM_ATTR` 回调。
-- **⚠ partial 刷屏的两个绘制层事实（2026-11 实测，改 UI 层级时必看）**：① **每一层不透明整块背景 = 每个绘制块多填一遍 2 万像素**。现在 `scr` / `tabview` / tab 页全部透明，黑底**只由** `main_ui` 的 tabview 内容容器（`cont`）提供；新建页面（`ui_page_style`）不要再铺底色，新建**全屏覆盖层**（设置菜单/开机流程/伪关机，不挂 tabview）则必须自己铺不透明底色，否则会露出绘制缓冲里的旧帧残影。② 卡片背景是"圆角帽（高 `2*corner`）+ 直角主体（从 `y+corner` 到底）"两段，视觉等价于整卡圆角，但列表区因此走 `radius==0` 的纯色快速填充路径、不再每帧走圆角掩码（`lv_draw_sw_fill.c` 只有 `radius==0 && grad==NONE` 才走快速路径）。改圆角半径/卡片高度时两段要一起核对。
+- **⚠ partial 刷屏的两个绘制层事实（2026-11 实测，改 UI 层级时必看）**：① **每一层不透明整块背景 = 每个绘制块多填一遍 2 万像素**。现在 `scr` / `tabview` / tab 页全部透明，黑底**只由** `main_ui` 的 tabview 内容容器（`cont`）提供；新建页面（`ui_page_style`）不要再铺底色，新建**全屏覆盖层**（设置菜单/开机流程/关机提示，不挂 tabview）则必须自己铺不透明底色，否则会露出绘制缓冲里的旧帧残影。② 卡片背景是"圆角帽（高 `2*corner`）+ 直角主体（从 `y+corner` 到底）"两段，视觉等价于整卡圆角，但列表区因此走 `radius==0` 的纯色快速填充路径、不再每帧走圆角掩码（`lv_draw_sw_fill.c` 只有 `radius==0 && grad==NONE` 才走快速路径）。改圆角半径/卡片高度时两段要一起核对。
 - **图像像素缓冲必须 64B 对齐**（`LV_DRAW_BUF_ALIGN=64` / `LV_ATTRIBUTE_MEM_ALIGN_SIZE=64`）：LVGL 9 会把 `lv_image_dsc_t.data` 包成 draw_buf（`lv_draw_buf_from_image`），指针不是 64 的倍数时**每次**都刷
   `W lv_draw_buf_init: Data is not aligned, ignored`。实测切歌后（真实封面出现在正在播放页）滑动一次就刷一大片，115200 波特下一条 ~5ms，直接把 UI 卡死——现象就是"切歌之后变卡、只有带图片的页面卡"。封面已在 `core/image/cover_jpeg.c` 用 `heap_caps_aligned_alloc(64, …)`；**新增任何动态图像/图层缓冲都要照此办理**，别用裸 `heap_caps_malloc`。
 - **⚠ 不要用高频 ESP_LOG 做性能统计**：UART 115200 下一条 ~10ms 且是同步阻塞，15 条/秒就白扔 15% CPU 并卡住 LVGL 任务。测帧率时先把统计日志关掉（`CONFIG_UI_PPA_STATS` 等）。

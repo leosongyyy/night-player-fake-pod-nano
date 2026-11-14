@@ -10,7 +10,7 @@
 
 ## 1. 目标与背景
 
-- 设备：ESP32-S3（16MB Flash，8MB PSRAM），460x460 AMOLED，SD 卡。
+- 设备：**ESP32-S31**（FakePodNano Pro V1，320MHz 双核，16MB Flash + 16MB Octal PSRAM），460x460 AMOLED（CO5300 QSPI），SD 卡（FAT32/exFAT）。
 - 需求：由控制器负责 **pause / play / prev / next** 及**循环模式**控制：
   - 默认从**第一个目录的第一首**音乐开始播放。
   - 三种循环模式：**全部循环 / 单曲循环 / 列表循环**。
@@ -133,8 +133,8 @@ void player_controller_set_loop_mode(player_loop_mode_t mode);
 ## 6. 验证结果
 
 - ✅ `idfc build` 编译链接通过（`player_controller.c`、`boot_flow.c`、`main.c` 均编译，最终固件 `FakePodNanoNightPlayer.bin` 生成成功）。
-- ⏳ **尚未真机烧录验证**（用户需回家换电脑继续，暂未烧录）。
-- 可用串口：**COM3 / COM4 / COM12**（此前真机验证用 COM12）。
+- ✅ **真机验证通过**：自动播放、三种循环、上一曲/下一曲、seek、暂停恢复均正常（此后长期在 master 上跑真机，并由 `player_ticker` / 坏曲事件等上层模块复用）。
+- 可用串口：**COM3 / COM4 / COM12**（真机验证用 COM12；S31 上常用 COM3）。
 
 ---
 
@@ -150,14 +150,15 @@ void player_controller_set_loop_mode(player_loop_mode_t mode);
 - [x] 静态状态 `get_status` + 控制方法，供前端界面调用
 - [x] 自然播完自动续播（区分用户主动停止）
 - [x] 编译通过，接线 CMakeLists 与 boot_flow
+- [x] **真机烧录验证**：自动播放、三种循环、上一曲/下一曲、seek、暂停恢复
+- [x] 前端播放界面（主界面显示曲名/进度/控制按钮，目录→歌曲列表→播放）
+- [x] **随机播放**（`shuffle_player`：无限确定性随机，见 `随机播放.md`）
+- [x] 循环模式 **NVS 持久化**（收进 `config_store` 的配置槽位，见 `CONFIG_SLOTS.md`）
+- [x] 循环模式 / 播放进度的界面切换入口（播放设置页九宫格 + 通知栏）
+- [x] （可选）切歌失败时自动跳过（首帧门禁 + 连续坏曲上限，见 `坏曲崩溃修复记录.md`）
 
 ### 待办 / 规划
-- [ ] **真机烧录验证**（COM12 或其它）：自动播放、三种循环、上一曲/下一曲、seek、暂停恢复
-- [ ] 前端播放界面（主界面显示曲名/进度/控制按钮，目录→歌曲列表→播放）
-- [ ] **随机播放**（用户已有"绝妙的点子"，后续单独完成）
-- [ ] 循环模式**NVS 持久化**（用户确认：后续统一做 nvs 保存与读取，当前先固定列表循环）
-- [ ] 循环模式 / 播放进度的界面切换入口（后续随 UI 一起做）
-- [ ] （可选）切歌失败（文件缺失/采样率不支持）时的自动跳过策略
+- [ ] 暂无（后续需求统一记在 `FUTURE_PLAN.md`，不再散落在本文）
 
 ---
 
