@@ -79,21 +79,31 @@ set(COMPONENTS
     vfs                            # 文件系统注册（fatfs 依赖，直接包含亦稳妥）
     sdmmc                          # sdmmc_cmd.h / sd_protocol_defs.h（SD 卡）
 
-    # ---- 网络对时（2026-11 新增 → 2026-11-15 **暂时下线**） ----
+    # ---- 网络对时（2026-11 新增 → 只给 sync 固件用） ----
     # 时间与日期 → WiFi对时：WiFi STA 连 AP + SNTP。
-    # ⚠ 2026-11-15 按用户要求暂时砍掉，换回内部 RAM 以恢复 UI 帧率：
-    #   这 5 个组件常驻约 27KB 内部 RAM（静态 .bss/.data）+ 约 650KB Flash，
-    #   而一次对时的运行时峰值还要 48KB。菜单入口保留（点击弹
-    #   "WiFi对时暂未实现"），代码在 core/network/、ui/time_sync_ui.c 里没删。
-    #   恢复：取消下面 5 行注释，并把 main/CMakeLists.txt 的 MAIN_SRCS 里
-    #   wifi_time_sync.c / time_sync_ui.c 两行恢复、settings_menu.c 的
-    #   time_date_sync_row_cb 改回 time_sync_ui_start()。
-    #   完整记录见 ideas_and_exps/WIFI_TIME_SYNC.md。
-    # esp_wifi                       # esp_wifi.h（STA 连接）
-    # esp_netif                      # esp_netif.h（默认 STA netif / DHCP）
-    # esp_event                      # esp_event.h（WiFi/IP 事件）
-    # lwip                           # esp_sntp.h / lwip/netdb.h（SNTP + DNS）
-    # wpa_supplicant                 # WPA2/WPA3 握手（esp_wifi 的实现依赖）
+    # ⚠ **2026-11-15 改为双固件方案**（见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）：
+    #   WiFi 协议栈不再进播放器固件（它常驻约 27KB 内部 RAM + 65KB 运行时峰值，
+    #   是蓝牙之后 UI 帧率的主要挤压来源），而是放进独立的「对时固件」（烧在
+    #   ota_0，构建变体 `sync`）。播放器只在需要时用 esp_ota_set_boot_partition()
+    #   切过去，对时固件写完 RTC 再切回 factory。
+    #
+    # ⚠ 为什么这 5 个组件**必须无条件**留在白名单里（不能按角色裁剪）：
+    #   本 `COMPONENTS` 列表写在 `include(project.cmake)` 之前，那时 Kconfig
+    #   还没加载，拿不到 CONFIG_FIRMWARE_ROLE_SYNC。而组件"被编进构建"与
+    #   "被链接进镜像"是两件事：播放器固件没有任何代码引用 esp_wifi/lwip，
+    #   静态库成员不会被拉进最终镜像 → **Flash 与内部 RAM 占用为 0**，
+    #   代价只是播放器构建时多编译这些组件（一次性的全量编译时间）。
+    #   实测：加回这 5 个组件后播放器镜像大小/静态 RAM 与下线时**逐字节一致**
+    #   （见 DUAL_APP_TIME_SYNC.md §6 的验收记录）。
+    esp_wifi                       # esp_wifi.h（STA 连接）
+    esp_netif                      # esp_netif.h（默认 STA netif / DHCP）
+    esp_event                      # esp_event.h（WiFi/IP 事件）
+    lwip                           # esp_sntp.h / lwip/netdb.h（SNTP + DNS）
+    wpa_supplicant                 # WPA2/WPA3 握手（esp_wifi 的实现依赖）
+    # OTA 槽切换（双固件方案的核心）：esp_ota_set_boot_partition() 写 otadata。
+    # 播放器用它切到对时固件、对时固件用它切回 factory（= 擦 otadata）。
+    # 静态占一点 Flash（esp_ota_ops + esp_image_verify），RAM 可忽略。
+    app_update                     # esp_ota_ops.h（esp_ota_set_boot_partition）
 
     # ---- 经典蓝牙音频（2026-11 新增，core/hardware/bt/） ----
     # A2DP Source（SBC，内部编码器）+ AVRCP CT（绝对音量）。Classic 只能走
@@ -121,8 +131,14 @@ project(FakePodNanoNightPlayer)
 # 而 IDF 默认 -Werror 把它当错误。这不是本项目的代码，也不影响运行
 # （BT 名字本来就允许不以 '\0' 结尾，Bluedroid 内部按长度处理）。
 # 只对 bt 组件关掉这一条警告，不动全局的 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS。
+# ⚠ 必须判断 CONFIG_BT_ENABLED：对时固件（构建变体 sync）把它关掉后，bt 组件会
+#   注册成 **INTERFACE 库**（没有任何源文件），而 INTERFACE 目标只允许设置
+#   INTERFACE 属性——直接 target_compile_options(... PRIVATE ...) 会在配置阶段报
+#   "target_compile_options may only set INTERFACE properties on INTERFACE targets"。
 # ============================================================================
-idf_component_get_property(_bt_lib bt COMPONENT_LIB)
-if(TARGET ${_bt_lib})
-    target_compile_options(${_bt_lib} PRIVATE -Wno-stringop-truncation)
+if(CONFIG_BT_ENABLED)
+    idf_component_get_property(_bt_lib bt COMPONENT_LIB)
+    if(TARGET ${_bt_lib})
+        target_compile_options(${_bt_lib} PRIVATE -Wno-stringop-truncation)
+    endif()
 endif()

@@ -34,7 +34,7 @@
     1. `patches/lvgl_fast_mem_decl/` —— 修复 LVGL 把 `LV_ATTRIBUTE_FAST_MEM` 同时放在声明与定义上、与 IDF 6.1 的 `IRAM_ATTR`（带 `__COUNTER__` 的唯一子段）冲突导致的 `-Werror=attributes`（上游 lvgl PR #10737，9.6 仍未合入），补丁只去掉**声明**上的属性、不动定义，故函数仍进 IRAM、零性能损失；
     2. `patches/esp_lcd_touch_deps/` —— 给托管组件 `espressif/esp_lcd_touch` 补显式 `PRIV_REQUIRES esp_driver_gpio`（它调一堆 `gpio_*` 却只写 `REQUIRES "driver" "esp_lcd"`，靠 `esp_lcd` 转发才编过）。
     **属自定义写法，勿当无用代码清理**（详见 IDF6_MIGRATION.md §4.1 与 §9.2）。仓库内 `components/` 下的本地组件**直接改各自的 CMakeLists.txt**，不走补丁。
-  - ⚠ **构建只编译 `COMPONENTS` 白名单里的组件**（2026-11 加入，见根 `CMakeLists.txt`）：IDF 默认会编 `COMPONENT_DIRS` 下**全部**组件（本工程 155 个），白名单把它裁到 **约 90 个**（2026-11 起 `bt` 与本地 `esp-dsp` 重新加入，见 `BLUETOOTH_AUDIO.md`），http / OTA / protocomm / openthread / unity / cmock 都不再编译。**2026-11 起为「WiFi 对时」把 `esp_wifi` / `esp_netif` / `esp_event` / `lwip` / `wpa_supplicant` 重新加入白名单**（固件因此增大约 650KB，仍只占 factory 分区 ~34%）。⚠ **2026-11-15 WiFi对时暂时下线，这 5 个组件已从白名单注释掉**（静态省 30.8KB、Flash 省 588KB），恢复时取消注释并把 `main/CMakeLists.txt` 的两行源文件加回，见 `WIFI_TIME_SYNC.md` §9。**新增任何组件依赖（新 `#include` 了某个 IDF 组件的头文件）必须同步把该组件加进白名单**，否则编译报"找不到头文件"；仓库自带的 4 个本地组件（AMOLED + 3 个触摸）也必须显式列着——它们的头文件 main 并不通过 `REQUIRES` 引用。完整说明与实测数据见 `ideas_and_exps/MBEDTLS_BUILD_AUDIT.md` §9。
+  - ⚠ **构建只编译 `COMPONENTS` 白名单里的组件**（2026-11 加入，见根 `CMakeLists.txt`）：IDF 默认会编 `COMPONENT_DIRS` 下**全部**组件（本工程 155 个），白名单把它裁到 **约 90 个**（2026-11 起 `bt` 与本地 `esp-dsp` 重新加入，见 `BLUETOOTH_AUDIO.md`），http / OTA / protocomm / openthread / unity / cmock 都不再编译。**2026-11-15 起「WiFi 对时」改走双固件方案，`esp_wifi` / `esp_netif` / `esp_event` / `lwip` / `wpa_supplicant` 与 `app_update` 都在白名单里**：前 5 个只被**对时固件**（构建变体 `sync`，烧 `ota_0`）引用，播放器不引用它们 → 链接期 0 个 `.obj` 进镜像，**Flash/RAM 都不受影响**（实测播放器 `iram=109,987`、镜像只多 17KB），代价只是播放器构建多编译这几个组件。⚠ 白名单在 `include(project.cmake)` 之前执行、那时 `CONFIG_*` 还没加载，所以**不能按固件角色裁剪白名单**——只能这样"无条件列着、靠链接器丢弃"。**新增任何组件依赖（新 `#include` 了某个 IDF 组件的头文件）必须同步把该组件加进白名单**，否则编译报"找不到头文件"；仓库自带的 4 个本地组件（AMOLED + 3 个触摸）也必须显式列着——它们的头文件 main 并不通过 `REQUIRES` 引用。完整说明与实测数据见 `ideas_and_exps/MBEDTLS_BUILD_AUDIT.md` §9、双固件方案见 `DUAL_APP_TIME_SYNC.md`。
 - LVGL **9.4.0**（managed component，`lvgl/lvgl`；2026-10 由 8.4.0 升级，迁移全过程与踩坑见 `ideas_and_exps/LVGL9_MIGRATION.md`）
 - 系统字体 = **font 分区里的 `spiffs/system.npf`（NPF1 预烘焙位图全字库：Droid Sans Fallback 24px/bpp2，AOSP Apache-2.0，34,461 码位，4.44MiB）+ 运行时 `esp_partition_mmap` 直读**（2026-11 从 TTF/FreeType 改回位图，与 `legacy_s3` 同一份镜像/同一套生成工具；格式、生成与实测见 **`ideas_and_exps/NPF_FONT.md`**，调研见 `BINFONT_RESEARCH.md`。⚠ 字体镜像**不在固件里**：刷完固件要用 esptool **手动刷一遍字体分区**（一条命令，刷入/校验/换字体流程见 **`ideas_and_exps/FONT_FLASH.md`**），换字体 = 用 `tools/font` 重新烘焙 NPF + 重刷，不改代码/Kconfig；另可用 `tools/make_full_firmware.py` 生成**含字体的全量固件**（单文件烧 0x0，同时清空 nvs/pldata，见 **`ideas_and_exps/FULL_FIRMWARE.md`**））
 - 构建/烧录通过 **`idfc.exe`**（客户端-服务器架构）完成，详见下方"idfc 使用说明"。**下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**，把它放到 PATH 中的某个目录（本机为 `C:\Users\ZYFDroid\ProgramFiles\bin\idfc.exe`），随后**在项目目录里直接用 `idfc <子命令>` 调用**（不需要写 `.\idfc.exe`，项目里也不再自带这个 exe）。
@@ -118,6 +118,17 @@ idfc build -t release --reconfigure
 idfc flash -t release -p COMn
 ```
 
+** sync（WiFi对时专用固件，烧 `ota_0` @0x310000）** —— 见 `ideas_and_exps/DUAL_APP_TIME_SYNC.md`
+
+```powershell
+idfc build -t sync        # 输出 build\sync\FakePodNanoNightPlayer.bin（必须 ≤ 2.5MB）
+# ⚠ 绝对不要用 idfc flash -t sync（会把对时固件写到 factory 覆盖播放器）！
+# 烧 ota_0 只能用 esptool（本机 esptool 路径如下，不需要激活 IDF 环境）：
+& 'C:\Espressif\tools\python\v6.1\venv\Scripts\esptool.exe' --chip esp32s31 -p COM3 `
+    --before default-reset --after hard-reset write-flash 0x310000 `
+    build\sync\FakePodNanoNightPlayer.bin
+```
+
 **其它常用**
 
 ```powershell
@@ -144,8 +155,8 @@ idfc help --all            # 全部命令与参数
   - ⚠ v8 的 `LV_COLOR_16_SWAP` / `LV_COLOR_SCREEN_TRANSP` / `LV_DISP_DEF_REFR_PERIOD` / `LV_INDEV_DEF_READ_PERIOD` / `LV_USE_LARGE_COORD` 在 v9 已删除或改名，逐项对照表见 `ideas_and_exps/LVGL9_MIGRATION.md` §2
 - **版本管理：配置事实源只有 `sdkconfig.defaults*`、`idfc_buildconfig.json` 与 `main/Kconfig.projbuild`（均纳入 git）**；生成的根 `sdkconfig` 与各 `build/<variant>/sdkconfig` **已被 `.gitignore` 忽略，不入库**。每套构建类型持有自己的 sdkconfig（`-D SDKCONFIG=build/<variant>/sdkconfig` 指定）；`fullclean` 只清当前构建目录。改配置的正确姿势：改 `sdkconfig.defaults*` / `idfc_buildconfig.json` / `Kconfig.projbuild` 后执行 `idfc build`（会自动检测过期并清理+重新配置），或 `idfc build --reconfigure` 强制重配。
 - ⚠ **ESP32-S31 + IDF 6.1 的 flash cache 竞态（IDFGH-18107 / espressif/esp-idf#18948）**：一颗核 suspend cache 做 flash 操作时，另一核在 `spi_flash_op_block_func` 自旋里的分支预测器仍会投机取指到 flash，偶发 `Cache error` panic（本机表现为开机第一次读 NVS 时重启）。**这不是 BOYA flash 颗粒问题**（BOYA 驱动与通用驱动实现相同，已回退 `CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP`）。本地 IDF 6.1.0 快照不含上游修复，因此仓库内 **fork 了 `components/spi_flash/`**，在 `cache_utils.c` 的 flash 操作窗口内关闭/恢复分支预测。**不要删除该目录**；升级 IDF 时若上游已合入 `esp_cpu_branch_prediction_disable()` 修复，再删掉本地 fork。完整调查、芯片对比与 DIY 换 flash 兼容性见 **`ideas_and_exps/S31_FLASH_CACHE_RACE.md`**。
-- **配置矩阵（`idfc_buildconfig.json`）—— 2026-11 起只剩 `variant` 一个维度**：`debug` / `release` 两套构建类型。原来的两个 overlay 维度（`dac_chip` cs43131/pcm5102、`font` ttffont/binfont）与 `releasecandidate` 构建类型均已删除——DAC 固定 CS43131、字体固定为位图 NPF1 全字库（`AUDIO_DAC_*` / `UI_FONT_TTF` / `UI_SYSTEM_FONT_FULL` 与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 均已移除，完整版内嵌字库 `system_global_font.c` 也一并删除，精简版仍作为 NPF 挂载失败时的运行时回退）。构建目录回到 `build/<variant>`（如 `build/debug`），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>`；`idfc matrix` 只显示 2 个单元格，`-o` / `set-overlay` 不再可用。历史说明（overlay 机制的定义与旧用法）见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 `BUILD_MATRIX.md`。
-- `partitions.csv`（**显式静态布局**，偏移写死不随自动分配漂移）：bootloader@0x0 / 分区表@0x8000（两者由 sdkconfig 默认 `BOOTLOADER_OFFSET_IN_FLASH`、`PARTITION_TABLE_OFFSET` 控制，不在 CSV 内）→ `nvs`@0x9000(0x6000) / `phy_init`@0xf000(0x1000) / `factory`(app，**0x5F0000=5.9375M**)@0x10000 / **`font`(data 0x41，6M)@0x600000**（NPF1 位图全字库镜像 `system.npf`，Droid Sans Fallback 24px/bpp2，34,461 码位 ≈ 4.44MiB，**裸二进制、无文件系统**）/ `pldata`(data 0x40，4M)@**0xC00000**（播放列表数据结构分区，内存映射只读访问，**锚定在分区表最末尾**）。⚠ **三条布局原则**：① **`pldata` 必须待在最后** —— 它是"整体重写 + 头部 commit"的只读 mmap 数据，偏移一变旧播放列表就作废、首次开机必须重扫；锚定尾部后调整 `font`/`factory` 只动它俩之间那条线，`pldata` 再也不动；② `font`/`pldata` 偏移都要按 64KB（`SPI_FLASH_MMU_PAGE_SIZE`）对齐才能整体内存映射；③ `factory` 起始固定 0x10000（app 对齐要求），与 `font` 平分中间那块空间。2026-10 与 2026-11 共重排**三次**：第一次（字体 TTF 化，原 factory 6M、pldata@0x610000）字体 7.82MiB 装不进尾部剩余空间，从 factory 割 2MiB 给 font；第二次（字体换成 3.55MiB 的 Droid 后）font 8M→4M、factory 3.9375M→7.9375M，并把 pldata 从 0x400000 挪到尾部 0xC00000 锚定；第三次（2026-11 改回位图 NPF1 全字库）font 4M→6M、起点 0x800000→0x600000，factory 7.9375M→5.9375M，**pldata 不动 → 播放列表与配置都不丢**。⚠ **前两次都改过 pldata 偏移 → 旧播放列表数据作废、首次开机要走一次"重新扫描"**（nvs 未动，配置不丢）。格式与实测见 `ideas_and_exps/NPF_FONT.md`。
+- **配置矩阵（`idfc_buildconfig.json`）—— 2026-11 起只剩 `variant` 一个维度，共 3 个变体**：`debug` / `release` / **`sync`（WiFi对时专用固件，2026-11-15 双固件方案加，烧 `ota_0`，见 `DUAL_APP_TIME_SYNC.md`）**。原来的两个 overlay 维度（`dac_chip` cs43131/pcm5102、`font` ttffont/binfont）与 `releasecandidate` 构建类型均已删除——DAC 固定 CS43131、字体固定为位图 NPF1 全字库（`AUDIO_DAC_*` / `UI_FONT_TTF` / `UI_SYSTEM_FONT_FULL` 与 `sdkconfig.dac_chip.*` / `sdkconfig.font.*` 均已移除，完整版内嵌字库 `system_global_font.c` 也一并删除，精简版仍作为 NPF 挂载失败时的运行时回退）。构建目录回到 `build/<variant>`（如 `build/debug`），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>`；`idfc matrix` 只显示 2 个单元格，`-o` / `set-overlay` 不再可用。历史说明（overlay 机制的定义与旧用法）见 `ideas_and_exps/BUILD_CONFIG.md` §8 与 `BUILD_MATRIX.md`。
+- `partitions.csv`（**显式静态布局**，偏移写死不随自动分配漂移）：bootloader@0x0 / 分区表@0x8000（两者由 sdkconfig 默认 `BOOTLOADER_OFFSET_IN_FLASH`、`PARTITION_TABLE_OFFSET` 控制，不在 CSV 内）→ `nvs`@0x9000(0x6000) / `phy_init`@0xf000(0x1000) / `factory`(app，**0x300000=3M**)@0x10000（**主播放器**，日常启动）/ `ota_0`(app ota_0，**0x280000=2.5M**)@**0x310000**（**WiFi对时固件**，见 `DUAL_APP_TIME_SYNC.md`）/ `otadata`(data ota，8KB)@**0x590000**（启动选择，bootloader 据此决定起哪个 app）/ **`font`(data 0x41，6M)@0x600000**（NPF1 位图全字库镜像 `system.npf`，Droid Sans Fallback 24px/bpp2，34,461 码位 ≈ 4.44MiB，**裸二进制、无文件系统**）/ `pldata`(data 0x40，4M)@**0xC00000**（播放列表数据结构分区，内存映射只读访问，**锚定在分区表最末尾**）。⚠ **四条布局原则**：① **`pldata` 必须待在最后** —— 它是"整体重写 + 头部 commit"的只读 mmap 数据，偏移一变旧播放列表就作废、首次开机必须重扫；锚定尾部后调整 `font`/app 分区只动它上面那几条线，`pldata` 再也不动；② `font`/`pldata` 偏移都要按 64KB（`SPI_FLASH_MMU_PAGE_SIZE`）对齐才能整体内存映射；③ `factory` 起始固定 0x10000（app 对齐要求），**app 分区的偏移也必须 64KB 对齐**（所以 otadata 放在两个 app 之后，否则 0x10000 处放 otadata 会逼 factory 挪到 0x20000、白丢 64KB）；④ **播放器镜像必须装得进 factory（3MB），对时固件必须装得进 ota_0（2.5MB）**——`check_sizes` 只在"所有 app 分区都装不下"时才报错，部分装不下只打 Warning（release 播放器 2.66MB 超出 ota_0 属预期，见 `DUAL_APP_TIME_SYNC.md` §2.1）。2026-10 至 2026-11 共重排**四次**：第一次（字体 TTF 化，原 factory 6M、pldata@0x610000）字体 7.82MiB 装不进尾部剩余空间，从 factory 割 2MiB 给 font；第二次（字体换成 3.55MiB 的 Droid 后）font 8M→4M、factory 3.9375M→7.9375M，并把 pldata 从 0x400000 挪到尾部 0xC00000 锚定；第三次（2026-11 改回位图 NPF1 全字库）font 4M→6M、起点 0x800000→0x600000，factory 7.9375M→5.9375M，**pldata 不动 → 播放列表与配置都不丢**；第四次（2026-11-15 双固件对时）factory 5.9375M→3M，新增 `ota_0`(2.5M@0x310000) 与 `otadata`(8K@0x590000)，**font/pldata/nvs 全不动 → 字体、播放列表、用户配置都不受影响，也不需要重刷字体**，但**分区表变了必须重刷一次分区表**（`idfc flash` 会写 0x8000）。⚠ **前两次都改过 pldata 偏移 → 旧播放列表数据作废、首次开机要走一次"重新扫描"**（nvs 未动，配置不丢）。格式与实测见 `ideas_and_exps/NPF_FONT.md`。
 - **字体与构建类型（debug/release）无关**：两套构建类型用的是同一份 NPF1 位图字体（`spiffs/system.npf`），不再有"调试版字体不全"的说法。换字体 = 用 `tools/font` 的流程重新烘焙 NPF（`font_meta.py → lv_font_conv → bin_font_prebake.py → npf_verify.py`）→ `idfc build` + **手动重刷字体分区**（`esptool.exe --chip esp32s31 -p COMx write_flash 0x600000 spiffs/system.npf`，详见 `ideas_and_exps/FONT_FLASH.md`）；同时记得更新内嵌位图回退字库的字形清单（`ideas_and_exps/FontSymbols.md`）。发版/首次安装可用 `python tools/make_full_firmware.py -t release` 生成**全量固件**：单文件烧 0x0 即含 bootloader/分区表/app/字体，并清空 nvs/pldata（见 `ideas_and_exps/FULL_FIRMWARE.md`）。
 
 ### 项目内容
@@ -166,14 +177,25 @@ idfc help --all            # 全部命令与参数
 - LVGL 移植层：显示驱动、**tick 由 `lv_tick_set_cb()` 直接读硬件时间（无 esp_timer）**、专用 LVGL 任务（固定 Core0）、互斥锁、触摸 indev（16ms，即 `CONFIG_LV_DEF_REFR_PERIOD`；x/y 坐标 ×29/30 校准）、触摸事件订阅回调、辅助 UI 任务注册（随 LVGL 挂起/恢复）、**通用虚拟列表组件**（virtual_list）、**全局跑马灯节奏**（global_style：起始延迟 + 滚动 N 轮 + 轮间停顿 + **滚动期间统一暂停**，见 MARQUEE_STYLE.md）；息屏/关机的深调用链统一委托 deep_worker 大栈任务（见第 6 节）
 - 开机流程（boot_flow）：**开机封面（默认封面，LVGL 提前启动后立刻点亮，见使用技术 → 1）** → **低电拒启（电量 <2% 且未充电 → 显示「电量过低，请充电」5 秒后 PMU 关机，不停留）** → 未插卡提示 → 播放列表数据无效则一键扫描（实时进度）→ 正常进入主界面；音乐变动后可在设置菜单"重新扫描"。**设置菜单不参与开机**（懒加载，首次点开设置才构建）。⚠ S3 的按电压（<3.45V）判据已随分压 ADC 删除，S31 改用电量百分比。
 - UI：主界面（四页滑动 tab：目录/歌单列表 → 歌曲列表 → 正在播放 → 播放设置）、顶部状态栏（左=当前时间 HH:MM（调音量时临时改显音量数值，停手 3 秒后回到时间）、中=当前页面名、右=电池百分比，≤20% 黄/≤10% 红/充电闪电图标；12/24 小时制在设置菜单 → 时间与日期 → 时间格式切换，12h 不显示上下午）、下拉控制中心（电量百分比/音量/时间、亮度竖条/音量竖条/睡眠定时开关/设置入口，**纯 LVGL 事件驱动**拖拽）
-- **网络对时（2026-11）**：设置菜单 →「时间与日期」→「WiFi对时」读取 SD 卡 `/sdcard/.ecov/wifi.txt`（UTF-8：第 1 行 SSID、第 2 行密码、可选第 3 行 NTP 域名，默认 `ntp.aliyun.com`），WiFi STA 最多尝试 3 次、SNTP 最多 5 次，全屏进度 + 取消；成功后按 config_store 时区（默认 UTC+8）把 UTC 换算成本地时间写 PCF85063A。RTC 存本地墙钟时间，改时区会把 RTC 平移相同分钟数以保持绝对时刻。详见 **`ideas_and_exps/WIFI_TIME_SYNC.md`**。
+- **网络对时（2026-11，2026-11-15 改为双固件）**：设置菜单 →「时间与日期」→「WiFi对时」→ 确认弹窗 → **写 otadata 切到独立的对时固件（`ota_0`）+ 重启**。对时固件（构建变体 `sync`）读 SD 卡 `/sdcard/.ecov/wifi.txt`（UTF-8：第 1 行 SSID、第 2 行密码、可选第 3 行 NTP 域名，默认 `ntp.aliyun.com`），WiFi STA 最多尝试 3 次、SNTP 最多 5 次，全屏进度 + 取消；成功后按 config_store 时区（默认 UTC+8）把 UTC 换算成本地时间写 PCF85063A，然后**重启回播放器**并把结果写进 NVS（播放器开机 Toast「对时成功 HH:MM」）。RTC 存本地墙钟时间，改时区会把 RTC 平移相同分钟数以保持绝对时刻。⚠ 播放器里**没有** WiFi 协议栈（这也是它能把内部 RAM 全留给 LVGL/蓝牙的原因）；⚠ 对时固件**不能用 `idfc flash -t sync` 烧**，必须 `esptool write-flash 0x310000`。详见 **`ideas_and_exps/DUAL_APP_TIME_SYNC.md`**（历史背景见 `WIFI_TIME_SYNC.md`）。
 - 工具：双核 CPU/内存性能监视（串口每 2s 输出，Kconfig）、**开发者选项**（设置菜单 → 关于 → 开发者选项：仅触摸区域测试白点开关，NVS 运行时配置**默认关**，开机检查、修改需重启生效；S3 的电池电压日志已删除）、全局 Toast 提示
 
 ### 代码结构
 
 ```
 main/
-  main.c                    # app_main：config_store → display → LVGL 移植层 + 开机封面（提前点亮）→ 其余硬件 → boot_flow → 深链/睡眠/按键/电源/日志/性能监视
+  main.c                    # app_main 只做**固件角色分派**（双固件，见 core/system/）：
+                            #   播放器 → player_app_main()：config_store → display → LVGL + 开机封面 →
+                            #   其余硬件 → boot_flow → 深链/睡眠/按键/电源/日志/性能监视；
+                            #   对时固件（CONFIG_FIRMWARE_ROLE_SYNC）→ sync_app_run()
+  core/system/              # 双固件（播放器 / WiFi对时）专用，见 DUAL_APP_TIME_SYNC.md
+    fw_switch.h/.c          #   角色判定 + 运行分区标签 + fw_switch_to_sync()/to_player()
+                            #   （= esp_ota_set_boot_partition；目标 factory 时等价于擦 otadata）
+                            #   + 跨固件结果交接（NVS "tsync"/"res"，传**成品文案**，
+                            #     播放器不引用 wifi_time_sync 任何符号，只负责 Toast）
+    sync_app.h/.c           #   对时固件的最小启动流程（只在 sync 变体编入）：**先**回退 factory →
+                            #   最小初始化（config_store/display/lvgl/字体/触摸/PMU/RTC/SD）→
+                            #   点亮对时界面 → 结果写 NVS → esp_restart 回播放器
   CMakeLists.txt
   Kconfig.projbuild         # 构建级应用配置项（Kconfig；触摸测试已移至运行时开关；PMU 按键/充电配置/RTC 首次校时在此）
   core/
@@ -231,7 +253,7 @@ main/
       default_cover.h/.c    # 默认封面（2bit 索引色，省 Flash）
       default_cover_flash.c # 默认封面（RGB565 极速版，423KB，CONFIG_UI_COVER_FLASH）
     network/
-      wifi_time_sync.h/.c   # WiFi STA + SNTP 网络对时：读 /sdcard/.ecov/wifi.txt → 连 AP
+      wifi_time_sync.h/.c   # WiFi STA + SNTP 网络对时（**只编进对时固件** sync 变体）：读 /sdcard/.ecov/wifi.txt → 连 AP
                             #   （最多 3 次）→ NTP（最多 5 次）→ 按 config_store 时区写 RTC。
                             #   ⚠ 阻塞式，必须在**内部 RAM 栈**任务里跑（WiFi 初始化会写
                             #   NVS/PHY 校准，PSRAM 栈会触发关缓存断言）；每次 run 完整
@@ -285,9 +307,11 @@ main/
                             #   外壳+根页面首次打开时建（44ms），子页首次进入才建，不占开机路径（见 DONE_PLANS #44）
     time_date_popup.h/.c    # 时间与日期的滚轮弹窗：设置日期/时间/时区（挂 lv_layer_top；日期
                             #   3 滚轮、时间 3 滚轮、时区单滚轮，改时区时平移 RTC 保持绝对时刻）
-    time_sync_ui.h/.c       # 「WiFi对时」全屏进度界面：黑底 + 进度条 + 取消；起内部 RAM 栈
-                            #   任务跑 core/network/wifi_time_sync，进度经 lvgl_port_lock 回写；
-                            #   期间 power_service_set_hold_awake(true) 抑制自动息屏
+    time_sync_ui.h/.c       # 「WiFi对时」全屏进度界面（2026-11-15 起基本只在**对时固件**里用）：
+                            #   黑底 + 进度条 + 取消；起内部 RAM 栈任务跑 core/network/wifi_time_sync，
+                            #   进度经 lvgl_port_lock 回写；time_sync_ui_set_done_cb() 决定结果出来的
+                            #   去向（对时固件 = 写结果 + 重启回播放器）；power_service 的 hold_awake
+                            #   在对时固件里被编译掉（那边不跑电源服务）
     notification_panel.h/.c # 下拉控制中心（电量百分比/亮度/音量竖条/**蓝牙开关（长按快速面板）**/设置入口，LVGL 事件驱动）
     bt_settings.h/.c        # 完整蓝牙设置页（lv_menu，与设置菜单同规格）：开关/设备列表（点击进详情）/配对/
                             #   设备详情（连接/断开/EQ/安静模式/删除）
@@ -377,6 +401,7 @@ patches/
 - 🆕 **2026-11-15 内部 RAM 格局（WiFi 下线 + 栈回收后，取代下面 `/16` 时代的旧数据）**：WiFi对时暂时下线（静态 **−30,834 B** DIRAM、Flash **−588KB**，见 `WIFI_TIME_SYNC.md` §9），LVGL 任务栈 20→**12KB**，`CONFIG_ESP_MAIN_TASK_STACK_SIZE` 16→**8KB**，LVGL 绘制缓冲回到 **`V_RES/10`**（双缓冲 84,736 B；PPA 旋转 tile 同尺寸，所以实际要 3 块 41KB DMA），并改成 `/10 → /12 → /16` **逐级回退**（分配失败只降档、不再 assert）。
   实测真机（debug）：**BT 已启动并连着耳机、播放中 → `iram=58,131`、`fps=57~62`**；BT 关闭 → `iram=110,479`、DMA 余量 69,663 B（最大连续块 36,864）、开机日志 `draw buffers: V_RES/10 (42368 B/块)`。
   下面的「49KB / 17KB / 不要恢复 V_RES/10」只适用于"WiFi 还在固件里"的旧格局；**现在 `V_RES/10` 已恢复且实测正常**。详见 `BLUETOOTH_AUDIO.md` §4.1。
+  🆕 **2026-11-15 双固件落地后**：WiFi 协议栈被搬进独立的对时固件（`ota_0`），播放器固件**已经不含** esp_wifi/lwip/wpa_supplicant 任何目标文件（`map` 里 0 个 `.obj`，见 `DUAL_APP_TIME_SYNC.md` §4.1）。播放器实测 `iram=109,987`、`fps=61~63`（BT 关；BT 开连耳机播放中 58,131 / 57~62），与"WiFi 下线"时持平——**不要再把上面的 27KB/30.8KB 省法当成待办**。
 - 🆕 **LVGL 9 迁移后 DMA/内部 RAM 的格局已改变**：`app_ui_create()` 那批控件对象**不再占内部 RAM**（v9 的 `LV_USE_CUSTOM_MALLOC` + `core/ui/lvgl_mem.c` 把 LVGL 对象堆整体搬到 PSRAM）。因此上面这段"对象吃 105KB 内部 RAM"的历史描述**只适用于 LVGL 8.4 时代**。
 - 🆕 **2026-10-16 IRAM 审计（`ideas_and_exps/IRAM_AUDIT_LVGL9.md`）后的当前格局**：先记住一条硬件事实——**ESP32-S3 上 IRAM(0x4037xxxx) 与内部 DRAM(0x3FC8xxxx) 是同一块 SRAM 的两个别名**（`heap/port/esp32s3/memory_layout.c` 的 `soc_memory_regions` 成对给出配对地址），`.iram0.text` 里超出前 16KB 的**每一字节都从内部 DRAM 堆里扣**（map 里的 `.dram0.dummy` 就是它）。所以"代码进 IRAM"与"对象放 PSRAM"是在同一个池子里对冲——这正是"对象都搬去 PSRAM 了、可用内部 RAM 却不见涨"的原因。
   - **IRAM 代码**：166.4KB → **108.9KB**（裁掉 6 种用不到的颜色格式，其中 LVGL 部分 82.8→25.3KB；`LV_ATTRIBUTE_FAST_MEM_USE_IRAM` 保持 y）。

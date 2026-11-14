@@ -72,10 +72,11 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    约 13KB（实测 /10 时开机完成后 DMA 仅剩 31B，SD 读全部失败 → 所有歌被判
    "坏曲"）。/16 每块 460×28×2B≈25KB、双缓冲≈51KB，比 /10 省约 33KB DMA；
    代价是帧率略降（/20 约 20fps、/10 约 30fps，/16 约 25fps 量级）。
-   【2026-11-15】WiFi对时下线（省 ~27KB 内部 RAM）+ LVGL/main 任务栈回收后
-   改回 /10，目标是把帧率恢复到加蓝牙前的水平；同时把分配改成**逐级回退**
-   （/10 → /12 → /16），万一连续块不够也不会 assert 挂启动，只会降档并打印
-   实际档位。 回退档位见下方 k_buf_divs。 */
+   【2026-11-15】WiFi对时从播放器里摘出去（改双固件方案：网络栈搬进 ota_0 的
+   对时固件，播放器这边省 ~27KB 内部 RAM，见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）
+   + LVGL/main 任务栈回收后改回 /10，目标是把帧率恢复到加蓝牙前的水平；
+   同时把分配改成**逐级回退**（/10 → /12 → /16），万一连续块不够也不会 assert
+   挂启动，只会降档并打印实际档位。 回退档位见下方 k_buf_divs。 */
 #define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
 /* ⚠ 本移植层已没有"tick 周期"这个概念：tick 由 lv_tick_set_cb() 直接读硬件时间，
    原来是"esp_timer 每 2 ms 回调一次 lv_tick_inc(2)"，那套正是整屏定格的根因

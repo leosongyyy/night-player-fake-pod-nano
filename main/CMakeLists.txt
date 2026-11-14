@@ -1,14 +1,55 @@
-# 组件源码（固定部分）
-set(MAIN_SRCS
+# ============================================================================
+# 源码集合：双固件（播放器 / 对时）共用同一个工程
+# ----------------------------------------------------------------------------
+# 本工程产出**两个固件**，靠 CONFIG_FIRMWARE_ROLE_SYNC 区分（见
+# ideas_and_exps/DUAL_APP_TIME_SYNC.md）：
+#   · 播放器（默认，=n，`idfc build`）        ：SHARED + PLAYER，烧 factory @0x10000
+#   · 对时固件（=y，`idfc build -t sync`）    ：SHARED + SYNC，烧 ota_0 @0x310000
+#
+# 为什么要按角色拆：对时固件只有 2.5MB 槽位，而播放器那一整套（蓝牙/音频/播放
+# 控制/列表/各 UI 页面/封面）对它全部无用，编进去只白占 Flash（`--gc-sections`
+# 能丢函数，但整份源码+头文件仍要编一遍）；拆开后对时固件也不必链接
+# bt / esp-dsp / helix 等组件。
+#
+# ⚠ 拆分只影响**编译集合**：SHARED + PLAYER 的成员与拆分前逐项一致（连顺序都
+#   一致），所以播放器固件的行为/体积/内存不受影响（改动时请保持这个性质）。
+# ⚠ 对时固件漏了某个源文件时表现为链接期 undefined reference（不会静默变坏），
+#   按报错把文件补进 MAIN_SRCS_SYNC / MAIN_SRCS_SHARED 即可。
+# ============================================================================
+
+# ---- 两个固件都要的：启动入口、屏幕/触摸/PMU/RTC/SD 驱动、LVGL 移植层、
+#      字体、配置存储、WiFi 对时核心与它的进度界面、跨固件切换 ----
+set(MAIN_SRCS_SHARED
     "main.c"
+    "core/system/fw_switch.c"      # otadata 切换 + 跨固件对时结果（NVS）
     "core/hardware/display.c"
     "core/hardware/touch.c"
     "core/hardware/axp2101.c"
-    "core/hardware/boot_reason.c"
     "core/hardware/rtc.c"
     "core/hardware/battery.c"
-    "core/hardware/button_service.c"
     "core/hardware/sd_card.c"
+    "core/storage/config_store.c"
+    "core/network/wifi_time_sync.c"
+    "core/ui/lvgl_port.c"
+    "core/ui/lvgl_mem.c"
+    "core/ui/lvgl_ppa_accel.c"
+    "core/ui/lvgl_ppa_rotate.c"
+    "core/ui/touch_test.c"         # lvgl_port 的"触摸区域测试"（运行时开关）
+    "core/utils/task_psram.c"      # touch_init 等用 PSRAM 栈建任务
+    "core/fonts/system_smaller_font.c"
+    "core/fonts/system_global_font_lite.c"
+    "core/fonts/font_npf.c"
+    "core/fonts/system_font.c"
+    "ui/toast.c"
+    "ui/time_sync_ui.c"
+    # 对时界面要显示"对时成功 2026-11-15 12:34 · GMT+8"，格式化函数在这里
+    # （同一文件里的滚轮弹窗对时固件用不到，但被 --gc-sections 丢掉，不占 Flash）
+    "ui/time_date_popup.c")
+
+# ---- 只有播放器要的：播放引擎、蓝牙音频、列表/UI、电源与深链 ----
+set(MAIN_SRCS_PLAYER
+    "core/hardware/boot_reason.c"
+    "core/hardware/button_service.c"
     "core/hardware/pldata.c"
     "core/hardware/audio/audio.c"
     "core/hardware/audio/resampler.c"
@@ -18,35 +59,20 @@ set(MAIN_SRCS
     "core/storage/playlist_store.c"
     "core/storage/playlist_builder.c"
     "core/storage/playlist.c"
-    "core/storage/config_store.c"
     "core/storage/config_slots.c"
     "core/hardware/audio/cs43131.c"
     "core/hardware/audio/mp3_player.c"
     "core/hardware/audio/eq.c"
-    # ⚠ 2026-11-15 WiFi对时**暂时下线**（换内部 RAM / UI 帧率）：本文件不再编。
-    #   源文件保留在树里；恢复时把下面这行取消注释，并把根 CMakeLists.txt 的
-    #   COMPONENTS 白名单里 5 个网络组件一并恢复（见 WIFI_TIME_SYNC.md）。
-    # "core/network/wifi_time_sync.c"
     "core/player/player_controller.c"
     "core/player/shuffle_player.c"
-    "core/ui/lvgl_port.c"
-    "core/ui/lvgl_mem.c"
-    "core/ui/lvgl_ppa_accel.c"
-    "core/ui/lvgl_ppa_rotate.c"
-    "core/ui/touch_test.c"
     "core/ui/virtual_list.c"
     "core/ui/click_wheel.c"
     "core/ui/global_style.c"
     "core/utils/fake_shutdown.c"
     "core/utils/deep_worker.c"
-    "core/utils/task_psram.c"
     "core/utils/power_service.c"
     "core/utils/sleep_timer.c"
     "core/utils/quiet_mode.c"
-    "core/fonts/system_smaller_font.c"
-    "core/fonts/system_global_font_lite.c"
-    "core/fonts/font_npf.c"
-    "core/fonts/system_font.c"
     "core/image/default_cover.c"
     "core/image/cover_jpeg.c"
     "core/music/song_meta.c"
@@ -68,23 +94,42 @@ set(MAIN_SRCS
     "ui/settings_menu.c"
     "ui/settings_page.c"
     "ui/eq_popup.c"
-    "ui/config_slot_popup.c"
-    "ui/time_date_popup.c"
-    # "ui/time_sync_ui.c"   # 2026-11-15 WiFi对时暂时下线（见 core/network 那条注释）
-    "ui/toast.c")
+    "ui/config_slot_popup.c")
 
-# 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR
-# 开启时编译；关闭可减小固件并省掉监视任务的内存开销（依赖
-# CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS，见 sdkconfig.defaults）。
-if(CONFIG_PERFORMANCE_MONITOR)
-    list(APPEND MAIN_SRCS "core/utils/performance_monitor.c")
+# ---- 只有对时固件要的：它的最小启动流程（点亮屏幕 → 对时 → 重启回播放器） ----
+set(MAIN_SRCS_SYNC
+    "core/system/sync_app.c")
+
+set(MAIN_SRCS ${MAIN_SRCS_SHARED})
+if(CONFIG_FIRMWARE_ROLE_SYNC)
+    list(APPEND MAIN_SRCS ${MAIN_SRCS_SYNC})
+else()
+    list(APPEND MAIN_SRCS ${MAIN_SRCS_PLAYER})
 endif()
 
-# 内存快照诊断（CONFIG_MEM_TRACE，release 关闭）：启动各阶段与封面加载打印
-# 内部 RAM / DMA / PSRAM 占用，用于定位内存消耗者（见 IRAM_DMA_AUDIT.md）。
-# 关闭时不编译本文件，且 mem_trace.h 会把所有调用点退化为空语句。
-if(CONFIG_MEM_TRACE)
-    list(APPEND MAIN_SRCS "core/utils/mem_trace.c")
+# 以下三项都是播放器专属（性能监视 / 内存快照 / 封面），对时固件不编。
+if(NOT CONFIG_FIRMWARE_ROLE_SYNC)
+
+    # 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR
+    # 开启时编译；关闭可减小固件并省掉监视任务的内存开销（依赖
+    # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS，见 sdkconfig.defaults）。
+    if(CONFIG_PERFORMANCE_MONITOR)
+        list(APPEND MAIN_SRCS "core/utils/performance_monitor.c")
+    endif()
+
+    # 内存快照诊断（CONFIG_MEM_TRACE，release 关闭）：启动各阶段与封面加载打印
+    # 内部 RAM / DMA / PSRAM 占用，用于定位内存消耗者（见 IRAM_DMA_AUDIT.md）。
+    # 关闭时不编译本文件，且 mem_trace.h 会把所有调用点退化为空语句。
+    if(CONFIG_MEM_TRACE)
+        list(APPEND MAIN_SRCS "core/utils/mem_trace.c")
+    endif()
+
+    # 极速版默认封面（RGB565 真彩色，423KB）仅当 CONFIG_UI_COVER_FLASH 开启时编译；
+    # 关闭时用 2bit 索引色版 default_cover.c（52KB，省空间、渲染略慢）。
+    if(CONFIG_UI_COVER_FLASH)
+        list(APPEND MAIN_SRCS "core/image/default_cover_flash.c")
+    endif()
+
 endif()
 
 # 系统字体：NPF1 全字库在 font 分区里（运行时 mmap，见 core/fonts/font_npf.c），
@@ -92,12 +137,6 @@ endif()
 # 20px 小字体（system_smaller_font）也常驻，供状态栏时间/两行文字图标使用。
 # ⚠ 不再有 FreeType / TTF：字体是预烘焙的位图（bpp2），由 core/fonts/system_font.c
 #   在 NPF 与内嵌精简字库之间二选一，详见 ideas_and_exps/NPF_FONT.md。
-
-# 极速版默认封面（RGB565 真彩色，423KB）仅当 CONFIG_UI_COVER_FLASH 开启时编译；
-# 关闭时用 2bit 索引色版 default_cover.c（52KB，省空间、渲染略慢）。
-if(CONFIG_UI_COVER_FLASH)
-    list(APPEND MAIN_SRCS "core/image/default_cover_flash.c")
-endif()
 
 idf_component_register(
     SRCS ${MAIN_SRCS}

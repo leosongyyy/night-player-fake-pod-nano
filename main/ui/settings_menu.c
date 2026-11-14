@@ -11,6 +11,7 @@
 #include "core/storage/config_store.h"
 #include "core/storage/playlist.h"
 #include "core/storage/playlist_store.h"
+#include "core/system/fw_switch.h"
 #include "core/ui/click_wheel.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/deep_worker.h"
@@ -1296,17 +1297,157 @@ static void time_date_time_row_cb(lv_event_t *e)
     time_date_popup_show_time();
 }
 
-/* WiFi对时（2026-11-15 暂时下线）：菜单入口保留，点击只弹提示。
-   WiFi 协议栈（esp_wifi/lwip/wpa_supplicant/esp_netif）常驻占用约 27KB
-   内部 RAM，是蓝牙之后 UI 帧率的主要挤压来源；先按用户要求砍掉换帧率。
-   恢复步骤：把 core/network/wifi_time_sync.c 与 ui/time_sync_ui.c 加回
-   main/CMakeLists.txt 的 MAIN_SRCS、根 CMakeLists.txt 的 COMPONENTS 白名单
-   取消注释 5 个网络组件，再把本回调改回 time_sync_ui_start()。
-   见 ideas_and_exps/WIFI_TIME_SYNC.md 的「暂时下线」一节。 */
+/* ---- WiFi对时（双固件方案，2026-11-15） --------------------------------
+   点击「WiFi对时」→ 确认弹窗 → 把"下次启动"切到对时固件（ota_0）→ 重启。
+
+   为什么不在播放器里直接对时：WiFi 协议栈（esp_wifi/lwip/wpa_supplicant）
+   常驻要多占约 27KB 内部 RAM（静态）+ 65KB（运行时峰值），是蓝牙之后把 UI
+   帧率压下去的主要原因；而播放器只在对时那一刻才需要网络。于是把网络放进
+   一个**独立的对时固件**（构建变体 sync，烧在 ota_0）：播放器一个字节都不给
+   WiFi，对时固件跑完自己重启回播放器（factory），并把结果写进 NVS —— 播放器
+  下次开机弹一条 Toast（见 main.c 的 report_sync_result）。
+
+   RTC（PCF85063A）是外置芯片，天然跨固件共享，这是方案成立的前提。
+   完整调研、切换流程与验证清单见 ideas_and_exps/DUAL_APP_TIME_SYNC.md。 */
+
+static lv_obj_t *s_sync_confirm = NULL;   /* 确认弹窗根（遮罩）；NULL = 没显示 */
+
+static void sync_confirm_close(void)
+{
+    if (s_sync_confirm != NULL) {
+        lv_obj_del(s_sync_confirm);
+        s_sync_confirm = NULL;
+    }
+}
+
+static void sync_confirm_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    sync_confirm_close();
+}
+
+/* 确认：保存播放现场 → 切启动分区 → 重启进对时固件 */
+static void sync_confirm_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    sync_confirm_close();
+
+    /* ⚠ 顺序：先把"播到哪 + 当前配置"落盘，再动 otadata。中途断在这里最多
+       是"没切成"，不会丢播放现场（与关机保存走同一条路径）。 */
+    player_controller_save_last_position();
+    config_store_flush_pending(true);
+
+    esp_err_t err = fw_switch_to_sync();
+    if (err != ESP_OK) {
+        /* 最常见：ota_0 里没有有效镜像（对时固件还没烧进去）→ 校验失败 */
+        ESP_LOGW(TAG, "switch to sync firmware failed: %s", esp_err_to_name(err));
+        ui_toast_show("对时固件未烧录");
+        return;
+    }
+    ESP_LOGI(TAG, "switching to sync firmware (ota_0), restarting...");
+    vTaskDelay(pdMS_TO_TICKS(150));   /* 让日志先出去（UART 缓冲） */
+    esp_restart();
+}
+
+/* 点遮罩空白处 = 取消 */
+static void sync_confirm_mask_cb(lv_event_t *e)
+{
+    (void)e;
+    sync_confirm_close();
+}
+
+/* 被别处删除时（理论上不会）清掉指针，避免悬垂 */
+static void sync_confirm_delete_cb(lv_event_t *e)
+{
+    (void)e;
+    s_sync_confirm = NULL;
+}
+
+/* 弹窗按钮（150x48，底部对齐；accent = 黄底黑字） */
+static lv_obj_t *sync_dlg_btn(lv_obj_t *parent, const char *text, int32_t x_ofs,
+                              bool accent)
+{
+    lv_obj_t *btn = lv_obj_create(parent);
+    lv_obj_set_size(btn, 150, 48);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, x_ofs, -22);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn,
+                              accent ? lv_color_hex(0xFFC000) : lv_color_hex(0x333333),
+                              0);
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_GREY, 2),
+                              LV_STATE_PRESSED);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(btn, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, UI_SYSTEM_FONT, 0);
+    lv_obj_set_style_text_color(lbl, accent ? lv_color_black() : lv_color_white(), 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+/* 确认弹窗：挂 lv_layer_top（覆盖菜单与状态栏），点遮罩取消 */
+static void sync_confirm_show(void)
+{
+    if (s_sync_confirm != NULL) {
+        return;
+    }
+
+    lv_obj_t *mask = lv_obj_create(lv_layer_top());
+    s_sync_confirm = mask;
+    lv_obj_set_size(mask, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    lv_obj_set_pos(mask, 0, 0);
+    lv_obj_set_style_bg_color(mask, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(mask, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(mask, 0, 0);
+    lv_obj_set_style_radius(mask, 0, 0);
+    lv_obj_set_style_pad_all(mask, 0, 0);
+    lv_obj_clear_flag(mask, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(mask, sync_confirm_mask_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(mask, sync_confirm_delete_cb, LV_EVENT_DELETE, NULL);
+
+    lv_obj_t *panel = lv_obj_create(mask);
+    lv_obj_set_size(panel, 384, 236);
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x1E1E1E), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(panel, 16, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);   /* 吞掉点击，不传给遮罩 */
+
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, "WiFi对时");
+    lv_obj_set_style_text_font(title, UI_SYSTEM_FONT, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 22);
+
+    lv_obj_t *body = lv_label_create(panel);
+    lv_obj_set_style_text_font(body, UI_SYSTEM_FONT, 0);
+    lv_obj_set_style_text_color(body, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(body, 330);
+    lv_label_set_text(body, "将重启进入对时模式：\n蓝牙与播放会中断，完成后自动返回。");
+    lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 74);
+
+    lv_obj_t *cancel = sync_dlg_btn(panel, "取消", -82, false);
+    lv_obj_add_event_cb(cancel, sync_confirm_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *ok = sync_dlg_btn(panel, "开始对时", 82, true);
+    lv_obj_add_event_cb(ok, sync_confirm_ok_cb, LV_EVENT_CLICKED, NULL);
+
+    ESP_LOGI(TAG, "sync confirm dialog shown");
+}
+
 static void time_date_sync_row_cb(lv_event_t *e)
 {
     (void)e;
-    ui_toast_show("WiFi对时暂未实现");
+    sync_confirm_show();
 }
 
 static void time_date_tz_row_cb(lv_event_t *e)
@@ -1330,8 +1471,8 @@ static void time_date_fmt_row_cb(lv_event_t *e)
       设置日期 / 时间设置 / WiFi对时 / 时区设置 / 时间格式 五项，
       右侧显示当前值。
       日期/时间/时区点击后弹出滚轮弹窗（ui/time_date_popup.c）；
-      **WiFi对时 2026-11-15 暂时下线**（入口保留、点击只弹 Toast，见上方
-      time_date_sync_row_cb 的说明）。
+      **WiFi对时 = 切到独立的对时固件**（2026-11-15 双固件方案）：点击先弹
+      确认，再写 otadata + 重启，见上方 time_date_sync_row_cb 的说明。
       RTC 里存的是本地墙钟时间，时区只影响网络对时的 UTC 换算；
       改时区时由弹窗把 RTC 平移，保持绝对时刻不变。 */
 static lv_obj_t *time_date_page_build(void)
@@ -1366,9 +1507,13 @@ static lv_obj_t *time_date_page_build(void)
     lv_obj_add_flag(fmt_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(fmt_row, time_date_fmt_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* WiFi对时暂时下线期间，说明行改成实情提示（原来写的是"由电脑版工具配置"，
-       功能砍掉后那句话会误导） */
-    menu_note_row_create(page, "* WiFi对时暂未实现，后续版本恢复");
+    /* 说明行（2026-11-15 恢复对时功能后补回：旧版这里有一行长说明"WiFi对时可在
+       电脑版工具里配置"，下线期间改成了"暂未实现"，现在按双固件方案写清两件事——
+       ① WiFi 配置放哪；② 点下去会重启（免得用户以为是死机）。 */
+    menu_note_row_create(page,
+        "* WiFi 名称/密码写在 SD 卡 .ecov/wifi.txt（第 3 行可选 NTP 服务器）");
+    menu_note_row_create(page,
+        "* 对时会重启进入对时模式：蓝牙与播放中断，完成后自动返回");
 
     /* 弹窗保存/对时成功后刷新本页右侧状态 */
     time_date_popup_set_refresh_cb(menu_refresh_time_date);

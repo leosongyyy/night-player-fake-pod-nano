@@ -215,6 +215,45 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ 只在无效时写，绝不覆盖备用电源保住的走时；也绝不发软件复位。
             ⚠ 这不是固件编译时间（编译时间会随每次构建变化）。
 
+    # ------------------------------------------------------------------
+    # 固件角色（双固件方案，2026-11-15；见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）
+    # ------------------------------------------------------------------
+    # 本工程同时产出两个固件，两者共用同一份 partitions.csv：
+    #   · 播放器固件（本项 = n，默认，`idfc build`）：烧到 factory @0x10000，
+    #     日常开机启动的就是它，里面没有 WiFi 协议栈（内部 RAM 全留给 LVGL/蓝牙）；
+    #   · 对时固件（本项 = y，`idfc build -t sync`）：烧到 ota_0 @0x310000，
+    #     只在"设置 → 时间与日期 → WiFi对时"时由播放器写 otadata 切过去。
+    # ⚠ sync 构建变体**绝不能**用 `idfc flash`（那会按分区表把对时固件写到
+    #   factory，覆盖播放器）；烧录用 esptool 手工写 0x310000。
+
+    config FIRMWARE_ROLE_SYNC
+        bool "构建「WiFi对时」专用固件（双固件方案，烧到 ota_0）"
+        default n
+        help
+            打开后产出的是**对时专用固件**：app_main 直接进 sync_app.c 的最小流程
+            （点亮屏幕 → 读 /sdcard/.ecov/wifi.txt → 连 WiFi → SNTP 取时 →
+            写 PCF85063A RTC → 重启回播放器），不编播放器/蓝牙/音频/播放列表
+            那一整套，但保留 LVGL 以复用已有的对时进度界面。
+
+            为什么做成两个固件：esp_wifi/lwip/wpa_supplicant 常驻要多吃约
+            27KB 内部 RAM（静态）+ 65KB（运行时峰值），而播放器只在对时那一
+            刻才需要网络。把网络栈放进独立固件，播放器就能把内部 RAM 全留给
+            LVGL 绘制缓冲与蓝牙音频（UI 帧率的瓶颈就在这里）。
+
+            启动选择由 IDF 标准 bootloader 的 OTA 槽机制完成（otadata），
+            不需要自定义 bootloader。
+
+    config FIRMWARE_SYNC_AUTOSTART
+        bool "【调试】开机自动切到对时固件（无人值守测试用）"
+        default n
+        depends on !FIRMWARE_ROLE_SYNC
+        help
+            开启后，播放器每次开机完成都会调用 fw_switch_to_sync() 重启进对时
+            固件；对时固件跑完会切回 factory，于是形成"播放器 → 对时 → 播放器"
+            的循环。用于没有触摸输入（远程调试、设备不在手边）时验证双固件
+            切换、otadata 写入、RTC 共享与回切是否正常。
+            ⚠ 正常固件绝不能开：会导致设备反复重启对时（只能重新烧录退出）。
+
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"
         default "2.0.0.0-alpha-1"

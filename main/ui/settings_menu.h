@@ -17,8 +17,10 @@ extern "C" {
  *   - 屏幕自动息屏（7 档：10秒/15秒/30秒/1分钟/2分钟/5分钟/10分钟）
  *   - 虚拟 ClickWheel 选项（开启 / 滑动方向 / 速度三档）
  *   - 时间与日期（子菜单：设置日期 / 时间设置 / WiFi对时 / 时区设置 /
- *     时间格式；日期、时间、时区用滚轮弹窗修改；WiFi对时读 SD 卡 wifi.txt 连 WiFi
- *     做 NTP，全屏进度 + 取消。见 ui/time_date_popup.c、ui/time_sync_ui.c）
+ *     时间格式；日期、时间、时区用滚轮弹窗修改；**WiFi对时 = 双固件切换**：
+ *     确认弹窗 → 写 otadata 切到 ota_0 里的对时固件 → 重启，对时完自动返回，
+ *     见 ui/time_sync_ui.c、core/system/{fw_switch,sync_app}.c 与
+ *     ideas_and_exps/DUAL_APP_TIME_SYNC.md）
  *   - 电源选项（**占位空页**，本轮先留入口，后续会话继续实现）
  *   - 按键帮助（亮屏/息屏两套按键映射说明）
  *   - 关于（作者信息；页面最下方为"开发者选项"入口子页：电池电压日志

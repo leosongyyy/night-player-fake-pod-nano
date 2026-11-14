@@ -6,7 +6,9 @@
 #include "core/network/wifi_time_sync.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
+#if !CONFIG_FIRMWARE_ROLE_SYNC
 #include "core/utils/power_service.h"
+#endif
 #include "ui/time_date_popup.h"
 #include "ui/toast.h"
 
@@ -56,7 +58,23 @@ static volatile bool s_visible = false;
 static volatile bool s_running = false;   /* 同步任务还在跑 */
 static volatile bool s_finished = false;  /* 已出结果（按钮变成"关闭"） */
 static volatile bool s_cancel = false;    /* 取消标志（同步任务轮询） */
-static lv_timer_t *s_auto_close_timer = NULL;  /* 成功后自动关闭（一次性） */
+static lv_timer_t *s_auto_close_timer = NULL;  /* 结果展示到期后自动结束（一次性） */
+
+/* 结束去向：对时固件注册了 done 回调（写完结果要重启回播放器），
+   播放器角色不注册（关闭界面回原界面）。 */
+static time_sync_ui_done_cb_t s_done_cb = NULL;
+static wifi_time_sync_result_t s_last_result = WIFI_TIME_SYNC_OK;
+
+/* 抑制自动息屏：播放器里有 power_service；对时固件没有（它不跑电源任务，
+   屏幕本来就一直亮到重启），这里直接跳过。 */
+static void hold_awake(bool hold)
+{
+#if CONFIG_FIRMWARE_ROLE_SYNC
+    (void)hold;
+#else
+    power_service_set_hold_awake(hold);
+#endif
+}
 
 /* 前向声明：按钮回调在 sync_ui_create 里注册，定义在后面 */
 static void cancel_btn_cb(lv_event_t *e);
@@ -171,23 +189,41 @@ static void sync_ui_close(void)
     s_finished = false;
     s_cancel = false;
     /* 恢复自动息屏 */
-    power_service_set_hold_awake(false);
+    hold_awake(false);
     ESP_LOGI(TAG, "sync ui closed");
 }
 
-/* 成功后自动关闭的定时器（一次性：repeat_count=1，LVGL 回调后自动删除） */
-static void auto_close_timer_cb(lv_timer_t *timer)
+/* 结束去向：注册了回调（对时固件）→ 交给回调（它会写结果并重启回播放器）；
+   否则关闭界面回原界面（播放器角色的旧行为）。 */
+static void finish_now(void)
+{
+    if (s_done_cb != NULL) {
+        time_sync_ui_done_cb_t cb = s_done_cb;
+        s_done_cb = NULL;      /* 只回调一次（回调里可能直接 esp_restart） */
+        s_running = false;
+        s_finished = true;
+        s_visible = false;
+        ESP_LOGI(TAG, "handing over result %d to done callback",
+                 (int)s_last_result);
+        cb(s_last_result);
+        return;
+    }
+    sync_ui_close();
+}
+
+/* 结果展示到期的定时器（一次性：repeat_count=1，LVGL 回调后自动删除） */
+static void finish_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     s_auto_close_timer = NULL;
-    sync_ui_close();
+    finish_now();
 }
 
 static void cancel_btn_cb(lv_event_t *e)
 {
     (void)e;
     if (s_finished) {
-        sync_ui_close();
+        finish_now();
         return;
     }
     if (!s_cancel) {
@@ -205,6 +241,7 @@ static void sync_ui_finish(wifi_time_sync_result_t result)
 {
     s_running = false;
     s_finished = true;
+    s_last_result = result;
     lv_obj_add_flag(s_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_label_set_text(s_btn_label, "关闭");
 
@@ -230,12 +267,6 @@ static void sync_ui_finish(wifi_time_sync_result_t result)
         }
         lv_label_set_text(s_detail, detail);
         time_date_popup_notify_changed();
-
-        lv_timer_t *timer = lv_timer_create(auto_close_timer_cb, 2500, NULL);
-        if (timer != NULL) {
-            lv_timer_set_repeat_count(timer, 1);
-            s_auto_close_timer = timer;
-        }
     } else {
         lv_obj_set_style_text_color(s_status,
                                     (result == WIFI_TIME_SYNC_CANCELLED)
@@ -252,7 +283,25 @@ static void sync_ui_finish(wifi_time_sync_result_t result)
     }
 
     /* 结果出来后不再需要 hold：立即恢复自动息屏计时（界面仍在，用户可看结果） */
-    power_service_set_hold_awake(false);
+    hold_awake(false);
+
+    /* 自动结束的延时：
+       · 成功 2.5s（两种角色都一样，让用户看到"对时成功 + 新时间"）；
+       · 失败/取消：对时固件 8s（必须回播放器，用户可能已走开）；
+         播放器角色保持旧行为（等用户点「关闭」，不自动关）。 */
+    int32_t delay = 0;
+    if (result == WIFI_TIME_SYNC_OK) {
+        delay = 2500;
+    } else if (s_done_cb != NULL) {
+        delay = 8000;
+    }
+    if (delay > 0) {
+        lv_timer_t *timer = lv_timer_create(finish_timer_cb, (uint32_t)delay, NULL);
+        if (timer != NULL) {
+            lv_timer_set_repeat_count(timer, 1);
+            s_auto_close_timer = timer;
+        }
+    }
 }
 
 /* 进度回调：在同步任务上下文执行，更新 UI 必须持 LVGL 锁 */
@@ -299,10 +348,15 @@ static void sync_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void time_sync_ui_start(void)
+void time_sync_ui_set_done_cb(time_sync_ui_done_cb_t cb)
+{
+    s_done_cb = cb;
+}
+
+bool time_sync_ui_start(void)
 {
     if (s_visible || s_running) {
-        return;
+        return true;   /* 已在跑/已显示：当作成功（不会重复起任务） */
     }
     if (s_root == NULL) {
         sync_ui_create();
@@ -330,7 +384,7 @@ void time_sync_ui_start(void)
     lv_obj_clear_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 
     /* 抑制自动息屏：整个流程最长可达一分多钟，中途黑屏会看不到进度/取消 */
-    power_service_set_hold_awake(true);
+    hold_awake(true);
 
     BaseType_t ok = xTaskCreatePinnedToCore(sync_task, "time_sync",
                                             TS_TASK_STACK, NULL, TS_TASK_PRIO,
@@ -343,11 +397,12 @@ void time_sync_ui_start(void)
         lv_label_set_text(s_status, "内存不足，无法开始对时");
         lv_label_set_text(s_detail, "请重启设备后重试");
         lv_label_set_text(s_btn_label, "关闭");
-        power_service_set_hold_awake(false);
+        hold_awake(false);
         ui_toast_show("内存不足，无法开始对时");
-        return;
+        return false;
     }
     ESP_LOGI(TAG, "time sync started");
+    return true;
 }
 
 bool time_sync_ui_is_visible(void)

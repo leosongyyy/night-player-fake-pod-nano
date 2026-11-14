@@ -12,6 +12,11 @@
 			"Name":"release",
 			"ConfigFile":"sdkconfig.defaults.release",
 			"Description":"正式发布/日常使用：关闭性能监视器、FPS 计数与调试日志，使用极速版封面。"
+		},
+		{
+			"Name":"sync",
+			"ConfigFile":"sdkconfig.defaults.sync",
+			"Description":"WiFi对时专用固件（双固件方案）：烧到 ota_0 @0x310000，不能用 idfc flash！只能 esptool write_flash 0x310000 build/sync/FakePodNanoNightPlayer.bin。见 ideas_and_exps/DUAL_APP_TIME_SYNC.md。"
 		}
 	],
 	"DefaultBuildVariant":"debug"

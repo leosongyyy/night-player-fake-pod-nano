@@ -5,24 +5,32 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/* 两个固件都要的（对时固件只用得到这一批） */
+#include "core/fonts/system_font.h"
+#include "core/hardware/display.h"
+#include "core/hardware/rtc.h"
+#include "core/hardware/sd_card.h"
+#include "core/hardware/touch.h"
+#include "core/storage/config_store.h"
+#include "core/system/fw_switch.h"
+#include "core/system/sync_app.h"
+#include "core/ui/lvgl_port.h"
+
+#if !CONFIG_FIRMWARE_ROLE_SYNC
+/* ↓↓↓ 以下只有播放器固件用（对时固件不编播放器那一整套源码） */
 #include "core/hardware/audio/audio.h"
 #include "core/hardware/audio/eq.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/boot_reason.h"
 #include "core/hardware/bt/bt_service.h"
 #include "core/hardware/button_service.h"
-#include "core/hardware/display.h"
 #include "core/hardware/pldata.h"
-#include "core/hardware/rtc.h"
-#include "core/hardware/sd_card.h"
-#include "core/hardware/touch.h"
-#include "core/fonts/system_font.h"
-#include "core/storage/config_store.h"
-#include "core/ui/lvgl_port.h"
+#include "core/player/player_controller.h"   /* 切对时模式前保存播放现场 */
 #include "core/utils/deep_worker.h"
 #include "core/utils/mem_trace.h"
 #include "core/utils/performance_monitor.h"
@@ -31,8 +39,12 @@
 #include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
 #include "ui/key_handler.h"
+#include "ui/toast.h"
+#endif
 
 static const char *TAG = "app_main";
+
+#if !CONFIG_FIRMWARE_ROLE_SYNC
 
 /* ------------------------------------------------------------------ */
 /* 按键事件：亮屏/息屏两套映射由 ui/key_handler 统一分发                 */
@@ -49,11 +61,35 @@ static void on_touch_ready(esp_lcd_touch_handle_t tp, void *ctx)
     ESP_LOGI(TAG, "Touch ready, LVGL touch input enabled");
 }
 
-void app_main(void)
+/* ------------------------------------------------------------------ */
+/* 跨固件结果：上一轮"对时固件"（ota_0）跑完留下的结果 Toast             */
+/* ------------------------------------------------------------------ */
+/* 对时固件写的是**成品文案**（"对时成功 12:34" / "对时失败：…"），播放器
+   只负责读出来弹一下——这里绝不能引用 wifi_time_sync 的符号，否则会把 WiFi
+   协议栈整份拉进播放器镜像（内部 RAM 就白省了）。 */
+static void report_sync_result(void)
+{
+    char msg[FW_SYNC_RESULT_MAX];
+    if (!fw_sync_result_take_text(msg, sizeof(msg))) {
+        return;   /* 没有记录：绝大多数开机都是这样 */
+    }
+    ESP_LOGI(TAG, "result from sync firmware: %s", msg);
+    if (lvgl_port_lock(1000)) {
+        ui_toast_show_ms(msg, 3000);
+        lvgl_port_unlock();
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 播放器固件（factory）：完整功能                                      */
+/* ------------------------------------------------------------------ */
+static void player_app_main(void)
 {
     /* S31 平台不再使用固件伪关机（deep sleep）：关机/唤醒由 AXP2101 负责，
        尚未适配。此处只保留冷启动日志。 */
     ESP_LOGI(TAG, "boot: cold start (S31, no firmware deep-sleep shutdown)");
+    ESP_LOGI(TAG, "running partition: %s (role=%s)",
+             fw_running_partition_label(), fw_role_name());
 
     // 用户配置存储（NVS）：尽早初始化，开机恢复音量/亮度/循环模式等
     ESP_LOGI(TAG, "Initialize config store (NVS)");
@@ -246,6 +282,29 @@ void app_main(void)
 
     ESP_LOGI(TAG, "App started");
 
+    /* 上一次"对时固件"跑完留下的结果：Toast 一下（对时成功 HH:MM / 失败原因）。
+       ⚠ 必须等 boot_flow 的首帧提交完再做：Toast 挂在 lv_layer_top，太早创建会
+         被 boot_flow 的首屏覆盖掉。 */
+    report_sync_result();
+
+    /* 【调试】无人值守测试双固件切换：开机完成即切到对时固件并重启。
+       对时固件跑完会切回 factory，于是形成"播放器 → 对时 → 播放器"的循环，
+       用于没有触摸输入时验证 otadata 写入/RTC 共享/回切（见 Kconfig 说明）。
+       ⚠ 默认关闭；开启后只能靠重新烧录退出循环。 */
+#if CONFIG_FIRMWARE_SYNC_AUTOSTART
+    ESP_LOGW(TAG, "FIRMWARE_SYNC_AUTOSTART: 2 秒后切到对时固件（ota_0）");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    player_controller_save_last_position();
+    config_store_flush_pending(true);
+    if (fw_switch_to_sync() == ESP_OK) {
+        ESP_LOGW(TAG, "FIRMWARE_SYNC_AUTOSTART: restarting into sync firmware");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+    } else {
+        ESP_LOGE(TAG, "FIRMWARE_SYNC_AUTOSTART: 对时固件不可用（没烧到 ota_0？）");
+    }
+#endif
+
     // 深路径执行器已在 app_main 早期初始化（见上：内部 RAM 碎片化前创建）
 
     // 睡眠定时器（默认关闭，由播放设置页开启；到点音量渐降后交给
@@ -290,5 +349,24 @@ void app_main(void)
 #ifdef CONFIG_PERFORMANCE_MONITOR
     startPerformanceMonitor();
     mem_trace_log("17-perf_monitor");
+#endif
+}
+
+#endif  /* !CONFIG_FIRMWARE_ROLE_SYNC —— 播放器固件到此结束 */
+
+/* ================================================================== */
+/* 入口：按固件角色分派                                                */
+/* ------------------------------------------------------------------ */
+/* 双固件方案（见 ideas_and_exps/DUAL_APP_TIME_SYNC.md 与 partitions.csv）：
+     · 播放器固件（factory @0x10000，默认）：完整功能，不带 WiFi 协议栈；
+     · 对时固件（ota_0 @0x310000，构建变体 sync）：只做 WiFi/SNTP 对时，
+       写完 RTC 就重启回播放器。 */
+void app_main(void)
+{
+#if CONFIG_FIRMWARE_ROLE_SYNC
+    /* 本函数内部在结束时 esp_restart() 回播放器，正常情况下不返回 */
+    sync_app_run();
+#else
+    player_app_main();
 #endif
 }
