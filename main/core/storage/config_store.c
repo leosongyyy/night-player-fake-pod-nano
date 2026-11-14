@@ -24,6 +24,7 @@ static const char *TAG = "config_store";
 #define KEY_SLEEP_AWAKE      "sleepawake"
 #define KEY_SCREEN_OFF       "screenoff"
 #define KEY_TZ_OFFSET        "tzoff"    /* 时区 UTC 偏移（分钟 + 1440 编码为 u32） */
+#define KEY_TIME_24H         "time24h"  /* 时间制式：1=24h（默认），0=12h */
 #define KEY_CLICK_WHEEL      "clkwheel"
 #define KEY_CW_REVERSE       "clkwheel_rev"   /* 滑动方向：0=正常，1=反转 */
 #define KEY_CW_SPEED         "clkwheel_spd"   /* 速度档位：0=普通，1=快速，2=极速 */
@@ -113,6 +114,8 @@ static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;   /* 息屏超�
    网络对时按 UTC + 本偏移写入（见 settings_menu / time_date_popup）。
    NVS 里以 (offset + 1440) 存成 u32，避免负数的有符号读写分支。 */
 static int      s_tz_offset_min = CONFIG_STORE_TZ_OFFSET_DEFAULT;
+/* 时间制式（全局键 time24h）：默认 24 小时制；仅影响状态栏/下拉栏时钟显示 */
+static bool     s_time_24h = (CONFIG_STORE_TIME_24H_DEFAULT != 0);
 /* 虚拟 ClickWheel 速滑按钮（默认开）：设置菜单 →「虚拟 ClickWheel 选项」子页
    切换。三项配套配置：开关 / 滑动方向（正常=顺时针向下滚，反转=顺时针向上滚）/
    速度档位（普通 ×1.00 / 快速 ×0.75 / 极速 ×0.50，点击循环），均立即生效 */
@@ -663,6 +666,13 @@ void config_store_init(void)
             s_tz_offset_min = CONFIG_STORE_TZ_OFFSET_DEFAULT;
         }
     }
+    /* 时间制式：无记录时默认 24h；只有显式 0 才是 12h */
+    uint8_t time_24h = CONFIG_STORE_TIME_24H_DEFAULT;
+    if (nvs_get_u8(s_nvs, KEY_TIME_24H, &time_24h) != ESP_OK) {
+        s_time_24h = (CONFIG_STORE_TIME_24H_DEFAULT != 0);
+    } else {
+        s_time_24h = (time_24h != 0);
+    }
     /* 虚拟 ClickWheel：无记录（首次烧录/升级）时默认启用 */
     uint8_t click_wheel = 0;
     if (nvs_get_u8(s_nvs, KEY_CLICK_WHEEL, &click_wheel) != ESP_OK) {
@@ -992,6 +1002,11 @@ int config_store_get_tz_offset_min(void)
     return s_tz_offset_min;
 }
 
+bool config_store_get_time_24h(void)
+{
+    return s_time_24h;
+}
+
 bool config_store_get_click_wheel(void)
 {
     return s_click_wheel;
@@ -1238,6 +1253,17 @@ void config_store_set_tz_offset_min(int minutes)
     }
     s_tz_offset_min = minutes;
     cfg_write_u32(KEY_TZ_OFFSET, (uint32_t)(minutes + 1440));
+    config_notify();
+}
+
+void config_store_set_time_24h(bool on)
+{
+    if (on == s_time_24h) {
+        return;
+    }
+    s_time_24h = on;
+    cfg_write_u8(KEY_TIME_24H, on ? 1 : 0);
+    /* 通知回调：状态栏/下拉栏的时钟立即按新制式刷新，不必等下一次 1s 定时 */
     config_notify();
 }
 

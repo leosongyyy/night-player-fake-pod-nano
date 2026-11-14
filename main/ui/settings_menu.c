@@ -87,10 +87,11 @@ static lv_obj_t *s_awake_status        = NULL;   /* 清醒感知 */
 static lv_obj_t *s_screen_off_status   = NULL;   /* 屏幕自动息屏（当前档位） */
 static lv_obj_t *s_rescan_count_status = NULL;   /* 重新扫描（当前歌曲总数，
                                                     不含 .pl 歌单目录；进入菜单时统计一次） */
-/* 「时间与日期」页右侧状态：当前日期 / 当前时间 / 时区 */
+/* 「时间与日期」页右侧状态：当前日期 / 当前时间 / 时区 / 时间制式 */
 static lv_obj_t *s_date_status         = NULL;
 static lv_obj_t *s_time_status         = NULL;
 static lv_obj_t *s_tz_status           = NULL;
+static lv_obj_t *s_time_fmt_status     = NULL;
 
 /* ⚠ 虚拟 ClickWheel 的根行**不再显示开/关状态**（2026-09-11 用户要求）：
    行标题直接写「虚拟 ClickWheel 选项」，开启状态在子页第一行「开启」里看 */
@@ -334,6 +335,10 @@ static void menu_refresh_time_date(void)
     if (s_tz_status != NULL) {
         time_date_format_tz(config_store_get_tz_offset_min(), buf, sizeof(buf));
         lv_label_set_text(s_tz_status, buf);
+    }
+    if (s_time_fmt_status != NULL) {
+        lv_label_set_text(s_time_fmt_status,
+                          config_store_get_time_24h() ? "24 小时制" : "12 小时制");
     }
 }
 
@@ -961,8 +966,20 @@ static void time_date_tz_row_cb(lv_event_t *e)
     time_date_popup_show_tz();
 }
 
+/* 时间格式：点击在 24h / 12h 之间切换（12h 不显示上下午），立即写 NVS，
+   状态栏/下拉栏的时钟由 config_store 变更回调即时刷新 */
+static void time_date_fmt_row_cb(lv_event_t *e)
+{
+    (void)e;
+    bool on = !config_store_get_time_24h();
+    config_store_set_time_24h(on);
+    menu_refresh_time_date();
+    ESP_LOGI(TAG, "time format -> %s", on ? "24h" : "12h");
+}
+
 /* 4. 时间与日期子页（2026-11 新增）：
-      设置日期 / 时间设置 / WiFi对时 / 时区设置 四项，右侧显示当前值。
+      设置日期 / 时间设置 / WiFi对时 / 时区设置 / 时间格式 五项，
+      右侧显示当前值。
       日期/时间/时区点击后弹出滚轮弹窗（ui/time_date_popup.c）；
       WiFi对时进入全屏进度界面（ui/time_sync_ui.c），读取
       /sdcard/.ecov/wifi.txt 连 WiFi 并做 NTP。
@@ -993,6 +1010,12 @@ static lv_obj_t *time_date_page_build(void)
     lv_obj_t *tz_row = menu_row_create(page, NULL, "时区设置", &s_tz_status);
     lv_obj_add_flag(tz_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(tz_row, time_date_tz_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 时间格式：24 小时制 / 12 小时制（12h 不显示上下午） */
+    lv_obj_t *fmt_row = menu_row_create(page, NULL, "时间格式",
+                                        &s_time_fmt_status);
+    lv_obj_add_flag(fmt_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(fmt_row, time_date_fmt_row_cb, LV_EVENT_CLICKED, NULL);
 
     /* 只保留一句简短说明：WiFi 配置由电脑版工具写入，本页不再堆细节
        （2026-11-14 用户要求删掉原来的两段长说明） */

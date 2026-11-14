@@ -43,6 +43,8 @@ set(MAIN_SRCS
     "ui/app.c"
     "ui/battery_indicator.c"
     "ui/boot_flow.c"
+    "ui/clock_display.c"
+    "ui/clock_text.c"
     "ui/dir_list.c"
     "ui/key_handler.c"
     "ui/list_common.c"

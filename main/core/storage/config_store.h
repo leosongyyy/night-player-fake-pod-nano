@@ -41,6 +41,8 @@ extern "C" {
  *   - 时区 tzoff（UTC 偏移分钟数，默认 480 = UTC+8）：设置菜单 → 时间与日期
  *     → 时区设置 可改；网络对时用它把 NTP 的 UTC 换算成本地时间。全局键，
  *     不进配置槽位。
+ *   - 时间制式 time24h（bool，默认 1 = 24 小时制）：设置菜单 → 时间与日期 →
+ *     时间格式 可切换；状态栏/下拉栏的时钟按它格式化（12h 不显示上下午）。
  *   - 虚拟 ClickWheel click_wheel（bool，默认**开**）：长列表右下角速滑按钮
  *     是否启用（见 core/ui/click_wheel）。设置菜单 →「虚拟 ClickWheel」子页
  *     切换，三项均立即生效（无需重启）：
@@ -149,6 +151,7 @@ typedef enum {
 } config_store_cw_speed_t;
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
+#define CONFIG_STORE_TIME_24H_DEFAULT     1u  /* 时间显示默认 24 小时制 */
 
 /* ------------------------------------------------------------------ */
 /* 配置槽位（SAVE1~SAVE4）                                             */
@@ -278,6 +281,9 @@ bool config_store_get_touch_test(void);
 /** @brief 回放增益总开关（true=按 .npd 元数据增益应用；false=全部按 0dB 播放。
  *          默认开） */
 bool config_store_get_replay_gain(void);
+
+/** @brief 时间显示是否 24 小时制（true=24h，默认；false=12h，不显示上下午） */
+bool config_store_get_time_24h(void);
 
 /** @brief 关机前是否在播放（true=播放中，开机自动续播；false=已暂停/停止，
  *          开机只恢复现场不自动播放）。无 NVS 记录时默认 true（保持旧行为）。 */
@@ -435,6 +441,9 @@ void config_store_set_touch_test(bool on);
  *          立即生效：音频链路由控制器轮询到变化后重新应用增益；同时通知
  *          变更回调，让设置页底部文字立即显示"关闭"/增益值 */
 void config_store_set_replay_gain(bool on);
+
+/** @brief 设置时间显示制式并持久化（true=24h，false=12h；状态栏/下拉栏立即刷新） */
+void config_store_set_time_24h(bool on);
 
 /** @brief 设置关机前播放状态并持久化（由 player_controller 在伪关机保存
  *          播放位置时一并调用；UI 无展示，不通知回调） */

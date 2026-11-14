@@ -1,5 +1,6 @@
 #include "ui/app.h"
 #include "ui/battery_indicator.h"
+#include "ui/clock_display.h"
 #include "ui/list_common.h"
 #include "ui/main_ui.h"
 #include "ui/notification_panel.h"
@@ -22,8 +23,11 @@ static const char *TAG = "app";
 /* 顶部状态栏高度（同时也是通知栏下拉触发区高度），统一见 UI_STATUS_BAR_H */
 #define STATUS_BAR_H  UI_STATUS_BAR_H
 
-/* 状态栏音量刷新周期（ms）：音量变化本身有配置回调即时刷新，这里只做兜底 */
-#define STATUS_VOLUME_REFRESH_MS  5000
+/* 状态栏电池刷新周期（ms）：电池变化很慢，这里只做兜底 */
+#define STATUS_BATTERY_REFRESH_MS 5000
+
+/* 左侧内容距屏幕左边缘的边距（px） */
+#define STATUS_LEFT_PAD_X         14
 
 /* 配置变更通知派发周期（ms）：config_store 的 set_xxx 只置"待通知"标志，
    由本文件创建的 lv_timer 在 LVGL 任务里统一派发（原因见 config_store.h
@@ -40,9 +44,14 @@ static const char *const PAGE_NAMES[] = {
 };
 
 static lv_obj_t *s_status_bar     = NULL;  /* 状态栏容器（透明隐藏时保留事件） */
-static lv_obj_t *page_title_label = NULL;   /* 状态栏中央：当前页面名称 */
-static lv_obj_t *vol_label        = NULL;   /* 状态栏左侧：音量图标+数值（单 label） */
-static lv_obj_t *batt_label       = NULL;   /* 状态栏右侧：电池图标+百分比 */
+static lv_obj_t *page_title_label = NULL;  /* 状态栏中央：当前页面名称 */
+static lv_obj_t *left_label       = NULL;  /* 状态栏左侧：默认时间，调音量时临时显示音量 */
+static lv_obj_t *batt_label       = NULL;  /* 状态栏右侧：电池图标+百分比 */
+
+/* 左侧 label 归 ui/clock_display 管理：平时显示时间，调音量时用
+   clock_display_show_temp() 临时改显音量数值（约 3 秒后自动回到时间）。
+   本文件只负责识别"音量变了"并把文本交过去。 */
+static uint8_t s_last_volume = 0;   /* 上次已知音量（识别"音量变了"） */
 
 /* 状态栏图标与数值字体：统一用 LVGL 内置 Montserrat 20。
    - 图标：LVGL 内置字体含 LV_SYMBOL 图标字形（系统精简字体不含 PUA 区图标）；
@@ -64,30 +73,29 @@ static void status_bg_opa_anim_cb(void *var, int32_t value)
    图标不随音量变化（避免每按一下图标跳变） */
 #define VOLUME_ICON_FIXED  LV_SYMBOL_VOLUME_MID
 
-/* 独立刷新状态栏音量（label 已创建时）：按键调节音量后由 config_store
-   变更回调即时同步，不必等 5 秒周期刷新。
-   读 config_store 的配置值（set_volume 先更新内存值再通知回调，必为新值）；
-   不读 audio_get_volume_level()——按键调音量时 audio_set_volume_level 与
-   config 回调的先后顺序在不同调用路径下不保证，读配置值最稳。
-   ⚠ 调用方必须持有 LVGL 锁（config 回调在按键任务上下文也可能触发）。 */
-static void status_refresh_volume(void)
+/* 显示一次"音量临时状态"：把喇叭图标+档位交给时钟显示模块，
+   约 3 秒后它自己回到时间（见 ui/clock_display.h） */
+static void status_show_volume_temp(void)
 {
-    if (vol_label == NULL) {
-        return;
-    }
-    uint8_t vol = config_store_get_volume();
-    char vol_buf[16];
-    snprintf(vol_buf, sizeof(vol_buf), VOLUME_ICON_FIXED " %u", (unsigned)vol);
-    lv_label_set_text(vol_label, vol_buf);
+    s_last_volume = config_store_get_volume();
+    char buf[16];
+    snprintf(buf, sizeof(buf), VOLUME_ICON_FIXED " %u",
+             (unsigned)s_last_volume);
+    clock_display_show_temp(buf);
 }
 
-/* 配置变更回调：音量（按键调节）变化后立即刷新状态栏音量显示。
+/* 配置变更回调：音量变化 → 左侧临时改显音量（约 3 秒后回退成时间）；
+   其余变化（如时间制式）→ 让时钟显示模块重刷一次时间，代价极小。
    ⚠ 本回调由 ui/app.c 的派发定时器在 LVGL 任务上下文里调用（config_store 的
    set_xxx 只置标志，不再在调用者线程里同步回调），可以安全操作 LVGL。 */
 static void app_config_changed_cb(void *ctx)
 {
     (void)ctx;
-    status_refresh_volume();
+    if (config_store_get_volume() != s_last_volume) {
+        status_show_volume_temp();
+        return;
+    }
+    clock_display_refresh();
 }
 
 /* 配置变更通知派发定时器（LVGL 任务上下文）：把 config_store 里累积的
@@ -102,7 +110,7 @@ static void config_notify_timer_cb(lv_timer_t *timer)
     config_store_flush_pending(false);
 }
 
-/* 独立刷新状态栏电池百分比：图标随电量/充电状态变化，≤20% 黄、≤10% 红；
+/* 刷新右侧电池百分比：图标随电量/充电状态变化，≤20% 黄、≤10% 红；
    PMU 不可用时显示灰色 "▁ --%"。
    ⚠ 会做 I²C 读取（约 1ms），只在 5 秒周期 timer 与创建时调用。
    ⚠ 调用方必须持有 LVGL 锁。 */
@@ -114,7 +122,6 @@ static void status_refresh_battery(void)
     char buf[24];
     lv_color_t color = lv_color_white();
     battery_indicator_text(buf, sizeof(buf), &color);
-    /* 只在文本变化时 set_text：内容相同也 set 会重建文本缓存/动画（跑马灯踩过） */
     const char *cur = lv_label_get_text(batt_label);
     if (cur == NULL || strcmp(cur, buf) != 0) {
         lv_label_set_text(batt_label, buf);
@@ -122,19 +129,16 @@ static void status_refresh_battery(void)
     lv_obj_set_style_text_color(batt_label, color, 0);
 }
 
-/* 状态栏周期刷新：音量兜底 + 电池百分比（5 秒一次，PMU 电量变化很慢）。
-   图标与数值拼接为单个 label（图标 + 空格 + 文本）。
+/* 状态栏周期刷新：电池百分比（5 秒一次，PMU 电量变化很慢）。
    创建后立即手动调用一次填充初始值。 */
 static void status_refresh_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
-
-    status_refresh_volume();
     status_refresh_battery();
 }
 
-/* 独立顶部状态栏：左=音量（图标+等级）、中=当前页面名称、右=电池百分比。
-    返回状态栏句柄供通知栏挂载拖拽事件。 */
+/* 独立顶部状态栏：左=当前时间（调音量时临时改显音量）、中=当前页面名称、
+    右=电池百分比。返回状态栏句柄供通知栏挂载拖拽事件。 */
 static lv_obj_t *create_status_bar(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -152,12 +156,15 @@ static lv_obj_t *create_status_bar(void)
     lv_obj_set_style_radius(status, 0, 0);
     lv_obj_set_style_pad_all(status, 0, 0);
 
-    /* 左侧：音量（固定图标 + 空格 + 数值，单 label） */
-    vol_label = lv_label_create(status);
-    lv_label_set_text(vol_label, VOLUME_ICON_FIXED " --");
-    lv_obj_set_style_text_font(vol_label, STATUS_SMALL_FONT, 0);
-    lv_obj_set_style_text_color(vol_label, lv_color_white(), 0);
-    lv_obj_align(vol_label, LV_ALIGN_LEFT_MID, 12, 0);
+    /* 左侧：当前时间（唯一的常驻内容；调音量时由 clock_display 临时改显
+       音量数值，约 3 秒后自动切回时间）。左边缘留 14px（原 12px +2px）。 */
+    left_label = lv_label_create(status);
+    lv_label_set_text(left_label, "--:--");
+    lv_obj_set_style_text_font(left_label, STATUS_SMALL_FONT, 0);
+    lv_obj_set_style_text_color(left_label, lv_color_white(), 0);
+    lv_obj_align(left_label, LV_ALIGN_LEFT_MID, STATUS_LEFT_PAD_X, 0);
+    /* 交给时钟显示模块：它负责每秒刷新时间 + 临时状态（音量等）3 秒回退 */
+    clock_display_attach(left_label);
 
     /* 中间：当前页面名称（默认第 1 页"目录 / 歌单"，随 tab 切换更新） */
     page_title_label = lv_label_create(status);
@@ -173,12 +180,15 @@ static lv_obj_t *create_status_bar(void)
     lv_obj_set_style_text_color(batt_label, lv_color_white(), 0);
     lv_obj_align(batt_label, LV_ALIGN_RIGHT_MID, -12, 0);
 
-    /* 周期刷新（每 5 秒：音量兜底 + 电池百分比）+ 立即填充一次初始值 */
-    lv_timer_create(status_refresh_timer_cb, STATUS_VOLUME_REFRESH_MS, NULL);
-    status_refresh_timer_cb(NULL);
+    /* 周期刷新：只剩 5 秒电池兜底（时间的 1 秒刷新由 clock_display 自带，
+       音量只在变化时临时显示约 3 秒）。创建后立即填充一次初始值 */
+    lv_timer_create(status_refresh_timer_cb, STATUS_BATTERY_REFRESH_MS, NULL);
+    s_last_volume = config_store_get_volume();
+    status_refresh_battery();
 
-    /* 订阅配置变更：音量（按键调节等）变化后即时刷新状态栏音量显示。
-       回调在调用 set_xxx 的线程上下文执行（按键任务持锁调用，安全）。 */
+    /* 订阅配置变更：音量（按键/滑块调节）变化后左侧临时改显音量约 3 秒；
+       时间制式变化时让 clock_display 立即重刷时间。回调在 LVGL 任务上下文
+       执行（延迟派发），持锁调用，安全。 */
     config_store_register_cb(app_config_changed_cb, NULL);
 
     /* 状态栏创建晚于主界面：开机可能已切到非第 0 页（如默认停在正在播放页），
@@ -247,7 +257,9 @@ void app_status_set_ui_visible(bool visible)
         /* 恢复：半透明黑背景（75%）+ 显示内容 label */
         lv_obj_set_style_bg_opa(s_status_bar, (lv_opa_t)191, 0);
         lv_obj_clear_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
+        if (left_label != NULL) {
+            lv_obj_clear_flag(left_label, LV_OBJ_FLAG_HIDDEN);
+        }
         if (batt_label != NULL) {
             lv_obj_clear_flag(batt_label, LV_OBJ_FLAG_HIDDEN);
         }
@@ -257,7 +269,9 @@ void app_status_set_ui_visible(bool visible)
            状态栏上，需保留事件接收（供全屏封面时下拉通知栏） */
         lv_obj_set_style_bg_opa(s_status_bar, LV_OPA_TRANSP, 0);
         lv_obj_add_flag(page_title_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(vol_label, LV_OBJ_FLAG_HIDDEN);
+        if (left_label != NULL) {
+            lv_obj_add_flag(left_label, LV_OBJ_FLAG_HIDDEN);
+        }
         if (batt_label != NULL) {
             lv_obj_add_flag(batt_label, LV_OBJ_FLAG_HIDDEN);
         }

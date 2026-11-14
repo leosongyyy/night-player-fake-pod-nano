@@ -1,5 +1,6 @@
 #include "ui/notification_panel.h"
 #include "ui/battery_indicator.h"
+#include "ui/clock_display.h"
 #include "ui/list_common.h"
 #include "ui/settings_menu.h"
 
@@ -75,11 +76,18 @@ static const char *TAG = "notification_panel";
 /* 音量图标固定用"中音量"：界面只看数字档位（与顶部状态栏一致） */
 #define NOTIF_VOL_ICON     LV_SYMBOL_VOLUME_MID
 
+/* 顶部左侧内容距屏幕左边缘的边距（px）：原 46 + 2 */
+#define HEADER_LEFT_PAD_X     48
+
 static lv_obj_t *notif_bar = NULL;
 
-/* 顶部状态信息区（左音量 / 右电量百分比，与主状态栏数据同步） */
-static lv_obj_t *header_vol_label = NULL;
+/* 顶部状态信息区（左=时间（调音量时临时改显音量）/ 右=电量，与主状态栏数据同步） */
+static lv_obj_t *header_left_label = NULL;
 static lv_obj_t *header_batt_label = NULL;
+
+/* 顶部左侧 label 同样归 ui/clock_display 管理（与主状态栏共用一份时间文本和
+   "临时状态"机制），这里只负责识别"音量变了"并把文本交过去 */
+static uint8_t s_header_last_volume = 0;        /* 上次已知音量（识别"音量变了"） */
 
 /* 亮度竖条 */
 static lv_obj_t *bright_fill = NULL;
@@ -224,6 +232,7 @@ static void notif_attach_events(lv_obj_t *obj)
 /* 前向声明：拖动时要"立即"刷新本面板的竖条/文字（定义在下方显示刷新一节） */
 static void notif_refresh_volume_ui(uint8_t vol);
 static void notif_refresh_brightness_ui(uint8_t brightness);
+static void notif_show_volume_temp(uint8_t vol);
 
 /* 应用亮度：只改内存（不写 NVS），再写硬件。
    ⚠ 事件回调运行在 LVGL 任务上下文（已持锁），display_set_brightness 安全。
@@ -263,9 +272,10 @@ static void notif_apply_volume(uint8_t level)
     sleep_timer_fade_cancel();
     audio_set_volume_level(level);          /* 先写硬件（回调读到的即新值） */
     config_store_set_volume_deferred(level);/* 后改内存 + 通知（持锁安全） */
-    /* ⚠ 同亮度：立即刷新本面板音量显示，别等 100ms 的延迟派发，否则拖动
-       音量竖条也是 10Hz 的"一格一格"（见 notif_apply_brightness 的说明） */
-    notif_refresh_volume_ui(level);
+    /* ⚠ 同亮度：立即刷新本面板音量竖条，别等 100ms 的延迟派发，否则拖动
+       音量竖条也是 10Hz 的"一格一格"（见 notif_apply_brightness 的说明）。
+       同时让顶部左侧临时显示音量数值（约 3 秒后回到时间）。 */
+    notif_show_volume_temp(level);
     /* ⚠ 音量调节不触发睡眠定时清醒感知加时（只有切歌/播放控制/点歌等
        算"用户动作"，见 sleep_timer_note_activity 注释） */
 }
@@ -281,19 +291,25 @@ static void notif_apply_pending_flush(void)
 /* 显示刷新                                                             */
 /* ------------------------------------------------------------------ */
 
-/* 刷新音量相关显示：顶部状态区左音量 + 音量条填充条高度（顶部状态区
-   左上方已有音量数字，竖条内不再显示数字） */
+/* 刷新音量竖条填充高度（竖条内不显示数字）。
+   顶部左侧的音量数值不在这里写：它走 ui/clock_display 的"临时状态"机制 */
 static void notif_refresh_volume_ui(uint8_t vol)
 {
-    if (header_vol_label != NULL) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), NOTIF_VOL_ICON " %u", (unsigned)vol);
-        lv_label_set_text(header_vol_label, buf);
-    }
     if (vol_fill != NULL) {
         int32_t h = TRACK_H * vol / AUDIO_VOL_LEVEL_MAX;
         lv_obj_set_height(vol_fill, h);
     }
+}
+
+/* 顶部左侧临时显示音量：更新竖条 + 把"喇叭图标+档位"交给时钟显示模块
+   （约 3 秒后自动回到时间，见 ui/clock_display.h） */
+static void notif_show_volume_temp(uint8_t vol)
+{
+    s_header_last_volume = vol;
+    notif_refresh_volume_ui(vol);
+    char buf[16];
+    snprintf(buf, sizeof(buf), NOTIF_VOL_ICON " %u", (unsigned)vol);
+    clock_display_show_temp(buf);
 }
 
 /* 刷新亮度显示：亮度条填充条高度（亮度无需数字） */
@@ -305,16 +321,19 @@ static void notif_refresh_brightness_ui(uint8_t brightness)
     }
 }
 
-/* 配置变更回调：其它入口（按键调音量、设置页改亮度等）修改配置后，
-   同步本面板顶部状态区与亮度/音量竖条显示 */
+/* 配置变更回调：其它入口（按键调音量、设置页改亮度/时间制式等）修改配置后，
+   同步本面板亮度/音量竖条；音量变化时顶部左侧临时改显音量 */
 static void notif_config_changed_cb(void *ctx)
 {
     (void)ctx;
-    notif_refresh_volume_ui(config_store_get_volume());
+    uint8_t vol = config_store_get_volume();
+    if (vol != s_header_last_volume) {
+        notif_show_volume_temp(vol);
+    }
     notif_refresh_brightness_ui(config_store_get_brightness());
 }
 
-/* 刷新顶部状态区右侧的电池百分比（与主状态栏同一套图标/配色规则）。
+/* 刷新右侧电池百分比（与主状态栏同一套图标/配色规则）。
    ⚠ 会做 I²C 读取，由 5 秒 timer 驱动，不在每帧路径调用。 */
 static void notif_refresh_battery_ui(void)
 {
@@ -339,7 +358,11 @@ static void notif_battery_timer_cb(lv_timer_t *timer)
     notif_refresh_battery_ui();
 }
 
-/* S31：顶部状态区左=音量、右=电池百分比（AXP2101 电量计 + 电压兜底）。 */
+/* 顶部时钟不在这里刷新：时间文本由 ui/clock_display 的 1 秒定时器统一写，
+   本面板只把 header_left_label 挂上去（见 header_create） */
+
+/* S31：顶部状态区左=当前时间（调音量时临时改显音量）、右=电量
+   （AXP2101 电量计 + 电压兜底）。 */
 
 /* ------------------------------------------------------------------ */
 /* 竖条滑动交互（亮度 / 音量，iOS 控制中心风格）                        */
@@ -626,9 +649,10 @@ static lv_obj_t *content_col_create(lv_obj_t *content)
 }
 
 /* 顶部状态信息区：69px 高（与底部把手区等高，中间控件组垂直居中），
-   左=音量（图标+档位）、右=电量（图标+电压），
-   与主状态栏（app.c）数据同步（音量走 config_store 回调、电量走周期刷新）。
-   文字状态顶边距 23px、左右边距 46px。
+   左=当前时间（调音量时临时改显音量）、右=电量百分比，
+   时间文本由 ui/clock_display 的 1 秒定时器统一刷新（与主状态栏共用一份，
+   12/24 小时制来自 config_store）；电量走周期刷新。
+   文字状态顶边距 23px、左边距 48px、右边距 46px。
    不含主状态栏中央的当前页面名称。整个区域事件穿透，不干扰面板拖拽。 */
 static void header_create(void)
 {
@@ -642,16 +666,17 @@ static void header_create(void)
     lv_obj_clear_flag(header, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
 
-    /* 左：音量（固定图标 + 档位数字）。下拉后控制中心专用大字号（28px），
-       顶边距 23px、左边缘边距 46px（左右边距保持原值；
-       主状态栏保持原样 16px/12px，不跟随加大） */
-    header_vol_label = lv_label_create(header);
-    lv_label_set_text(header_vol_label, NOTIF_VOL_ICON " --");
-    lv_obj_set_style_text_font(header_vol_label, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(header_vol_label, lv_color_white(), 0);
-    lv_obj_align(header_vol_label, LV_ALIGN_TOP_LEFT, 46, 23);
+    /* 左：当前时间（28px；唯一常驻内容，调音量时临时改显音量数值，
+       3 秒后自动切回时间） */
+    header_left_label = lv_label_create(header);
+    lv_label_set_text(header_left_label, "--:--");
+    lv_obj_set_style_text_font(header_left_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(header_left_label, lv_color_white(), 0);
+    lv_obj_align(header_left_label, LV_ALIGN_TOP_LEFT, HEADER_LEFT_PAD_X, 23);
+    /* 交给时钟显示模块：每秒刷新时间 + 临时状态（音量）约 3 秒回退 */
+    clock_display_attach(header_left_label);
 
-    /* 右：电池百分比（图标 + 百分数，充电时显示闪电），与音量同为 28px */
+    /* 右：电池百分比（图标 + 百分数，充电时显示闪电） */
     header_batt_label = lv_label_create(header);
     lv_label_set_text(header_batt_label, LV_SYMBOL_BATTERY_EMPTY " --%");
     lv_obj_set_style_text_font(header_batt_label, &lv_font_montserrat_28, 0);
@@ -742,7 +767,7 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_clear_flag(notif_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(notif_bar, LV_SCROLLBAR_MODE_OFF);
 
-    /* 顶部状态信息区（46px：左音量 / 右电量） */
+    /* 顶部状态信息区（69px：左时间+音量 / 右电量） */
     header_create();
 
     /* 中间控制中心内容（左中右三列） */
@@ -770,14 +795,17 @@ void notification_panel_create(lv_obj_t *status_bar)
     lv_obj_set_style_text_color(grab_label, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_center(grab_label);
 
-    /* 初始填充：顶部状态区音量/电池与亮度/音量竖条 */
-    notif_refresh_volume_ui(config_store_get_volume());
+    /* 初始填充：电池 + 亮度/音量竖条（时间文本已由 clock_display_attach
+       在 header_create 里填好；音量不写文字，只有调音量时才临时显示） */
     notif_refresh_battery_ui();
+    s_header_last_volume = config_store_get_volume();
+    notif_refresh_volume_ui(s_header_last_volume);
     notif_refresh_brightness_ui(config_store_get_brightness());
     notif_refresh_sleep_btn();
     s_sleep_btn_on = sleep_timer_is_active();
 
-    /* 电池百分比周期刷新（5 秒）：电量变化慢，没必要跟随 1s 睡眠按钮定时器 */
+    /* 电池百分比周期刷新（5 秒）：电量变化慢，没必要跟随 1s 定时器。
+       时钟的 1 秒刷新由 ui/clock_display 统一负责，这里不再另建 */
     lv_timer_create(notif_battery_timer_cb, 5000, NULL);
 
     /* 订阅配置变更：按键调音量、设置页改亮度等修改后同步本面板显示 */
