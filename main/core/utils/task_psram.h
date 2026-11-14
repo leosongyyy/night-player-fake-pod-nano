@@ -42,7 +42,7 @@ extern "C" {
  * ⚠ 不适用：LVGL（每帧刷屏）、button_svc（按键中断触发、要求低延迟）、
  *   player_ctrl/deep_worker（交互与深链主路径）、boot_scan/rescan
  *   （分区写擦 + munmap 关缓存）。
- * ⚠ 例外：`mp3_play` 因多格式解码需要 24KB 栈，现也使用本接口创建；
+ * ⚠ 例外：`mp3_play` 因多格式解码（Tremor codebook）需要 64KB 栈，现也使用本接口创建；
  *   其运行期不触发 flash 关缓存路径。
  */
 

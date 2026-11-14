@@ -28,12 +28,14 @@ static const char *TAG = "audio";
 /* 播放缓冲：帧数（每帧 = 左右各 32bit slot），48kHz 下约 10.7ms/缓冲 */
 #define AUDIO_BUF_FRAMES 512
 
-/* I2S DMA 链参数（与 I2S_CHANNEL_DEFAULT_CONFIG 默认值一致）：
-   dma_desc_num=6, dma_frame_num=240，每帧 = 左右 2 个 32bit slot = 8 字节。
+/* I2S DMA 链参数：dma_desc_num=8, dma_frame_num=511（约 93ms @44.1k）。
+   每帧 = 左右 2 个 32bit slot = 8 字节。511 而不是 512：单描述符缓冲区上限
+   DMA_DESCRIPTOR_BUFFER_MAX_SIZE_4B_ALIGNED = 4092 字节，512×8=4096 会被
+   I2S 驱动截断并告警，511×8=4088 是安全上限。
    切换采样率后用一段静音 preload 覆盖整条 DMA 链，避免上一个采样率的残留数据
    以新速率被短暂播放（听起来像音调不对的极短正弦）。 */
-#define I2S_DMA_DESC_NUM      6
-#define I2S_DMA_FRAME_NUM     240
+#define I2S_DMA_DESC_NUM      8
+#define I2S_DMA_FRAME_NUM     511
 #define I2S_DMA_FLUSH_SAMPLES (I2S_DMA_DESC_NUM * I2S_DMA_FRAME_NUM * 2)
 
 /* ------------------------------------------------------------------ */
@@ -69,7 +71,7 @@ static volatile bool s_pcm_running = false;
    uint32 原子读（32bit 平台），consumer 每块读一次转 float 使用 */
 static uint32_t replay_gain = AUDIO_REPLAY_GAIN_UNITY;
 
-/* 静音冲刷缓冲：覆盖整条 I2S DMA 链（6×240×2 个 32bit 样本 = 11520 字节）。
+/* 静音冲刷缓冲：覆盖整条 I2S DMA 链（8×511×2 个 32bit 样本 = 32704 字节）。
    2026-11 起放 **PSRAM**（蓝牙接入后内部 DMA 池紧张；它只在切换采样率时
    被 memset 一次、由 i2s_channel_preload_data 拷进内部 DMA 描述符，
    不参与实时 DMA，PSRAM 带宽足够）。 */
@@ -110,6 +112,9 @@ static inline int32_t audio_f32_to_s32(float v)
 static esp_err_t i2s_audio_init(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(AUDIO_I2S_NUM, I2S_ROLE_MASTER);
+    /* 必须在 i2s_new_channel 之前覆盖默认 6×240，否则改宏不生效 */
+    chan_cfg.dma_desc_num = I2S_DMA_DESC_NUM;
+    chan_cfg.dma_frame_num = I2S_DMA_FRAME_NUM;
     esp_err_t ret = i2s_new_channel(&chan_cfg, &tx_chan, NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "create i2s channel failed: %s", esp_err_to_name(ret));
@@ -142,6 +147,13 @@ static esp_err_t i2s_audio_init(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "init i2s std mode failed: %s", esp_err_to_name(ret));
         return ret;
+    }
+
+    i2s_chan_info_t chan_info = {0};
+    if (i2s_channel_get_info(tx_chan, &chan_info) == ESP_OK) {
+        ESP_LOGI(TAG, "I2S DMA: %d x %d frames, total %u bytes",
+                 I2S_DMA_DESC_NUM, I2S_DMA_FRAME_NUM,
+                 (unsigned)chan_info.total_dma_buf_size);
     }
     ESP_LOGI(TAG, "I2S channel ready (I2S1 BCK=GPIO52, WS=GPIO51, DOUT=GPIO50)");
     return ESP_OK;
@@ -218,11 +230,15 @@ static esp_err_t audio_configure_fs(audio_fs_t fs)
     }
     /* enable 前用静音覆盖 DMA 残留：preload 会从 desc[0] 起重新填充整条 DMA 链，
        使 enable 后第一轮送出的是静音而非上一个采样率的残留数据 */
-    if (silence_flush != NULL) {
-        memset(silence_flush, 0, I2S_DMA_FLUSH_SAMPLES * sizeof(int32_t));
+if (silence_flush != NULL) {
+        size_t flush_bytes = I2S_DMA_FLUSH_SAMPLES * sizeof(int32_t);
+        memset(silence_flush, 0, flush_bytes);
         size_t flushed = 0;
-        i2s_channel_preload_data(tx_chan, silence_flush,
-                                 I2S_DMA_FLUSH_SAMPLES * sizeof(int32_t), &flushed);
+        i2s_channel_preload_data(tx_chan, silence_flush, flush_bytes, &flushed);
+        if (flushed != flush_bytes) {
+            ESP_LOGW(TAG, "silence preload %u/%u bytes",
+                     (unsigned)flushed, (unsigned)flush_bytes);
+        }
     }
     i2s_channel_enable(tx_chan);
     i2s_enabled = true;
@@ -281,7 +297,8 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames)
        样本的符号转换统一在 float 域完成，见 audio.h 处理链路说明）。
        增益为直接切换（无平滑过渡）：切歌时旧任务已完全退出，新曲在开始
        写 PCM 前应用增益，不存在跨曲混用。 */
-    const float gain_f = (float)replay_gain * (1.0f / 65536.0f);
+    const uint32_t gain_q16 = replay_gain;
+    const float gain_f = (float)gain_q16 * (1.0f / 65536.0f);
 
     const int16_t *src = samples;
     size_t remain = frames;
@@ -292,16 +309,25 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames)
            整体重载并清零状态） */
         eq_snapshot(&s_eq_rt);
 
-        /* 统一浮点路径（EQ 关闭时 band_count=0，eq_process_sample 直通）：
-           int16 → float 归一化 → EQ（预增益+级联）→ ×回放增益 → Clamp →
-           int32 左对齐。EQ/增益叠加超幅的样本在此被 Clamp 而非回绕 */
-        for (size_t i = 0; i < chunk; i++) {
-            float xl = eq_process_sample(&s_eq_rt, 0,
-                                         (float)src[2 * i] * AUDIO_INV_32768);
-            float xr = eq_process_sample(&s_eq_rt, 1,
-                                         (float)src[2 * i + 1] * AUDIO_INV_32768);
-            pcm_buf[2 * i]     = audio_f32_to_s32(xl * gain_f * AUDIO_S32_SCALE);
-            pcm_buf[2 * i + 1] = audio_f32_to_s32(xr * gain_f * AUDIO_S32_SCALE);
+        if (s_eq_rt.band_count == 0 && gain_q16 == AUDIO_REPLAY_GAIN_UNITY) {
+            /* 整数快路径：与下面浮点路径逐位等价。band_count=0 时 EQ 直通且
+               不乘预增益；unity 增益精确为 1.0f；int16/32768 × 2^31 = int16×65536，
+               结果在 int32 范围内，不需要 Clamp。用乘法避免负数左移的 UB。 */
+            for (size_t i = 0; i < chunk * 2; i++) {
+                pcm_buf[i] = (int32_t)src[i] * 65536;
+            }
+        } else {
+            /* 统一浮点路径（EQ 关闭但增益非 1.0 时也走这里）：
+               int16 → float 归一化 → EQ（预增益+级联）→ ×回放增益 → Clamp →
+               int32 左对齐。EQ/增益叠加超幅的样本在此被 Clamp 而非回绕 */
+            for (size_t i = 0; i < chunk; i++) {
+                float xl = eq_process_sample(&s_eq_rt, 0,
+                                             (float)src[2 * i] * AUDIO_INV_32768);
+                float xr = eq_process_sample(&s_eq_rt, 1,
+                                             (float)src[2 * i + 1] * AUDIO_INV_32768);
+                pcm_buf[2 * i]     = audio_f32_to_s32(xl * gain_f * AUDIO_S32_SCALE);
+                pcm_buf[2 * i + 1] = audio_f32_to_s32(xr * gain_f * AUDIO_S32_SCALE);
+            }
         }
         size_t bytes = chunk * 2 * sizeof(int32_t);
         size_t written = 0;

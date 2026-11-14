@@ -9,36 +9,29 @@
 #include "esp_log.h"
 
 /* 第三方解码库：minimp3 / dr_flac 的实现分别在 *_impl.c；
-   stb_vorbis 没有独立的头文件，直接在本编译单元包含其 .c（声明+实现）。 */
+   OGG 使用 Tremor（libvorbisidec，定点整数 Vorbis，纯 C）。 */
 #include "minimp3_ex.h"
 #include "dr_flac.h"
-#include "stb_vorbis.c"
+#include "ivorbisfile.h"
+#include "ogg/ogg_alloc.h"
 
 static const char *TAG = "audio_dec";
 
-/* stb_vorbis 默认用 malloc 分配码本/解码缓冲；ESP-IDF 的
-   CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16KB 会让其中大量小块落进内部 RAM。
-   实测打开 OGG 后内部 RAM 从约 125KB 掉到 14KB、DMA 只剩 355B，随后
-   SD 读的 allocate_dma_buf 失败，表现为播放卡顿/坏曲。这里给它一个 PSRAM
-   分配区（stb_vorbis_alloc），把 setup 与临时缓冲整体移出内部 RAM。 */
-#define OGG_ALLOC_BUF_SIZE   (1024 * 1024)
-/* stb_vorbis 文件模式内部用 fgetc 逐字节取数据；ESP-IDF 默认 stdio 缓冲很小，
-   会退化成大量小 SD 读，表现为 OGG 卡顿且 CPU 占用不高。文件流路径给它
-   512KB 缓冲（一个 OGG 页最大约 64KB，可覆盖多页），分配失败再退回 64KB。 */
-#define OGG_IO_BUF_SIZE      (512 * 1024)
-#define OGG_IO_BUF_FALLBACK  (64 * 1024)
-/* 小/中等 OGG 直接整文件读入 PSRAM 解码：stb_vorbis 的文件模式内部是 fgetc
-   逐字节，在 SD/FATFS 上很容易卡顿。这里不再写死 12MB：按当前 PSRAM 最大
-   连续空闲块动态判断（保留 2MB 给 LVGL/封面/解码器），上限 14MB；超过则走
-   带 512KB 缓冲的文件流。 */
-#define OGG_MEMORY_MAX      (14 * 1024 * 1024)
-#define OGG_MEMORY_RESERVE  (2 * 1024 * 1024)
+/* 解码器 stdio 读缓冲：MP3/FLAC 16KB，OGG 64KB。缓冲放 PSRAM，减少
+   FATFS 小读，同时不挤占内部 RAM。 */
+#define DECODER_IO_BUF_SIZE (16 * 1024)
+#define OGG_IO_BUF_SIZE     (64 * 1024)
 
 typedef struct {
     FILE *fp;
     mp3dec_ex_t ex;
     mp3dec_io_t io;
 } mp3_stream_t;
+
+typedef struct {
+    FILE *fp;
+    drflac *dec;
+} flac_stream_t;
 
 struct audio_decoder {
     audio_dec_type_t type;
@@ -47,13 +40,28 @@ struct audio_decoder {
     uint64_t total_frames;
     union {
         mp3_stream_t mp3;
-        drflac *flac;
-        stb_vorbis *vorbis;
+        flac_stream_t flac;
+        OggVorbis_File vorbis;
     } u;
-    char *vorbis_io_buf;   /* stb_vorbis 的 stdio 缓冲（close 时释放） */
-    uint8_t *vorbis_data;  /* 小 OGG 整文件内存（close 时释放） */
-    void *vorbis_alloc_buf;/* stb_vorbis setup/temp 的 PSRAM 分配区（close 时释放） */
+    char *io_buf;   /* MP3/FLAC/OGG 共用的 stdio 缓冲（close 时释放） */
 };
+
+/* fopen 后、任何流 I/O 前调用；失败返回 NULL（继续无缓冲读写） */
+static char *attach_io_buf(FILE *fp, size_t size)
+{
+    char *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = malloc(size);
+    }
+    if (!buf) {
+        return NULL;
+    }
+    if (setvbuf(fp, buf, _IOFBF, size) != 0) {
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
 
 static size_t mp3_read_cb(void *buf, size_t size, void *user_data)
 {
@@ -65,6 +73,34 @@ static int mp3_seek_cb(uint64_t position, void *user_data)
 {
     FILE *fp = (FILE *)user_data;
     return fseek(fp, (long)position, SEEK_SET) == 0 ? 0 : -1;
+}
+
+static size_t flac_read_cb(void *user_data, void *out, size_t bytes)
+{
+    return fread(out, 1, bytes, (FILE *)user_data);
+}
+
+static drflac_bool32 flac_seek_cb(void *user_data, int offset,
+                                  drflac_seek_origin origin)
+{
+    int whence;
+    switch (origin) {
+    case DRFLAC_SEEK_SET: whence = SEEK_SET; break;
+    case DRFLAC_SEEK_CUR: whence = SEEK_CUR; break;
+    case DRFLAC_SEEK_END: whence = SEEK_END; break;
+    default: return DRFLAC_FALSE;
+    }
+    return fseek((FILE *)user_data, offset, whence) == 0 ? DRFLAC_TRUE : DRFLAC_FALSE;
+}
+
+static drflac_bool32 flac_tell_cb(void *user_data, drflac_int64 *cursor)
+{
+    long pos = ftell((FILE *)user_data);
+    if (pos < 0) {
+        return DRFLAC_FALSE;
+    }
+    *cursor = (drflac_int64)pos;
+    return DRFLAC_TRUE;
 }
 
 static const char *ext_of(const char *path)
@@ -112,6 +148,8 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
             free(dec);
             return NULL;
         }
+        char *io_buf = attach_io_buf(m->fp, DECODER_IO_BUF_SIZE);
+
         fseek(m->fp, 0, SEEK_END);
         long file_size = ftell(m->fp);
         fseek(m->fp, 0, SEEK_SET);
@@ -129,6 +167,7 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
             snprintf(err, err_len, "MP3 打开失败（错误 %d）", ret);
             mp3dec_ex_close(&m->ex);
             fclose(m->fp);
+            free(io_buf);
             free(dec);
             return NULL;
         }
@@ -139,6 +178,7 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
             snprintf(err, err_len, "MP3 无有效音频帧");
             mp3dec_ex_close(&m->ex);
             fclose(m->fp);
+            free(io_buf);
             free(dec);
             return NULL;
         }
@@ -151,19 +191,36 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
                                   ((uint64_t)m->ex.info.bitrate_kbps * 1000);
             dec->total_frames = duration_s * dec->sample_rate;
         }
+        dec->io_buf = io_buf;
         ESP_LOGI(TAG, "MP3 stream opened: %s %uHz %uch (%llu frames est)",
                  path, (unsigned)dec->sample_rate, (unsigned)dec->channels,
                  (unsigned long long)dec->total_frames);
     } else if (type == AUDIO_DEC_FLAC) {
-        dec->u.flac = drflac_open_file(path, NULL);
-        if (!dec->u.flac) {
-            snprintf(err, err_len, "FLAC 解码器打开失败");
+        flac_stream_t *f = &dec->u.flac;
+        f->fp = fopen(path, "rb");
+        if (!f->fp) {
+            snprintf(err, err_len, "无法打开文件");
             free(dec);
             return NULL;
         }
-        dec->sample_rate = dec->u.flac->sampleRate;
-        dec->channels = dec->u.flac->channels;
-        dec->total_frames = dec->u.flac->totalPCMFrameCount;
+        char *io_buf = attach_io_buf(f->fp, DECODER_IO_BUF_SIZE);
+
+        /* 不用 drflac_open_file()：它内部自己 fopen，无法 setvbuf。
+           自定义回调下 drflac_close() 不会 fclose，需由本模块关闭 fp。 */
+        f->dec = drflac_open(flac_read_cb, flac_seek_cb, flac_tell_cb,
+                             f->fp, NULL);
+        if (!f->dec) {
+            snprintf(err, err_len, "FLAC 解码器打开失败");
+            fclose(f->fp);
+            f->fp = NULL;
+            free(io_buf);
+            free(dec);
+            return NULL;
+        }
+        dec->sample_rate = f->dec->sampleRate;
+        dec->channels = f->dec->channels;
+        dec->total_frames = f->dec->totalPCMFrameCount;
+        dec->io_buf = io_buf;
         ESP_LOGI(TAG, "FLAC stream opened: %s %uHz %uch %llu frames",
                  path, (unsigned)dec->sample_rate, (unsigned)dec->channels,
                  (unsigned long long)dec->total_frames);
@@ -174,137 +231,35 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
             free(dec);
             return NULL;
         }
-        fseek(fp, 0, SEEK_END);
-        long file_size = ftell(fp);
-        rewind(fp);
 
-        int error = 0;
+        char *io_buf = attach_io_buf(fp, OGG_IO_BUF_SIZE);
 
-        /* stb_vorbis 的默认 malloc 会吃内部 RAM/DMA（实测打开后 DMA 仅剩
-           355B，SD 读随即失败）。给它一块 PSRAM，setup/temp 全部从这里分配；
-           分配失败才退回库内部 malloc（行为与修改前一致，但会打警告）。 */
-        uint8_t *vorbis_alloc_buf = heap_caps_malloc(
-            OGG_ALLOC_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (vorbis_alloc_buf == NULL) {
-            ESP_LOGW(TAG, "OGG PSRAM allocator (%u B) failed, fallback to internal malloc",
-                     (unsigned)OGG_ALLOC_BUF_SIZE);
-        }
-        stb_vorbis_alloc vorbis_alloc = {
-            .alloc_buffer = (char *)vorbis_alloc_buf,
-            .alloc_buffer_length_in_bytes = vorbis_alloc_buf
-                                                ? OGG_ALLOC_BUF_SIZE : 0,
-        };
-        const stb_vorbis_alloc *vorbis_alloc_arg =
-            vorbis_alloc_buf ? &vorbis_alloc : NULL;
+        /* OGG 解码的所有堆分配走 1MB PSRAM 专用堆：默认 malloc 会吃光
+           内部 DMA 池，导致 sdmmc_read_blocks 分配 DMA 缓冲失败、整轨中断。 */
+        ogg_psram_alloc_init();
 
-        /* 路径 1：能放进 PSRAM 的文件整块读入，用 memory 解码（无 fgetc/SD 小读）。
-           阈值按当前最大连续空闲块动态计算，避免固定 12MB 在 PPA/LVGL 占用后
-           误判为"必须走文件流"。 */
-        const size_t free_largest = heap_caps_get_largest_free_block(
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        size_t mem_limit = OGG_MEMORY_MAX;
-        if (free_largest > OGG_MEMORY_RESERVE) {
-            const size_t usable = free_largest - OGG_MEMORY_RESERVE;
-            if (mem_limit > usable) {
-                mem_limit = usable;
-            }
-        } else {
-            mem_limit = 0;
-        }
-        if (file_size > 0 && (size_t)file_size <= mem_limit) {
-            uint8_t *data = heap_caps_malloc((size_t)file_size,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!data) {
-                data = malloc((size_t)file_size);
-            }
-            if (data) {
-                size_t got = fread(data, 1, (size_t)file_size, fp);
-                if (got == (size_t)file_size) {
-                    dec->u.vorbis = stb_vorbis_open_memory(data, (int)file_size,
-                                                           &error, vorbis_alloc_arg);
-                    if (dec->u.vorbis) {
-                        dec->vorbis_data = data;
-                        dec->vorbis_alloc_buf = vorbis_alloc_buf;
-                        vorbis_alloc_buf = NULL;
-                        fclose(fp);
-                        fp = NULL;
-                    } else {
-                        free(data);
-                    }
-                } else {
-                    free(data);
-                }
-            }
-            if (!dec->vorbis_data) {
-                ESP_LOGW(TAG, "OGG memory path failed: file=%ld B, largest PSRAM=%u B (limit=%u), fallback file stream",
-                         file_size, (unsigned)free_largest, (unsigned)mem_limit);
-            }
-        }
-
-        /* 路径 2：大文件/内存分配失败 → 带大缓冲的文件流（仍走 stb_vorbis 的
-           fgetc，但 512KB 缓冲把 SD 小读压到很低，避免原来的 64KB 反复换页）。 */
-        if (!dec->u.vorbis && fp) {
-            rewind(fp);
-            size_t io_size = OGG_IO_BUF_SIZE;
-            char *io_buf = heap_caps_malloc(io_size,
-                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!io_buf) {
-                io_buf = malloc(io_size);
-            }
-            if (!io_buf) {
-                io_size = OGG_IO_BUF_FALLBACK;
-                io_buf = heap_caps_malloc(io_size,
-                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            }
-            if (!io_buf) {
-                io_buf = malloc(io_size);
-            }
+        /* 成功时 ov_clear() 负责 fclose(fp)；失败时 Tremor 不会关闭文件，
+           需要在这里自行 fclose。 */
+        int ret = ov_open(fp, &dec->u.vorbis, NULL, 0);
+        if (ret != 0) {
+            snprintf(err, err_len, "OGG Vorbis 打开失败（错误 %d）", ret);
+            fclose(fp);
             if (io_buf) {
-                if (setvbuf(fp, io_buf, _IOFBF, io_size) != 0) {
-                    ESP_LOGW(TAG, "OGG setvbuf(%u B) failed, use default stdio buffer",
-                             (unsigned)io_size);
-                    free(io_buf);
-                    io_buf = NULL;
-                }
-            }
-            /* close_on_free=1：stb_vorbis 关闭时负责 fclose；打开失败时内部
-               vorbis_deinit 也会关闭，故失败路径不要再 fclose。 */
-            dec->u.vorbis = stb_vorbis_open_file(fp, 1, &error, vorbis_alloc_arg);
-            /* close_on_free=1：成功由 stb_vorbis 关闭；失败时其内部
-               vorbis_deinit 也会关闭。两种情况 fp 都已交出，置 NULL 防重复 close。 */
-            fp = NULL;
-            if (dec->u.vorbis) {
-                dec->vorbis_io_buf = io_buf;
-                dec->vorbis_alloc_buf = vorbis_alloc_buf;
-                vorbis_alloc_buf = NULL;
-            } else if (io_buf) {
                 free(io_buf);
             }
-        }
-
-        if (!dec->u.vorbis) {
-            snprintf(err, err_len, "OGG Vorbis 打开失败（错误 %d）", error);
-            if (fp) {
-                fclose(fp);
-            }
-            free(vorbis_alloc_buf);
             free(dec);
             return NULL;
         }
 
-        stb_vorbis_info info = stb_vorbis_get_info(dec->u.vorbis);
-        dec->sample_rate = info.sample_rate;
-        dec->channels = info.channels;
-        dec->total_frames = stb_vorbis_stream_length_in_samples(dec->u.vorbis);
-        ESP_LOGI(TAG, "OGG stream opened: %s %uHz %uch %llu frames (%s, file=%ld B, largest PSRAM=%u B, alloc=%s)",
+        vorbis_info *vi = ov_info(&dec->u.vorbis, -1);
+        dec->sample_rate = vi ? (uint32_t)vi->rate : 0;
+        dec->channels = vi ? (uint32_t)vi->channels : 0;
+        ogg_int64_t total = ov_pcm_total(&dec->u.vorbis, -1);
+        dec->total_frames = total > 0 ? (uint64_t)total : 0;
+        dec->io_buf = io_buf;
+        ESP_LOGI(TAG, "OGG/Tremor stream opened: %s %uHz %uch %llu frames",
                  path, (unsigned)dec->sample_rate, (unsigned)dec->channels,
-                 (unsigned long long)dec->total_frames,
-                 dec->vorbis_data ? "memory" : "file+buffered",
-                 file_size, (unsigned)free_largest,
-                 dec->vorbis_alloc_buf ? "PSRAM" : "internal");
-        ESP_LOGD(TAG, "OGG setup mem: setup=%u temp=%u",
-                 (unsigned)info.setup_memory_required,
-                 (unsigned)info.setup_temp_memory_required);
+                 (unsigned long long)dec->total_frames);
     }
 
     return dec;
@@ -326,18 +281,24 @@ int audio_decoder_read(audio_decoder_t *dec, int16_t *out, int max_frames)
     }
 
     if (dec->type == AUDIO_DEC_FLAC) {
-        drflac_uint64 n = drflac_read_pcm_frames_s16(dec->u.flac,
+        drflac_uint64 n = drflac_read_pcm_frames_s16(dec->u.flac.dec,
                                                      (drflac_uint64)max_frames,
                                                      out);
         return (int)n;
     }
 
     if (dec->type == AUDIO_DEC_OGG) {
-        int n = stb_vorbis_get_samples_short_interleaved(dec->u.vorbis,
-                                                         (int)dec->channels,
-                                                         out,
-                                                         max_frames * (int)dec->channels);
-        return n;
+        int bytes_req = max_frames * (int)dec->channels * (int)sizeof(int16_t);
+        int bitstream = 0;
+        long got = ov_read(&dec->u.vorbis, (char *)out, bytes_req, &bitstream);
+        /* 损坏页面会在流中产生 HOLE；跳过有限次数，避免坏块直接中断播放 */
+        for (int holes = 0; got == OV_HOLE && holes < 8; holes++) {
+            got = ov_read(&dec->u.vorbis, (char *)out, bytes_req, &bitstream);
+        }
+        if (got <= 0) {
+            return (int)got;
+        }
+        return (int)(got / (2 * (int)dec->channels));
     }
     return -1;
 }
@@ -354,13 +315,13 @@ esp_err_t audio_decoder_seek(audio_decoder_t *dec, uint32_t seconds)
     }
     if (dec->type == AUDIO_DEC_FLAC) {
         drflac_bool32 ok = drflac_seek_to_pcm_frame(
-            dec->u.flac, (drflac_uint64)seconds * dec->sample_rate);
+            dec->u.flac.dec, (drflac_uint64)seconds * dec->sample_rate);
         return ok ? ESP_OK : ESP_FAIL;
     }
     if (dec->type == AUDIO_DEC_OGG) {
-        int ok = stb_vorbis_seek(dec->u.vorbis,
-                                 (unsigned int)((uint64_t)seconds * dec->sample_rate));
-        return ok ? ESP_OK : ESP_FAIL;
+        int ok = ov_pcm_seek(&dec->u.vorbis,
+                             (ogg_int64_t)seconds * dec->sample_rate);
+        return ok == 0 ? ESP_OK : ESP_FAIL;
     }
     return ESP_ERR_INVALID_STATE;
 }
@@ -403,21 +364,16 @@ void audio_decoder_close(audio_decoder_t *dec)
         if (dec->u.mp3.fp) {
             fclose(dec->u.mp3.fp);
         }
-    } else if (dec->type == AUDIO_DEC_FLAC && dec->u.flac) {
-        drflac_close(dec->u.flac);
+    } else if (dec->type == AUDIO_DEC_FLAC) {
+        if (dec->u.flac.dec) {
+            drflac_close(dec->u.flac.dec);   /* 自定义回调不关 fp */
+        }
+        if (dec->u.flac.fp) {
+            fclose(dec->u.flac.fp);
+        }
     } else if (dec->type == AUDIO_DEC_OGG) {
-        if (dec->u.vorbis) {
-            stb_vorbis_close(dec->u.vorbis);   /* 文件模式会一并 fclose */
-        }
-        if (dec->vorbis_io_buf) {
-            free(dec->vorbis_io_buf);
-        }
-        if (dec->vorbis_data) {
-            free(dec->vorbis_data);
-        }
-        if (dec->vorbis_alloc_buf) {
-            free(dec->vorbis_alloc_buf);
-        }
+        ov_clear(&dec->u.vorbis);   /* 内部经 close 回调 fclose(fp) */
     }
+    free(dec->io_buf);
     free(dec);
 }

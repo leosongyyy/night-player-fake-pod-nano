@@ -17,9 +17,15 @@
 #include "core/utils/task_psram.h"
 
 #define PLAYER_PATH_MAX     512
-#define PLAYER_PCM_FRAMES   2048
-#define PLAYER_TASK_STACK   (24 * 1024)
-#define PLAYER_TASK_PRIO    6
+/* 每次解码 512 帧（≈11.6ms @44.1k），与 audio.c 的输出块一致：
+   小块高频写 I2S，缩短单次“解码→写”间隙，避免 80MHz 下 DMA 欠载。 */
+#define PLAYER_PCM_FRAMES   512
+/* Tremor 在首次解码时用 alloca 建 codebook 索引（约 8 字节/条目），
+   24KB 对高复杂度 OGG 偏紧；栈在 PSRAM，直接给足余量。 */
+#define PLAYER_TASK_STACK   (64 * 1024)
+/* 9：高于 LVGL(2)/deep_worker(6)/player_ctrl(5)，低于 lwIP/timer 等系统任务。
+   播放任务在 SD/I2S 上阻塞让出 CPU，不会忙等。 */
+#define PLAYER_TASK_PRIO    9
 #define PLAYER_TASK_CORE    1
 
 static const char *TAG = "mp3_player";
@@ -103,8 +109,13 @@ static void player_task(void *arg)
         goto cleanup;
     }
 
+    /* PCM 只有 512×2×2 = 2KB，优先内部 RAM，避开 PSRAM 读延迟 */
     pcm = heap_caps_malloc(sizeof(int16_t) * PLAYER_PCM_FRAMES * 2,
-                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!pcm) {
+        pcm = heap_caps_malloc(sizeof(int16_t) * PLAYER_PCM_FRAMES * 2,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
     if (!pcm) {
         pcm = malloc(sizeof(int16_t) * PLAYER_PCM_FRAMES * 2);
     }

@@ -54,12 +54,14 @@ esp_err_t audio_pcm_start(audio_fs_t fs);
 /**
  * @brief 写入交织的 16bit PCM 样本（[L0,R0,L1,R1,...]），阻塞直到送入 I2S DMA
  *
- * 处理链路（FUTURE_PLAN 第 10 点起统一浮点路径，EQ 关闭也走）：
- *   int16 → float（÷32768 归一化）→ [×EQ 预增益 → 最多 10 段 PeakEQ 级联
- *   （eq.h，开启时）] → ×回放增益（audio_set_replay_gain 的 16.16 定点系数
- *   缩放回线性 float）→ Clamp 到 int32 范围 → 左对齐 32bit slot 输出。
- *   ⚠ 浮点尾数 24bit 保留 16bit 内容 + 增益高 8 位小数精度；EQ/增益叠加
- *   超出 int32 的样本被 Clamp（防原整数路径"自然回绕"造成的爆音）。
+ * 处理链路：
+ *   常态走浮点：int16 → float（÷32768 归一化）→ [×EQ 预增益 → 最多 10 段
+ *   PeakEQ 级联（eq.h，开启时）] → ×回放增益（audio_set_replay_gain 的
+ *   16.16 定点系数缩放回线性 float）→ Clamp 到 int32 范围 → 左对齐 32bit
+ *   slot 输出。浮点尾数 24bit 保留 16bit 内容 + 增益高 8 位小数精度；EQ/增益
+ *   叠加超出 int32 的样本被 Clamp（防原整数路径"自然回绕"造成的爆音）。
+ *   旁路：EQ 关闭（band_count=0）且回放增益为 1.0 时，直接 int16×65536
+ *   输出 int32 左对齐样本，与浮点路径逐位等价，省掉逐样本浮点转换/EQ 调用。
  *
  * @param samples 交织样本数组
  * @param frames  帧数（每帧 = 左右各 1 个样本）
@@ -74,8 +76,9 @@ esp_err_t audio_pcm_write(const int16_t *samples, size_t frames);
  * @brief 设置回放增益（16.16 定点线性系数，65536 = 1.0 = 0dB）
  *
  * 切歌时由上层（player_controller）按歌曲元数据的 replaygain 调用，
- * 内部换算为 float 线性系数供 audio_pcm_write 浮点路径使用（EQ 之后、
- * Clamp 之前相乘）。0 或无效值会被钳位到默认 1.0。
+ * 内部换算为 float 线性系数供 audio_pcm_write 使用（EQ 之后、Clamp 之前
+ * 相乘）；1.0 且 EQ 关闭时 audio_pcm_write 走整数旁路。0 或无效值会被
+ * 钳位到默认 1.0。
  *
  * @param gain_q16 线性增益 × 65536（如 -6dB ≈ 0.5012 → 32854）
  */

@@ -20,10 +20,10 @@ typedef enum {
 typedef struct audio_decoder audio_decoder_t;
 
 /**
- * @brief 打开音频文件并创建流式解码器（不再整文件读入内存，无 32MB 限制）
+ * @brief 打开音频文件并创建流式解码器（不整文件读入内存）
  *
- * 支持 .mp3（minimp3，64KB 滑动缓冲）、.flac（dr_flac 文件流）、
- * .ogg（stb_vorbis 文件流，仅 Vorbis）。
+ * 支持 .mp3（minimp3，128KB IO 缓冲）、.flac（dr_flac 文件流）、
+ * .ogg（Tremor/libvorbisidec 定点解码，文件流，仅 Vorbis）。
  *
  * @param path    文件路径
  * @param err     失败原因输出（可为 NULL）
@@ -36,7 +36,7 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
  * @brief 读取交织 16bit PCM
  *
  * @param out        输出缓冲（至少 max_frames * channels 个 int16）
- * @param max_frames 最大帧数（建议 >= 2048，MP3 单帧最多 1152）
+ * @param max_frames 最大帧数（建议 >= 512；更小请求由解码器内部残帧缓冲承接）
  * @return 实际帧数；<=0 表示结束或错误
  */
 int audio_decoder_read(audio_decoder_t *dec, int16_t *out, int max_frames);

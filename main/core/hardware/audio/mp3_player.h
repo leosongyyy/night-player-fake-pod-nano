@@ -13,7 +13,7 @@ extern "C" {
  * @brief 本地播放器（MP3/FLAC/OGG Vorbis 流式解码 + 播放控制）
  *
  * 单曲播放：mp3_player_play() 启动 Core1 后台任务，按扩展名选择
- * minimp3 / dr_flac / stb_vorbis 解码并输出到 I2S。
+ * minimp3 / dr_flac / Tremor(OGG) 解码并输出到 I2S。
  * 提供暂停/恢复/停止/seek 控制与播放位置查询。
  */
 

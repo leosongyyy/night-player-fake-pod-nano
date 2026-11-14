@@ -1,6 +1,6 @@
 # MULTI_FORMAT_AUDIO — MP3 / FLAC / OGG 多格式流式播放
 
-> 2026-11 从 hello_world 测试固件反哺。本文记录解码层结构、格式限制、OGG 卡顿修复、息屏频率策略与验证状态。
+> 2026-11 从 hello_world 测试固件反哺。本文记录解码层结构、格式限制、OGG/Tremor、息屏 80MHz 与播放爆音修复的验证状态。
 
 ## 1. 背景
 
@@ -8,11 +8,13 @@
 
 | 格式 | 解码器 | 打开方式 |
 |---|---|---|
-| MP3 | minimp3（`minimp3_ex`） | `mp3dec_ex_open_cb()` 文件回调流，`MP3D_DO_NOT_SCAN \| MP3D_SEEK_TO_SAMPLE` |
-| FLAC | dr_flac | `drflac_open_file()` 文件流 |
-| OGG Vorbis | stb_vorbis | 能放进 PSRAM 连续空闲块时整块读入 + `stb_vorbis_open_memory()`；否则走 512KB stdio 缓冲的文件流（分配失败回退 64KB）。**stb_vorbis 的 setup/temp 内存统一由 1MB PSRAM 分配区提供**，不再使用内部 malloc。 |
+| MP3 | minimp3（`minimp3_ex`） | `mp3dec_ex_open_cb()` + 16KB stdio 读缓冲，`MP3D_DO_NOT_SCAN \| MP3D_SEEK_TO_SAMPLE` |
+| FLAC | dr_flac | 自定义 read/seek/tell 回调 + 16KB stdio 读缓冲（可 setvbuf，close 时自行 fclose） |
+| OGG Vorbis | **Tremor / libvorbisidec** | `ov_open()` 文件流 + 64KB stdio 读缓冲；仅 Vorbis |
 
-第三方单文件库内置在 `main/core/audio_decoders/`，不依赖组件管理器。Helix 托管依赖已从 `main/idf_component.yml` 删除。
+Tremor 是 **定点整数** Vorbis 解码器，配 libogg 容器库；源码在 `components/tremor` 与 `components/libogg`。OGG 的所有堆分配通过 `ogg_psram_alloc_init()` 的 **1MB PSRAM 专用 arena**（`multi_heap`），不再使用默认 `malloc`。
+
+Helix 托管依赖已从 `main/idf_component.yml` 删除；旧的 `main/core/audio_decoders/stb_vorbis.c` 已移除。
 
 ## 2. 支持范围与限制
 
@@ -37,61 +39,68 @@ esp_err_t audio_decoder_seek(audio_decoder_t *dec, uint32_t seconds);
 void audio_decoder_close(audio_decoder_t *dec);
 ```
 
-- 输出统一为交织 16bit PCM，一次最多读 2048 帧。
-- MP3 无 Xing/VBR 头时按首帧码率估算总时长，保证进度条和“自然播完”判断正常。
+- 输出统一为交织 16bit PCM；播放任务每次请求 **512 帧**。
+- MP3 无 Xing/VBR 头时按首帧码率估算总时长。
+- OGG 用 `ov_read()`；遇到 `OV_HOLE`（损坏页）最多跳过 8 次，避免坏块直接中断整轨。
+- OGG seek 使用 `ov_pcm_seek()`；FLAC 使用 `drflac_seek_to_pcm_frame()`；MP3 用样本位置 seek。
 - seek 由各解码器按样本位置执行；MP3 首次 seek 可能需要建索引。
 
-## 4. 播放任务
+## 4. 播放任务与爆音修复
 
-`core/hardware/audio/mp3_player.c` 保留原 API（`play/pause/resume/stop/seek`、位置/时长查询、停止回调、回放增益），内部改为：
+`core/hardware/audio/mp3_player.c` 保留原 API（`play/pause/resume/stop/seek`、位置/时长查询、停止回调、回放增益），关键参数：
 
-- 单任务 `mp3_play`（Core1，优先级 6），**24KB PSRAM 栈**，不再使用 75KB PCM ringbuf 和独立 `mp3_out` consumer 任务。
-- 解码 → 单声道复制 → `audio_pcm_write()` 直接写 I2S；`audio_pcm_write` 内部完成 EQ 与回放增益。
+- 单任务 `mp3_play`（Core1，**优先级 9**，**64KB PSRAM 栈**）；Tremor 首次解码的 codebook 索引需要较大栈。
+- 每次解码 **512 帧**（约 11.6ms @44.1k），PCM 缓冲 2KB 优先放内部 RAM，失败再退 PSRAM。
+- 不再使用 75KB PCM ringbuf 和独立 `mp3_out` consumer 任务。
+- 解码 → 单声道复制 → `audio_pcm_write()` 直接写 I2S；EQ 与回放增益在 `audio_pcm_write` 内处理。
 - 暂停/seek 时先 `audio_pcm_stop()`，恢复/seek 完成后 `audio_pcm_start()`。
-- 切歌时等待旧任务完全退出（最长 3s），再启动新任务；停止回调在新任务可安全启动前调用（先置 IDLE、清任务句柄）。
-- EQ 状态在新曲开始前 `eq_reset_state()`；回放增益在新曲解码器打开后应用。
+- 切歌时等待旧任务完全退出（最长 3s），再启动新任务；停止回调在新任务可安全启动前调用。
 
-### 与旧实现的差异 / 风险
+`core/hardware/audio/audio.c` 的爆音修复：
 
-- 去掉了 Helix 的 MP3 帧合法性门禁（连续两帧校验）与 CBR 字节比例 seek，改由 minimp3 处理损坏帧与样本 seek。
-- 去掉了 75KB ringbuf 的缓冲解耦；抗 SD 抖动依赖 I2S DMA 与解码读取速度。
-- `audio_decoders` 与第三方库内部的临时分配默认走内部堆（播放任务自身的 24KB 栈在 PSRAM）；烧录后需用 `mem_monitor` 观察播放期间内部 RAM 波动。
-- 因此反哺后必须回归：普通/损坏 MP3、FLAC、OGG、暂停恢复、seek、切歌、坏曲连续跳过、EQ 切换、回放增益、息屏播放。
+- **I2S DMA 加深到 8 × 511 帧（约 93ms @44.1k）**，并在 `i2s_new_channel()` 前显式写入 `chan_cfg.dma_desc_num/frame_num`；511 是为避开单描述符 4092 字节上限（512×8=4096 会被截断）。
+- 切采样率时用覆盖整条 DMA 链的静音 preload；preload 不足时打警告。
+- `audio_pcm_write` 在 **EQ 关闭且回放增益为 1.0** 时走整数快路径：`int16 × 65536` 直接输出 int32，与浮点路径逐位等价，减少逐样本浮点/EQ 调用；其它情况仍走原浮点 + Clamp 路径。
+- 这些改动与 80MHz 息屏一起消除了低频下 I2S DMA 欠载产生的爆音/咔哒。
 
-## 5. OGG 卡顿修复与息屏频率
+## 5. OGG/Tremor 与内存
 
-OGG 在 SD 上卡顿的根因是 stb_vorbis 文件模式内部 `fgetc` 逐字节读取，CPU 占用不高但 SD 小读极多。处理：
+之前 stb_vorbis 的默认 `malloc` 会把约 100KB 码本/解码缓冲放进内部 RAM；实测打开 OGG 后 DMA 只剩 355B，SD 读 `allocate_dma_buf` 随即失败，表现为持续卡顿/坏曲。
 
-- 优先把整文件读入 PSRAM，用 `stb_vorbis_open_memory()` 解码；
-- 阈值不再写死 12MB：按当前 PSRAM **最大连续空闲块**动态判断（保留 2MB 给 LVGL/封面/解码器，上限 14MB）。这样 12~14MB 的 OGG 或 PSRAM 稍紧时也能优先走内存路径，而不是固定阈值直接掉到 `fgetc`；
-- **stb_vorbis 默认 `malloc` 会把约 100KB 码本/解码缓冲放进内部 RAM**（IDF 的 `SPIRAM_MALLOC_ALWAYSINTERNAL=16KB` 导致大量小块落内部堆），实测打开 OGG 后 DMA 只剩 355B，随后 SD 读 `allocate_dma_buf` 失败——这才是原项目持续卡顿的直接原因。现在通过 `stb_vorbis_alloc` 传入 **1MB PSRAM 分配区**，setup/temp 内存全部移出内部 RAM；分配失败才退回库内部 malloc 并打警告。本机样本实测 setup 需求约 **190~203KB**，1MB 足够；宿主端用 `stb_vorbis_open_memory()` 正常解码验证通过。
-- 超过可用内存时走文件流，stdio 缓冲从 64KB 提升到 **512KB**（可覆盖多个 OGG 页），分配失败再回退 64KB；
-- 文件流日志会打印 `file=... largest PSRAM=... alloc=PSRAM/internal`，方便判断当前走的是 `memory` 还是 `file+buffered`，以及 stb_vorbis 内存落在哪。
-- 如果仍卡顿，先看串口这行：
-  `OGG stream opened: ... (memory/file+buffered, file=... B, largest PSRAM=... B, alloc=PSRAM/internal)`；
-  `memory` 仍卡说明不是 SD 读取问题，应继续查 CPU/PSRAM 总线/音频输出；`file+buffered` 则说明文件太大或 PSRAM 连续块不足。
-- 息屏播放时 CPU 固定 **320MHz**（`power_service` 每秒按 `mp3_player_get_state()` 切换）；暂停/停止后回落到 **160MHz** 省电。
+现在：
 
-亮屏固定 320MHz。原息屏 80MHz 对 OGG/FLAC 会欠载，已废弃。
+- `ogg_psram_alloc_init()` 建立 **1MB PSRAM arena**（失败时逐块 PSRAM 回退），libogg/Tremor 的 `_ogg_malloc/calloc/realloc/free` 全部走它；
+- OGG 文件通过 64KB stdio 缓冲流式读取，不再整文件读入 PSRAM；
+- 打开日志：`OGG/Tremor stream opened: ...`；arena 初始化日志：`OGG arena ready: 1MB PSRAM ...`；
+- 这样 OGG 解码不再挤占 SDMMC/I2S 依赖的内部 DMA 池。
 
-## 6. 构建
+## 6. 息屏频率
 
-`main/CMakeLists.txt`：
+- 亮屏固定 **320MHz**；
+- 息屏统一固定 **80MHz**（播放/暂停/停止不再区分频点）。Tremor 是定点解码，80MHz 下仍能实时解码；I2S DMA 已加深到约 93ms，吸收低频抖动；
+- 不再有 160MHz 空闲档和 320MHz 播放档；`power_service` 每秒只做低电保护与自动息屏检查。
 
-- 加入 `core/audio_decoders/audio_decoder.c`、`minimp3_impl.c`、`dr_flac_impl.c`；
-- 对这三个源文件设置 `-w`，避免第三方库的未使用变量等警告被 `-Werror` 拦下；
-- `core/music/cover_art.c` 与播放器改动在同一提交。
+## 7. 构建
 
-`main/idf_component.yml` 删除 `chmorgan/esp-libhelix-mp3`；`dependencies.lock` 同步移除。根 `CMakeLists.txt` 不再需要 `esp_ringbuf`（新播放器无 ringbuf；IDF 仍可能因其它依赖把它拉进构建，属正常）。
+- 根 `CMakeLists.txt` 的 `COMPONENTS` 白名单加入 `tremor`；`tremor` 通过 `REQUIRES libogg` 自动带入 `libogg`。
+- `components/libogg`：bitwise/framing/ogg_psram_alloc，固定 `-O2`。
+- `components/tremor`：定点 Vorbis 解码，固定 `-O2 -fno-strict-aliasing`。
+- `main/CMakeLists.txt` 仍编译 minimp3/dr_flac 单文件库并对其关警告；`stb_vorbis.c` 已删除。
+- 不再需要整文件 OGG PSRAM 分配，因此没有 `OGG_MEMORY_MAX`/512KB 文件流分支。
 
-## 7. 验证状态
+## 8. 验证状态
 
-- 本仓库：ESP-IDF 6.1 编译通过（app 0x295220，分区余量 57%）。
-- stb_vorbis 分配器宿主测试：56KB / 557KB OGG 样本均能打开并解码，`setup_memory_required` 约 190~203KB，1MB PSRAM 分配区足够。
-- hello_world 测试固件：MP3/FLAC/OGG 真机播放、>32MB 文件、OGG 息屏卡顿修复已验证。
-- 反哺到本仓库后尚未重新烧录真机；烧录后按 §4 的回归清单逐项确认。
+- 本仓库：ESP-IDF 6.1 编译通过（app 0x2A2BC0，分区余量 56%）。
+- hello_world 测试固件：Tremor OGG 播放、80MHz 息屏、I2S DMA 加深与爆音修复已在真机验证。
+- 反哺到本仓库后尚未重新烧录真机；烧录后重点回归：
+  - MP3/FLAC/OGG 播放与切歌；
+  - 损坏 OGG 页（`OV_HOLE`）跳过；
+  - 暂停/恢复/seek；
+  - 息屏播放无爆音、无卡顿；
+  - EQ 开启/关闭与回放增益非 1.0 时仍正常；
+  - 坏曲连续跳过、SD 读无 `allocate_dma_buf` 失败。
 
-## 8. 相关文档
+## 9. 相关文档
 
 - `PLAYLIST_SCAN_SUMMARY.md`：曲库扫描与指纹。
 - `COVER_ART.md`：内嵌/目录封面。

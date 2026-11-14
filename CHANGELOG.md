@@ -2,8 +2,9 @@
 
 ### 新功能
 1. **开机自动曲库发现**：pldata 头部保存 SD 卡 ID、曲库指纹与文件数（v2 引入，v3 随多格式递增）；开机自动判断换卡、增删歌曲、改名与 `.pl` 歌单变化，必要时自动重扫，不再需要用户手动点「开始扫描」。指纹探针优先使用 `d_type`，790 首实测约 161ms；曲库无变化时直接进入主界面。
-2. **MP3/FLAC/OGG 多格式播放**：新增统一流式解码层（minimp3 / dr_flac / stb_vorbis），移除 Helix 依赖；支持 32k/44.1k/48k、单/双声道与按样本 seek。OGG 的 stb_vorbis setup/temp 内存改用 1MB PSRAM 分配区（避免吃空内部 RAM/DMA 导致 SD 读失败），整文件优先读 PSRAM（按最大连续空闲块动态判断，最多 14MB），否则走 512KB 缓冲文件流（回退 64KB）；息屏播放保持 320MHz，暂停/停止后降到 160MHz。
+2. **MP3/FLAC/OGG 多格式播放**：新增统一流式解码层（minimp3 / dr_flac / libogg+Tremor），移除 Helix 与 stb_vorbis；支持 32k/44.1k/48k、单/双声道与按样本 seek。OGG 改为 Tremor 定点解码，所有解码堆分配走 1MB PSRAM 专用 arena，避免吃空内部 RAM/DMA 导致 SD 读失败；息屏统一固定 80MHz（播放/暂停不再区分频点）。
 3. **内嵌/目录封面**：`.npd` 优先，缺失时读取 MP3 ID3 APIC/PIC、FLAC PICTURE、OGG Vorbis 注释，再回退同目录 cover.jpg；软件 JPEG 解码放宽到 4096 并自动 1/2、1/4 缩放，非 460×460 封面居中裁切/留边。
+4. **播放爆音修复**：I2S DMA 加深到 8×511 帧（约 93ms），解码块缩到 512 帧并将 PCM 缓冲优先放内部 RAM；MP3/FLAC 增加 16KB stdio 缓冲、FLAC 改自定义文件回调；EQ 关闭且回放增益 1.0 时走整数快路径，播放任务优先级提到 9。
 
 ### Bug 修复
 1. **扫描任务栈实际只有 8KB**：`xTaskCreatePinnedToCore` 的栈单位是字节，原调用多除了 4；现改为真正的 32KB（失败回退 16KB），并新增「扫描失败」页，避免读取/写入失败时带着空列表进入主界面。

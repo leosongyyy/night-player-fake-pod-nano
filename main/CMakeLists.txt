@@ -147,8 +147,9 @@ idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS "." "core" "ui")
 
-# 第三方单文件解码库（minimp3/dr_flac/stb_vorbis）含有未使用变量等警告，
-# 关闭这些文件的警告，避免被 IDF 的 -Werror 拦下。
+# 第三方单文件解码库（minimp3/dr_flac）含有未使用变量等警告，
+# 关闭这些文件的警告，避免被 IDF 的 -Werror 拦下。OGG 的 Tremor/libogg
+# 是独立组件，已在各自 CMakeLists 内固定 -O2 并屏蔽第三方告警。
 set_source_files_properties(
     "core/audio_decoders/audio_decoder.c"
     "core/audio_decoders/minimp3_impl.c"
