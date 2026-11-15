@@ -198,13 +198,14 @@ static void sync_ui_close(void)
     ESP_LOGI(TAG, "sync ui closed");
 }
 
-/* 结束去向：注册了回调（对时固件）→ 交给回调（它会写结果并重启回播放器）；
+/* 结束去向：注册了回调（里世界）→ 交给回调（它把界面收掉、回功能列表）；
    否则关闭界面回原界面（播放器角色的旧行为）。 */
 static void finish_now(void)
 {
     if (s_done_cb != NULL) {
         time_sync_ui_done_cb_t cb = s_done_cb;
-        s_done_cb = NULL;      /* 只回调一次（回调里可能直接 esp_restart） */
+        /* ⚠ 不清空注册：里世界里对时可以反复做（每次结束都回功能列表）。
+           回调执行完 s_finished=true，不会重复进入这里。 */
         s_running = false;
         s_finished = true;
         s_visible = false;
@@ -356,6 +357,18 @@ static void sync_task(void *arg)
 void time_sync_ui_set_done_cb(time_sync_ui_done_cb_t cb)
 {
     s_done_cb = cb;
+}
+
+void time_sync_ui_dismiss(void)
+{
+    if (s_root == NULL) {
+        return;
+    }
+    /* 复用关闭路径：隐藏全屏层、清掉自动关闭定时器与取消标志、恢复息屏计时。
+       ⚠ 不取消正在跑的任务——本函数只在"结果已经出来、回调方要显示自己的
+       界面"时调用（里世界的对时回调）。 */
+    sync_ui_close();
+    ESP_LOGI(TAG, "sync ui dismissed by caller");
 }
 
 bool time_sync_ui_start(void)

@@ -6,7 +6,7 @@
 #   nvs      @ 0x9000   (0x6000 = 24KB)        配置/用户数据
 #   phy_init @ 0xF000   (0x1000 = 4KB)         射频校准数据
 #   factory  @ 0x10000  (0x300000 = 3MB)       应用固件：**主播放器**（日常跑的就是它）
-#   ota_0    @ 0x310000 (0x280000 = 2.5MB)     应用固件：**WiFi对时专用固件**（双固件方案）
+#   ota_0    @ 0x310000 (0x280000 = 2.5MB)     应用固件：**里世界固件**（WiFi对时 + USB传歌，双固件方案）
 #   otadata  @ 0x590000 (0x2000 = 8KB)         OTA 启动选择（bootloader 据此决定启动哪个 app）
 #   font     @ 0x600000 (6MB)                  NPF1 位图全字库镜像 system.npf，**裸二进制、无文件系统**
 #   pldata   @ 0xC00000 (4MB)                  播放列表数据结构分区（锚定在**最尾部**）
@@ -20,23 +20,26 @@
 #    app 之后而不是紧跟 phy_init —— 0x10000 放 otadata 会逼着 factory 挪到 0x20000，白丢 64KB。
 # 4) nvs / phy_init / font / pldata 的偏移**不要动**：动了就丢用户配置/字体/播放列表。
 #
-# ---------- 双固件（2026-11-15）：为什么有 factory + ota_0 两个 app 分区 ----------
-# 目标：WiFi 对时的那套协议栈（esp_wifi/lwip/wpa_supplicant）不再常驻主固件——它要多吃
-# 约 27KB 内部 RAM（静态）+ 65KB（运行时），是蓝牙之后 UI 帧率的主要挤压来源。
-# 方案：主播放器留在 factory（日常启动），另做一个**只做对时的最小固件**放 ota_0；
-# 需要网络对时时由播放器写 otadata 切过去，对时固件启动第一件事就是**把 otadata 擦掉**
-# （= 下次一定回 factory），然后联网写 RTC，最后重启回播放器。
+# ---------- 双固件（2026-11）：为什么有 factory + ota_0 两个 app 分区 ----------
+# 目标：WiFi 对时的协议栈（esp_wifi/lwip/wpa_supplicant）与 USB 传歌的设备栈
+# （TinyUSB MSC）都不再常驻主固件——前者要多吃约 27KB 内部 RAM（静态）+ 65KB
+# （运行时），后者要独占 SD 卡并常驻端点缓冲，都是蓝牙之后 UI 帧率/DMA 余量的
+# 主要挤压来源。
+# 方案：主播放器（表世界）留在 factory（日常启动），另做一个**里世界固件**放
+# ota_0：界面是「WiFi对时 / USB传歌」功能列表 + 「回到表世界」。表世界里点这两
+# 个功能时写 otadata 切过去，里世界启动第一件事就是**把 otadata 擦掉**
+# （= 任何意外复位都回 factory），然后等用户选功能，最后点「回到表世界」重启。
 #   · 用的是 IDF **标准 bootloader 自带的 OTA 槽机制**，不需要自定义 bootloader；
-#   · 两个固件必须用**同一份分区表**，各自把自己烧到对应槽（播放器 `idfc flash` 到
-#     factory，对时固件手工 `esptool write_flash 0x310000`，见 DUAL_APP_TIME_SYNC.md §5）；
-#   · RTC 是外置芯片（PCF85063A），天然跨固件共享 —— 这是本方案成立的前提；
-#   · 代价：只多一个 OTA 槽，所以对时固件必须**手工**烧到 0x310000（idf.py flash 不会写它）。
-# 完整调研、切换流程、风险与验证清单见 ideas_and_exps/DUAL_APP_TIME_SYNC.md。
+#   · 两个固件必须用**同一份分区表**，各自把自己烧到对应槽（表世界 `idfc flash`
+#     到 factory，里世界固件手工 `esptool write_flash 0x310000`，见 INNER_WORLD.md §5）；
+#   · RTC 是外置芯片（PCF85063A），天然跨固件共享；SD 卡是同一张卡（USB 传歌
+#     时由里世界独占）；
+#   · 代价：只多一个 OTA 槽，所以里世界固件必须**手工**烧到 0x310000（idf.py flash 不会写它）。
+# 完整调研、切换流程、风险与验证清单见 ideas_and_exps/INNER_WORLD.md。
 #
 # 尺寸核算：播放器镜像（debug）2,454,848 B，槽 3MB（3,145,728 B）→ 余约 690KB；
-#           对时固件按"WiFi 栈 ~650KB + LVGL 270KB + 应用/驱动 ~350KB"估算约 1.3~1.6MB，
-#           槽 2.5MB（2,621,440 B）。⚠ 播放器涨过 3MB 时：把 font 之前的空闲
-#           （0x592000~0x600000 的 440KB）划给 factory，并等量缩小 ota_0。
+#           里世界固件按"WiFi 栈 ~650KB + TinyUSB ~100KB + LVGL 270KB +
+#           应用/驱动 ~400KB"估算约 1.5~1.9MB，槽 2.5MB（2,621,440 B）。
 #
 # ---------- 构建时的体积检查（看到 "1/2 app partitions are too small" 别慌） ----------
 # IDF 的 check_sizes 把**当前构建的 app 镜像**与分区表里**所有** app 分区逐一比较：
@@ -46,7 +49,7 @@
 #   · 播放器（release 约 2.66MB）超出 ota_0 的 2.5MB 时会出现
 #     "Warning: 1/2 app partitions are too small ... Part 'ota_0' (overflow …)"
 #     ——**这是预期现象**，播放器只烧 factory（3MB），永远不进 ota_0；
-#   · 对时固件（*只*烧 ota_0）必须 ≤ 2.5MB：超了同样只是 Warning，但真烧到
+#   · 里世界固件（*只*烧 ota_0）必须 ≤ 2.5MB：超了同样只是 Warning，但真烧到
 #     0x310000 会溢出到 otadata（踩坏启动选择），所以每次构建 sync 后要看一眼体积。
 #
 # ---------- font 分区（NPF1 全字库，2026-11 起） ----------
@@ -86,12 +89,14 @@
 #   · font 内容整体换成 .npf，**必须重刷字体**（旧 TTF 所在 0x800000 现在落在 font 分区里，
 #     会被新镜像覆盖）；
 #   · 分区表变了 → 必须重刷分区表（idfc flash 会一并写入 0x8000），app 仍从 0x10000 开始。
-# 2026-11 第四次（双固件对时，本布局）：factory 5.9375M→3M，新增 ota_0（2.5M @0x310000）
+# 2026-11 第四次（双固件，本布局）：factory 5.9375M→3M，新增 ota_0（2.5M @0x310000）
 #   与 otadata（8KB @0x590000）；**font / pldata / nvs 全部不动** → 字体、播放列表、
 #   用户配置都不受影响，也不需要重刷字体。
 #   · 分区表变了 → **必须重刷一次分区表**（`idfc flash` 会写 0x8000）；
 #   · 播放器 app 仍从 0x10000 开始，所以"分区表 + 播放器"一起烧即可，行为不变；
-#   · ⚠ ota_0 里的对时固件**不在固件包里**，要单独 `esptool write_flash 0x310000`。
+#   · ⚠ ota_0 里的里世界固件**不在固件包里**，要单独 `esptool write_flash 0x310000`。
+# 2026-11 第五次（WiFi对时 → 里世界：加 USB 传歌）：**分区边界一律不动**，只改
+#   ota_0 里的内容（里世界固件多了 TinyUSB MSC）。里世界镜像仍在 2.5MB 内。
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xF000,   0x1000,

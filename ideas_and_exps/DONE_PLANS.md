@@ -2062,3 +2062,46 @@ debug / release 均重新构建通过（仅剩触摸驱动组件的既有 warnin
 
 **验证**：debug 构建通过、烧录后开机日志正常；待真机确认
 （连接/断开、切 EQ、删除确认时页面不再跳动，返回键行为不变）。
+
+## 55. 「里世界」固件：WiFi对时 + USB传歌 ✅ 已完成（2026-11，真机验证）
+
+**需求**：把原来只做 WiFi 对时的 `sync` 固件升级成「里世界」固件（烧 `ota_0`），
+除 WiFi 对时外新增 **USB 传歌**（USB Mass Storage，把 SD 卡当 U 盘）；表世界
+（主固件）里所有"需要在里世界完成"的功能统一用同一个确认弹窗
+「该功能需要前往「里世界」完成，点击确认重启到里世界。」；进入里世界后显示
+标题 + 功能列表（WiFi对时 / USB传歌）+ 底部「回到表世界」；主固件不再在启动时
+确认（Toast）WiFi 对时结果。参考桌面 OtoClock 的 USB MSC 实现。
+
+**实现**：
+- 新增 `core/system/inner_world_app.{c,h}`（里世界启动：**开机先擦 otadata** 回
+  表世界 → 最小初始化 → 功能列表）、`ui/inner_world_ui.{c,h}`（主界面 + USB 模式界面）、
+  `core/system/usb_msc.{c,h}`（SD 卡原始块设备 → TinyUSB MSC）；删除 `sync_app.*`。
+- `sd_card.c` 新增 `sd_card_raw_init()`：卸载 FATFS 后按同一套引脚/总线参数重新
+  初始化 SDMMC（不挂文件系统），把卡交给 MSC；`tinyusb_msc` 的 `do_not_format=true`
+  兜住"绝不自动格式化"。
+- 依赖托管组件 `espressif/esp_tinyusb ^2.0.1~1`（2.x 才支持 S31 的 HS/UTMI）；
+  `esp_tinyusb` 进 `COMPONENTS` 白名单（播放器不链接 → 镜像 0 符号）；
+  `sdkconfig.defaults.sync` 开 `CONFIG_TINYUSB_MSC_ENABLED=y` +
+  `CONFIG_TINYUSB_MSC_BUFSIZE=16384`（默认 512B 太慢）。
+- `ui/settings_menu.c`：旧「WiFi对时」专用弹窗改成统一 `inner_confirm_show(功能名)`，
+  设置根页新增「USB传歌」行，两个入口共用；`fw_switch` 删除 NVS 跨固件结果交接。
+- `time_sync_ui`：`done_cb` 不再被清掉（里世界可反复对时），新增
+  `time_sync_ui_dismiss()`（结果出来后隐藏全屏层、回列表）。
+- 调试设施改走 **idfc quickconfig**（不触发 reconfigure）：
+  `SYNC_AUTOSTART`（表世界开机自动切里世界）、`INNER_USB_AUTOSTART`
+  （里世界开机自动进 USB 传歌）。
+
+**验证**（debug + sync 真机）：
+- 表世界镜像 2,624,352 B（factory 3MB）、里世界 1,737,072 B（ota_0 余 34%）；
+  表世界 map 里 tinyusb 只有 `LOAD lib` 四行、0 个被引用成员。
+- 串口：表世界 App started 正常；quickconfig 切里世界后 ~1.5s 出功能列表，
+  `fw_switch: otadata erased` 生效。
+- USB 传歌：用户实测**反插**（OTG 面）后电脑识别为可移动磁盘，传输约 **8MB/s**；
+  传完点「回到表世界」重启正常，插回默认方向串口恢复。
+- ⚠ 硬件事实：USB-C 正反插是两个控制器（默认面 = USB 串口，翻面 = OTG），
+  里世界界面已提示翻面。
+
+**文档**：新增 `ideas_and_exps/INNER_WORLD.md`（取代/汇总
+`DUAL_APP_TIME_SYNC.md`，旧文保留为历史并加废弃提示）；同步更新 `AGENTS.md`、
+`README.md`、`CHANGELOG.md`、`partitions.csv`、`Kconfig.projbuild`、
+`sdkconfig.defaults.sync`、`idfc_buildconfig.json`、`tools/make_full_firmware.py`。

@@ -16,6 +16,15 @@ dependencies:
     version: "9.4.0"
     public: true
 
+  # 里世界固件的 USB 传歌（USB Mass Storage，把 SD 卡暴露成 U 盘）。
+  # 2.x 才有 tinyusb_msc 组件（tinyusb_msc.h）与 tinyusb_default_config.h，
+  # 且只有 2.x 的 TinyUSB 移植支持 ESP32-S31 的 USB OTG HS（UTMI PHY）。
+  # ⚠ 只有里世界固件（构建变体 sync）引用它：播放器镜像里不会出现任何
+  #   tinyusb 符号（组件被编进构建，但静态库成员没被引用就不会链接），
+  #   与 esp_wifi 那组组件的处理方式相同（见根 CMakeLists 白名单注释）。
+  espressif/esp_tinyusb:
+    version: "^2.0.1~1"
+
   # 系统字体为 NPF1 位图全字库（font 分区里的 spiffs/system.npf，运行时 mmap），
   # 不再依赖 espressif/freetype（2026-11 从 TTF 改回位图时删除）。
   #

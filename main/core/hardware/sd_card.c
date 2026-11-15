@@ -5,6 +5,7 @@
 
 #include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sd_protocol_defs.h"
@@ -156,7 +157,6 @@ esp_err_t sd_card_deinit(void)
     if (!s_mounted) {
         return ESP_OK;
     }
-
     /* 深睡前先取消选中卡（CMD7, RCA=0）→ 卡进入 Standby 状态，显著降低卡
        在 Transfer/active 态的高待命电流（实测无卡深睡比插卡低 ~15mA，
        卡未进 Standby 是主因）。唤醒后 sd_card_init() 重新初始化
@@ -185,4 +185,96 @@ esp_err_t sd_card_deinit(void)
     s_card = NULL;
     ESP_LOGI(TAG, "SD card unmounted, sdmmc host deinit");
     return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* 原始块设备模式（只有里世界的 USB 传歌用）                            */
+/* ------------------------------------------------------------------ */
+
+/* 原始模式下的卡句柄：本模块持有，不随 FATFS 挂载/卸载释放 */
+static sdmmc_card_t *s_raw_card = NULL;
+
+esp_err_t sd_card_raw_init(sdmmc_card_t **out_card)
+{
+    if (out_card == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_card = NULL;
+
+    if (s_raw_card != NULL) {
+        /* 同一次里世界生命周期里重复进入 USB 模式不会发生（进入后只能重启），
+           这里返回已有句柄并报状态错误，避免第二次 host.init 踩到已释放的资源 */
+        ESP_LOGW(TAG, "SD 卡已处于原始块设备模式，复用已有句柄");
+        *out_card = s_raw_card;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 已挂载 FATFS 时先卸载：电脑要直接读写扇区，固件这边不能再访问同一个
+       文件系统（两边同时读写会把 FAT 表写坏） */
+    if (s_mounted) {
+        esp_err_t err = sd_card_deinit();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "卸载 FATFS 失败，无法切换到原始模式：%s", esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    /* 与 sd_card_init() 完全相同的总线参数（引脚/位宽/频率）：
+       两处必须保持一致，否则同一张卡在两种模式下行为不同 */
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;   /* 40MHz */
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 4;
+    slot_config.clk = SD_MMC_CLK_PIN;
+    slot_config.cmd = SD_MMC_CMD_PIN;
+    slot_config.d0 = SD_MMC_D0_PIN;
+    slot_config.d1 = SD_MMC_D1_PIN;
+    slot_config.d2 = SD_MMC_D2_PIN;
+    slot_config.d3 = SD_MMC_D3_PIN;
+
+    esp_err_t ret = host.init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SDMMC host init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = sdmmc_host_init_slot(host.slot, &slot_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SDMMC slot init failed: %s", esp_err_to_name(ret));
+        goto fail_host;
+    }
+
+    /* 卡结构必须放内部 RAM：sdmmc 驱动会把它当作 DMA 描述信息的来源，
+       放 PSRAM 会在关缓存窗口/中断里踩到取指断言 */
+    sdmmc_card_t *card = heap_caps_calloc(1, sizeof(sdmmc_card_t),
+                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (card == NULL) {
+        ESP_LOGE(TAG, "为 sdmmc_card_t 分配内存失败");
+        ret = ESP_ERR_NO_MEM;
+        goto fail_host;
+    }
+
+    ret = sdmmc_card_init(&host, card);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SD 卡初始化失败（未插卡/坏卡/接触不良）：%s",
+                 esp_err_to_name(ret));
+        heap_caps_free(card);
+        goto fail_host;
+    }
+
+    s_raw_card = card;
+    *out_card = card;
+    ESP_LOGI(TAG, "SD 卡已切换到原始块设备模式：%s，%d 个 512 字节扇区",
+             card->cid.name, card->csd.capacity);
+    return ESP_OK;
+
+fail_host:
+    /* 与 IDF 示例一致：S31 的 sdmmc host 需要 deinit_p(slot) 才完整释放 */
+    if (host.flags & SDMMC_HOST_FLAG_DEINIT_ARG) {
+        host.deinit_p(host.slot);
+    } else if (host.deinit != NULL) {
+        (*host.deinit)();
+    }
+    return ret;
 }

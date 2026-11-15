@@ -16,7 +16,17 @@
 		{
 			"Name":"sync",
 			"ConfigFile":"sdkconfig.defaults.sync",
-			"Description":"WiFi对时专用固件（双固件方案）：烧到 ota_0 @0x310000，不能用 idfc flash！只能 esptool write_flash 0x310000 build/sync/FakePodNanoNightPlayer.bin。见 ideas_and_exps/DUAL_APP_TIME_SYNC.md。"
+			"Description":"「里世界」固件（双固件方案）：WiFi对时 + USB传歌。烧到 ota_0 @0x310000，不能用 idfc flash！只能 esptool write_flash 0x310000 build/sync/FakePodNanoNightPlayer.bin。见 ideas_and_exps/INNER_WORLD.md。"
+		}
+	],
+	"QuickConfigs":[
+		{
+			"Name":"SYNC_AUTOSTART",
+			"Description":"【调试】表世界开机 2 秒后自动切到里世界（验证 otadata 切换/里世界启动用）。由 idfc build -qc SYNC_AUTOSTART 临时启用，不走 Kconfig、不触发 reconfigure，验证完再普通 build 一次即可恢复。"
+		},
+		{
+			"Name":"INNER_USB_AUTOSTART",
+			"Description":"【调试】里世界开机后自动进入 USB 传歌模式（验证 USB MSC 栈用，没有触摸输入时也能跑）。由 idfc build -t sync -qc INNER_USB_AUTOSTART 临时启用。"
 		}
 	],
 	"DefaultBuildVariant":"debug"

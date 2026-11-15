@@ -7,18 +7,19 @@
     0x002000  bootloader.bin            （S31 的 bootloader 偏移是 0x2000，取自 flasher_args.json）
     0x008000  partition-table.bin
     0x010000  <项目名>.bin              （**播放器**固件，烧 factory，不含字体）
-    0x310000  build/sync/<项目名>.bin   （**WiFi对时固件**，烧 ota_0；缺省自动找，可 --no-sync 跳过）
+    0x310000  build/sync/<项目名>.bin   （**里世界固件**，烧 ota_0；缺省自动找，可 --no-sync 跳过）
     0x590000  ota_data_initial.bin      （**空白 otadata** → 启动 factory 里的播放器）
     0x600000  spiffs/system.npf         （NPF1 全字库，4.44MiB）
 
 因为 nvs(0x9000)、phy_init(0xF000)、pldata(0xC00000) 都在镜像范围内且为 0xFF，
 把它烧到 0x0 就等于"整片擦除后重刷"：配置(nvs)和播放列表(pldata)都会被清掉。
 
-⚠ 2026-11-15 起是**双固件**方案（见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）：
-播放器在 `factory`、WiFi对时固件在 `ota_0`，两者共用同一份 `partitions.csv`。
+⚠ 2026-11 起是**双固件**方案（见 ideas_and_exps/INNER_WORLD.md）：
+播放器（表世界）在 `factory`、里世界固件（WiFi对时 + USB传歌）在 `ota_0`，
+两者共用同一份 `partitions.csv`。
 本脚本默认把**两份都**合并进来（`build/sync/<项目名>.bin` 存在时）；
-没有对时固件时只提示不报错——那样装出来的机器点「WiFi对时」会提示"对时固件未烧录"，
-其余功能完全正常。
+没有里世界固件时只提示不报错——那样装出来的机器点「WiFi对时」/「USB传歌」
+会提示"里世界固件未烧录"，其余功能完全正常。
 
 ⚠ 2026-11 起系统字体是 **font 分区里的 NPF1 位图全字库**（运行时 mmap，见
 main/core/fonts/font_npf.c 与 ideas_and_exps/NPF_FONT.md），不再编译进固件、
@@ -29,7 +30,7 @@ main/core/fonts/font_npf.c 与 ideas_and_exps/NPF_FONT.md），不再编译进�
 用法（在项目根目录）：
 
     idfc build -t release
-    idfc build -t sync            # 想让全量固件带上对时固件时才需要
+    idfc build -t sync            # 想让全量固件带上里世界固件时才需要
     python tools/make_full_firmware.py -t release
 
 产物默认写到 dist/<项目名>_<variant>_full.bin，并附 .sha256。
@@ -105,16 +106,16 @@ def collect_segments(build_dir: Path, flasher: dict, partitions: dict,
             raise ValueError(f"字体镜像 {len(data)} B 超过 font 分区 {partitions['font']['size']} B")
         segments.append((partitions["font"]["offset"], str(font_path), data))
 
-    # 对时固件：放 ota_0（双固件方案的第二份 app）
+    # 里世界固件：放 ota_0（双固件方案的第二份 app）
     if sync_path is not None:
         if "ota_0" not in partitions:
-            raise ValueError("partitions.csv 里没有 ota_0 分区，无法合并对时固件")
+            raise ValueError("partitions.csv 里没有 ota_0 分区，无法合并里世界固件")
         data = sync_path.read_bytes()
         if not data or data[0] != 0xE9:
             raise ValueError(f"{sync_path} 不是 ESP 应用镜像（首字节不是 0xE9）")
         if len(data) > partitions["ota_0"]["size"]:
             raise ValueError(
-                f"对时固件 {len(data)} B 超过 ota_0 分区 {partitions['ota_0']['size']} B"
+                f"里世界固件 {len(data)} B 超过 ota_0 分区 {partitions['ota_0']['size']} B"
                 "（超了会踩坏 otadata，必须先把 ota_0 调大）")
         segments.append((partitions["ota_0"]["offset"], str(sync_path), data))
 
@@ -156,12 +157,12 @@ def verify_image(buf: bytearray, segments: list[tuple[int, str, bytes]], partiti
         ),
     ]
 
-    # 双固件：ota_0 里要么是合并进来的对时固件，要么必须是空的
+    # 双固件：ota_0 里要么是合并进来的里世界固件，要么必须是空的
     if "ota_0" in partitions:
         sync_off = partitions["ota_0"]["offset"]
         sync_size = partitions["ota_0"]["size"]
         if has_sync:
-            checks.append((f"对时固件 magic 0xE9 @0x{sync_off:X}", buf[sync_off] == 0xE9))
+            checks.append((f"里世界固件 magic 0xE9 @0x{sync_off:X}", buf[sync_off] == 0xE9))
         else:
             checks.append((f"ota_0 空置（0xFF）@0x{sync_off:X}",
                            all(b == 0xFF for b in buf[sync_off:sync_off + sync_size])))
@@ -197,7 +198,7 @@ def verify_image(buf: bytearray, segments: list[tuple[int, str, bytes]], partiti
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="把 bootloader / 分区表 / 播放器 / (对时固件) / otadata / 字体合并成单个全量固件（烧到 0x0）"
+        description="把 bootloader / 分区表 / 播放器 / (里世界固件) / otadata / 字体合并成单个全量固件（烧到 0x0）"
     )
     parser.add_argument("-t", "--variant", default="release", help="构建类型（debug/release，默认 release）")
     parser.add_argument("--build-dir", type=Path, default=None, help="构建目录，默认 build/<variant>")
@@ -205,9 +206,9 @@ def main() -> int:
                         help="NPF1 字体镜像，默认 spiffs/system.npf")
     parser.add_argument("--no-font", action="store_true", help="不合并字体（font 分区保持 0xFF）")
     parser.add_argument("--sync-image", type=Path, default=None,
-                        help="对时固件镜像；默认自动找 build/sync/<项目名>.bin（存在就合并进 ota_0）")
+                        help="里世界固件镜像；默认自动找 build/sync/<项目名>.bin（存在就合并进 ota_0）")
     parser.add_argument("--no-sync", action="store_true",
-                        help="不合并对时固件（ota_0 保持 0xFF；之后点「WiFi对时」会提示未烧录）")
+                        help="不合并里世界固件（ota_0 保持 0xFF；之后点「WiFi对时」/「USB传歌」会提示未烧录）")
     parser.add_argument("-o", "--output", type=Path, default=None, help="输出文件，默认 dist/<项目名>_<variant>_full.bin")
     args = parser.parse_args()
 
@@ -238,13 +239,13 @@ def main() -> int:
         output = ROOT / output
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # 对时固件（双固件方案）：默认去 build/sync 找同名镜像
+    # 里世界固件（双固件方案）：默认去 build/sync 找同名镜像
     sync_path: Path | None = None
     if not args.no_sync:
         if args.sync_image is not None:
             sync_path = args.sync_image if args.sync_image.is_absolute() else ROOT / args.sync_image
             if not sync_path.is_file():
-                print(f"错误：找不到对时固件 {sync_path}（先 `idfc build -t sync`，或用 --no-sync）",
+                print(f"错误：找不到里世界固件 {sync_path}（先 `idfc build -t sync`，或用 --no-sync）",
                       file=sys.stderr)
                 return 1
         else:
@@ -252,13 +253,13 @@ def main() -> int:
             if candidate.is_file():
                 sync_path = candidate
             else:
-                print(f"提示：没有找到对时固件 {candidate}，本次不合并 ota_0"
+                print(f"提示：没有找到里世界固件 {candidate}，本次不合并 ota_0"
                       f"（想带上就先 `idfc build -t sync`；或显式 --no-sync 消除本提示）")
 
     print(f"构建目录 : {build_dir}")
     print(f"Flash    : {fmt_bytes(flash_size)}")
     print(f"输出     : {output}")
-    print(f"对时固件 : {sync_path if sync_path is not None else '（不合并）'}\n")
+    print(f"里世界固件 : {sync_path if sync_path is not None else '（不合并）'}\n")
 
     segments = collect_segments(build_dir, flasher, partitions, font_path, sync_path)
 

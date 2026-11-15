@@ -81,7 +81,7 @@ set(COMPONENTS
 
     # ---- 网络对时（2026-11 新增 → 只给 sync 固件用） ----
     # 时间与日期 → WiFi对时：WiFi STA 连 AP + SNTP。
-    # ⚠ **2026-11-15 改为双固件方案**（见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）：
+    # ⚠ **2026-11 改为双固件方案**（见 ideas_and_exps/INNER_WORLD.md）：
     #   WiFi 协议栈不再进播放器固件（它常驻约 27KB 内部 RAM + 65KB 运行时峰值，
     #   是蓝牙之后 UI 帧率的主要挤压来源），而是放进独立的「对时固件」（烧在
     #   ota_0，构建变体 `sync`）。播放器只在需要时用 esp_ota_set_boot_partition()
@@ -94,16 +94,26 @@ set(COMPONENTS
     #   静态库成员不会被拉进最终镜像 → **Flash 与内部 RAM 占用为 0**，
     #   代价只是播放器构建时多编译这些组件（一次性的全量编译时间）。
     #   实测：加回这 5 个组件后播放器镜像大小/静态 RAM 与下线时**逐字节一致**
-    #   （见 DUAL_APP_TIME_SYNC.md §6 的验收记录）。
+    #   （见 INNER_WORLD.md §7 的验收记录）。
     esp_wifi                       # esp_wifi.h（STA 连接）
     esp_netif                      # esp_netif.h（默认 STA netif / DHCP）
     esp_event                      # esp_event.h（WiFi/IP 事件）
     lwip                           # esp_sntp.h / lwip/netdb.h（SNTP + DNS）
     wpa_supplicant                 # WPA2/WPA3 握手（esp_wifi 的实现依赖）
     # OTA 槽切换（双固件方案的核心）：esp_ota_set_boot_partition() 写 otadata。
-    # 播放器用它切到对时固件、对时固件用它切回 factory（= 擦 otadata）。
+    # 播放器用它切到里世界固件、里世界固件用它切回 factory（= 擦 otadata）。
     # 静态占一点 Flash（esp_ota_ops + esp_image_verify），RAM 可忽略。
     app_update                     # esp_ota_ops.h（esp_ota_set_boot_partition）
+
+    # ---- 里世界固件的 USB 传歌（2026-11 新增 → 只给 sync 固件用） ----
+    # USB Mass Storage：把 SD 卡原始块设备通过 TinyUSB MSC 暴露给电脑当 U 盘。
+    # 托管组件 espressif/esp_tinyusb（见 main/idf_component.yml），提供
+    # tinyusb.h / tinyusb_msc.h / tinyusb_default_config.h。
+    # ⚠ 与上面 WiFi 那组同理**必须无条件**留在白名单里：本列表在
+    #   include(project.cmake) 之前执行，拿不到 CONFIG_FIRMWARE_ROLE_SYNC；
+    #   而"编进构建"不等于"链接进镜像"——播放器没有任何代码引用 tinyusb，
+    #   静态库成员不会被拉进最终镜像（Flash/RAM 占用为 0）。
+    esp_tinyusb                    # USB MSC（里世界固件的 USB 传歌）
 
     # ---- 经典蓝牙音频（2026-11 新增，core/hardware/bt/） ----
     # A2DP Source（SBC，内部编码器）+ AVRCP CT（绝对音量）。Classic 只能走

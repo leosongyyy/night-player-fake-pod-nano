@@ -1,18 +1,12 @@
 #include "core/system/fw_switch.h"
 
 #include <stdio.h>
-#include <string.h>
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "nvs.h"
 
 static const char *TAG = "fw_switch";
-
-/* NVS：跨固件结果交接（对时固件写 → 播放器开机读一次并清除） */
-#define FW_NVS_NS       "tsync"
-#define FW_NVS_KEY_RES  "res"
 
 bool fw_role_is_sync(void)
 {
@@ -63,7 +57,7 @@ esp_err_t fw_switch_to_sync(void)
              (unsigned)p->address, (unsigned)p->size);
 
     /* ⚠ 会先做 ESP_IMAGE_VERIFY：槽里是 0xFF（没烧）或镜像损坏时返回
-       ESP_ERR_OTA_VALIDATE_FAILED，此时 otadata 不会被改动，播放器不受影响 */
+       ESP_ERR_OTA_VALIDATE_FAILED，此时 otadata 不会被改动，表世界不受影响 */
     esp_err_t err = esp_ota_set_boot_partition(p);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition(%s) failed: %s", p->label,
@@ -101,52 +95,6 @@ esp_err_t fw_switch_to_player(void)
     return ESP_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* 跨固件结果交接                                                       */
-/* ------------------------------------------------------------------ */
-
-void fw_sync_result_set_text(const char *text)
-{
-    if (text == NULL || text[0] == '\0') {
-        return;
-    }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(FW_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "nvs_open(%s): %s （对时结果无法交接给播放器）",
-                 FW_NVS_NS, esp_err_to_name(err));
-        return;
-    }
-    err = nvs_set_str(h, FW_NVS_KEY_RES, text);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
-    }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "store sync result failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "sync result stored: %s", text);
-    }
-    nvs_close(h);
-}
-
-bool fw_sync_result_take_text(char *buf, size_t len)
-{
-    if (buf == NULL || len < 2) {
-        return false;
-    }
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(FW_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return false;   /* 没有命名空间 = 从来没对时过，正常情况 */
-    }
-
-    size_t need = len;
-    err = nvs_get_str(h, FW_NVS_KEY_RES, buf, &need);
-    if (err == ESP_OK) {
-        /* 取到就清掉：只 Toast 一次 */
-        nvs_erase_key(h, FW_NVS_KEY_RES);
-        nvs_commit(h);
-    }
-    nvs_close(h);
-    return (err == ESP_OK);
-}
+/* 2026-11 删除「跨固件结果交接」（NVS "tsync/res"）：
+   表世界不再在开机时确认 WiFi 对时结果（用户要求），对时结果只在里世界
+   列表里显示，因此不需要跨固件传递文本了。 */

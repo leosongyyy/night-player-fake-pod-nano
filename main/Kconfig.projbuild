@@ -216,43 +216,53 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ 这不是固件编译时间（编译时间会随每次构建变化）。
 
     # ------------------------------------------------------------------
-    # 固件角色（双固件方案，2026-11-15；见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）
+    # 固件角色（双固件方案：表世界 / 里世界；见 ideas_and_exps/INNER_WORLD.md）
     # ------------------------------------------------------------------
     # 本工程同时产出两个固件，两者共用同一份 partitions.csv：
-    #   · 播放器固件（本项 = n，默认，`idfc build`）：烧到 factory @0x10000，
-    #     日常开机启动的就是它，里面没有 WiFi 协议栈（内部 RAM 全留给 LVGL/蓝牙）；
-    #   · 对时固件（本项 = y，`idfc build -t sync`）：烧到 ota_0 @0x310000，
-    #     只在"设置 → 时间与日期 → WiFi对时"时由播放器写 otadata 切过去。
-    # ⚠ sync 构建变体**绝不能**用 `idfc flash`（那会按分区表把对时固件写到
-    #   factory，覆盖播放器）；烧录用 esptool 手工写 0x310000。
+    #   · 表世界 / 播放器固件（本项 = n，默认，`idfc build`）：烧到 factory
+    #     @0x10000，日常开机启动的就是它，没有 WiFi 协议栈、没有 USB 设备栈
+    #     （内部 RAM 全留给 LVGL/蓝牙）；
+    #   · 里世界固件（本项 = y，`idfc build -t sync`）：烧到 ota_0 @0x310000，
+    #     提供 WiFi对时 + USB传歌 两个功能，界面是功能列表 + 「回到表世界」。
+    #     表世界里点这两类功能时弹统一确认窗，写 otadata 切过去。
+    # ⚠ sync 构建变体**绝不能**用 `idfc flash`（那会按分区表把里世界固件写到
+    #   factory，覆盖表世界）；烧录用 esptool 手工写 0x310000。
 
     config FIRMWARE_ROLE_SYNC
-        bool "构建「WiFi对时」专用固件（双固件方案，烧到 ota_0）"
+        bool "构建「里世界」固件（WiFi对时 + USB传歌，烧到 ota_0）"
         default n
         help
-            打开后产出的是**对时专用固件**：app_main 直接进 sync_app.c 的最小流程
-            （点亮屏幕 → 读 /sdcard/.ecov/wifi.txt → 连 WiFi → SNTP 取时 →
-            写 PCF85063A RTC → 重启回播放器），不编播放器/蓝牙/音频/播放列表
-            那一整套，但保留 LVGL 以复用已有的对时进度界面。
+            打开后产出的是**里世界固件**：app_main 进 inner_world_app.c 的
+            最小流程（点亮屏幕 → 功能列表），提供两个功能：
+              · WiFi对时：读 /sdcard/.ecov/wifi.txt → 连 WiFi → SNTP 取时 →
+                写 PCF85063A RTC → 回列表显示结果；
+              · USB传歌：把 SD 卡以原始块设备方式交给 TinyUSB MSC，电脑上
+                出现可移动磁盘，退出方式是重启（点「回到表世界」）。
+            不编播放器/蓝牙/音频/播放列表那一整套，但保留 LVGL 以复用现有
+            的界面与字体。
 
             为什么做成两个固件：esp_wifi/lwip/wpa_supplicant 常驻要多吃约
-            27KB 内部 RAM（静态）+ 65KB（运行时峰值），而播放器只在对时那一
-            刻才需要网络。把网络栈放进独立固件，播放器就能把内部 RAM 全留给
-            LVGL 绘制缓冲与蓝牙音频（UI 帧率的瓶颈就在这里）。
+            27KB 内部 RAM（静态）+ 65KB（运行时峰值），USB 设备栈也要常驻
+            缓冲与独占 SD 卡；而这两件事都只是偶尔用一次。放进里世界后表世界
+            就能把内部 RAM 全留给 LVGL 绘制缓冲与蓝牙音频（UI 帧率的瓶颈）。
 
             启动选择由 IDF 标准 bootloader 的 OTA 槽机制完成（otadata），
-            不需要自定义 bootloader。
+            不需要自定义 bootloader。里世界开机第一件事是擦 otadata，保证
+            任何意外复位/断电都回表世界。
 
     config FIRMWARE_SYNC_AUTOSTART
-        bool "【调试】开机自动切到对时固件（无人值守测试用）"
+        bool "【调试】开机自动切到里世界固件（验证切换用）"
         default n
         depends on !FIRMWARE_ROLE_SYNC
         help
-            开启后，播放器每次开机完成都会调用 fw_switch_to_sync() 重启进对时
-            固件；对时固件跑完会切回 factory，于是形成"播放器 → 对时 → 播放器"
-            的循环。用于没有触摸输入（远程调试、设备不在手边）时验证双固件
-            切换、otadata 写入、RTC 共享与回切是否正常。
-            ⚠ 正常固件绝不能开：会导致设备反复重启对时（只能重新烧录退出）。
+            开启后，表世界每次开机完成都会调用 fw_switch_to_sync() 重启进
+            里世界固件。用于没有触摸输入（远程调试、设备不在手边）时验证
+            otadata 写入与镜像有效性。
+
+            ⚠ 里世界**不会**自动重启回来（要用户点「回到表世界」），所以
+              原来的"播放器 ↔ 对时"自动循环不再成立；开这个选项后设备会停在
+              里世界界面，需要手动点按钮或重新烧录退出。
+            ⚠ 正常固件绝不能开。
 
     config FIRMWARE_VERSION_STRING
         string "固件版本号（显示在设置-关于页）"

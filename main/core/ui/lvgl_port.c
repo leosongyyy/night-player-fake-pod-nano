@@ -73,7 +73,7 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    "坏曲"）。/16 每块 460×28×2B≈25KB、双缓冲≈51KB，比 /10 省约 33KB DMA；
    代价是帧率略降（/20 约 20fps、/10 约 30fps，/16 约 25fps 量级）。
    【2026-11-15】WiFi对时从播放器里摘出去（改双固件方案：网络栈搬进 ota_0 的
-   对时固件，播放器这边省 ~27KB 内部 RAM，见 ideas_and_exps/DUAL_APP_TIME_SYNC.md）
+   对时固件，播放器这边省 ~27KB 内部 RAM，见 ideas_and_exps/INNER_WORLD.md）
    + LVGL/main 任务栈回收后改回 /10，目标是把帧率恢复到加蓝牙前的水平；
    同时把分配改成**逐级回退**（/10 → /12 → /16），万一连续块不够也不会 assert
    挂启动，只会降档并打印实际档位。 回退档位见下方 k_buf_divs。 */

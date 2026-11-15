@@ -1,38 +1,55 @@
 # ===========================================================================
-# 构建变体 `sync`：**WiFi对时专用固件**（双固件方案，烧到 ota_0 @0x310000）
+# 构建变体 `sync`：**「里世界」固件**（双固件方案，烧到 ota_0 @0x310000）
 # ---------------------------------------------------------------------------
-# 用途：只在「设置 → 时间与日期 → WiFi对时」时由播放器切过来跑一次——点亮屏幕
-# 显示进度 → 读 /sdcard/.ecov/wifi.txt → 连 WiFi → SNTP 取时 → 按 config_store
-# 的时区把 UTC 换算成墙钟写进 PCF85063A → 重启回播放器（factory）。
+# 用途：表世界里点「WiFi对时」或「USB传歌」时，弹统一确认窗，确认后写 otadata
+# 切到这里。里世界显示功能列表：
+#   · WiFi对时：读 /sdcard/.ecov/wifi.txt → 连 WiFi → SNTP 取时 → 按
+#     config_store 的时区把 UTC 换算成墙钟写进 PCF85063A → 回列表显示结果；
+#   · USB传歌：把 SD 卡以原始块设备方式交给 TinyUSB MSC，电脑上出现可移动
+#     磁盘（USB-C 需插 OTG 那一面，界面会提示翻面）。
+#   · 底部「回到表世界」→ esp_restart()（otadata 已被里世界开机擦掉 → 回 factory）。
 #
 # ⚠⚠ 这不是日常固件，**绝不能用 `idfc flash -t sync`**：那条命令会按当前构建
-#     的分区表把"对时固件"写到 factory（0x10000），覆盖播放器。烧它对时固件
-#     只能用 esptool 手工写 ota_0：
+#     的分区表把"里世界固件"写到 factory（0x10000），覆盖表世界。烧它只能用
+#     esptool 手工写 ota_0：
 #         esptool --chip esp32s31 -p COMx write_flash 0x310000 build/sync/FakePodNanoNightPlayer.bin
 #
 # 完整方案（分区布局、切换流程、风险、验证清单）见
-# ideas_and_exps/DUAL_APP_TIME_SYNC.md。
+# ideas_and_exps/INNER_WORLD.md。
 #
 # 配置链：sdkconfig.defaults;sdkconfig.defaults.sync（idfc 构建变体 sync）。
-# 只覆盖与播放器不同的项，其余（Flash/PSRAM/CPU/LVGL/字体/分区表/WiFi 调优）
+# 只覆盖与表世界不同的项，其余（Flash/PSRAM/CPU/LVGL/字体/分区表/WiFi 调优）
 # 全部沿用 sdkconfig.defaults。
 # ===========================================================================
 CONFIG_FIRMWARE_ROLE_SYNC=y
 
-# 蓝牙：对时固件完全不需要。关掉后 bt 组件几乎不编任何文件，也不再占内部 RAM
+# 蓝牙：里世界完全不需要。关掉后 bt 组件几乎不编任何文件，也不再占内部 RAM
 # （控制器初始化要一块 21KB 的连续内部 RAM）。
 CONFIG_BT_ENABLED=n
 
-# 调试设施全关：对时固件只看 wifi_time_sync / sync_app 自己的日志，不需要
-# 性能监视器与内存快照（两者都会拉起任务、拖慢启动）。
+# 调试设施全关：里世界只看 inner_world/usb_msc/wifi_time_sync 自己的日志，
+# 不需要性能监视器与内存快照（两者都会拉起任务、拖慢启动）。
 CONFIG_PERFORMANCE_MONITOR=n
 CONFIG_MEM_TRACE=n
 
-# 封面：对时固件没有任何封面/播放界面。关掉可省掉 423KB 的极速版封面
+# 封面：里世界没有任何封面/播放界面。关掉可省掉 423KB 的极速版封面
 # （sdkconfig.defaults 的公共默认是 y，debug 变体才是 n）。
 CONFIG_UI_COVER_FLASH=n
 
-# 主任务栈 16KB：app_main 里要用 lv_refr_now() 提交"对时界面"首帧（与播放器
-# 开机同一类深调用链，位图字体下约 6KB）。对时固件没有蓝牙/音频占内存，
-# 这点栈给得起；播放器那边才需要为绘制缓冲让路而压到 8KB。
+# 主任务栈 16KB：app_main 里要用 lv_refr_now() 提交"里世界首帧"（与表世界
+# 开机同一类深调用链，位图字体下约 6KB）。里世界没有蓝牙/音频占内存，这点
+# 栈给得起；表世界那边才需要为绘制缓冲让路而压到 8KB。
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# ---------------------------------------------------------------------------
+# USB 传歌（TinyUSB MSC）：把 SD 卡暴露成 U 盘
+# ---------------------------------------------------------------------------
+# 只有里世界编 MSC 类驱动；表世界不引用 tinyusb（组件被编进构建，但静态库
+# 成员没被引用就不会链接进镜像，占用为 0）。
+CONFIG_TINYUSB_MSC_ENABLED=y
+
+# MSC 端点缓冲（CFG_TUD_MSC_EP_BUFSIZE）默认 512B——那是"能跑"的下限，
+# U 盘拷歌会慢到几 MB/s 以下。里世界没有蓝牙/播放器抢内部 RAM，给到 16KB：
+# 每次批量传输从 512B 提升到 16KB，Windows 下大文件拷贝速度提升明显。
+# 若构建时报该配置项不存在（esp_tinyusb 版本变化），以组件 Kconfig 为准。
+CONFIG_TINYUSB_MSC_BUFSIZE=16384

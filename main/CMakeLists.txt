@@ -1,19 +1,20 @@
 # ============================================================================
-# 源码集合：双固件（播放器 / 对时）共用同一个工程
+# 源码集合：双固件（表世界 / 里世界）共用同一个工程
 # ----------------------------------------------------------------------------
 # 本工程产出**两个固件**，靠 CONFIG_FIRMWARE_ROLE_SYNC 区分（见
-# ideas_and_exps/DUAL_APP_TIME_SYNC.md）：
-#   · 播放器（默认，=n，`idfc build`）        ：SHARED + PLAYER，烧 factory @0x10000
-#   · 对时固件（=y，`idfc build -t sync`）    ：SHARED + SYNC，烧 ota_0 @0x310000
+# ideas_and_exps/INNER_WORLD.md）：
+#   · 表世界 / 播放器（默认，=n，`idfc build`）  ：SHARED + PLAYER，烧 factory @0x10000
+#   · 里世界（=y，`idfc build -t sync`）          ：SHARED + SYNC，烧 ota_0 @0x310000
+#     （构建变体名仍是 sync；功能是 WiFi对时 + USB传歌）
 #
-# 为什么要按角色拆：对时固件只有 2.5MB 槽位，而播放器那一整套（蓝牙/音频/播放
+# 为什么要按角色拆：里世界只有 2.5MB 槽位，而表世界那一整套（蓝牙/音频/播放
 # 控制/列表/各 UI 页面/封面）对它全部无用，编进去只白占 Flash（`--gc-sections`
-# 能丢函数，但整份源码+头文件仍要编一遍）；拆开后对时固件也不必链接
+# 能丢函数，但整份源码+头文件仍要编一遍）；拆开后里世界也不必链接
 # bt / esp-dsp / helix 等组件。
 #
 # ⚠ 拆分只影响**编译集合**：SHARED + PLAYER 的成员与拆分前逐项一致（连顺序都
-#   一致），所以播放器固件的行为/体积/内存不受影响（改动时请保持这个性质）。
-# ⚠ 对时固件漏了某个源文件时表现为链接期 undefined reference（不会静默变坏），
+#   一致），所以表世界固件的行为/体积/内存不受影响（改动时请保持这个性质）。
+# ⚠ 里世界漏了某个源文件时表现为链接期 undefined reference（不会静默变坏），
 #   按报错把文件补进 MAIN_SRCS_SYNC / MAIN_SRCS_SHARED 即可。
 # ============================================================================
 
@@ -21,7 +22,7 @@
 #      字体、配置存储、WiFi 对时核心与它的进度界面、跨固件切换 ----
 set(MAIN_SRCS_SHARED
     "main.c"
-    "core/system/fw_switch.c"      # otadata 切换 + 跨固件对时结果（NVS）
+    "core/system/fw_switch.c"      # otadata 切换（表世界 ↔ 里世界）
     "core/hardware/display.c"
     "core/hardware/touch.c"
     "core/hardware/axp2101.c"
@@ -102,9 +103,12 @@ set(MAIN_SRCS_PLAYER
     "ui/eq_popup.c"
     "ui/config_slot_popup.c")
 
-# ---- 只有对时固件要的：它的最小启动流程（点亮屏幕 → 对时 → 重启回播放器） ----
+# ---- 只有里世界固件要的：主界面 + 两个功能（WiFi对时复用 time_sync_ui，
+#      USB传歌是 usb_msc） + 它的最小启动流程 ----
 set(MAIN_SRCS_SYNC
-    "core/system/sync_app.c")
+    "core/system/inner_world_app.c"   # 里世界启动流程（擦 otadata → 最小初始化 → 主界面）
+    "core/system/usb_msc.c"           # USB 传歌：SD 卡 → USB MSC（TinyUSB）
+    "ui/inner_world_ui.c")            # 标题 + 功能列表 + 回到表世界
 
 set(MAIN_SRCS ${MAIN_SRCS_SHARED})
 if(CONFIG_FIRMWARE_ROLE_SYNC)

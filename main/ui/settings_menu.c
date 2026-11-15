@@ -1065,6 +1065,10 @@ static void bt_row_cb(lv_event_t *e)
    （子页懒加载，见上）。
    ⚠ 行数增加后根页面内容高度超过可视区（实测 6 行需 426px、可视 357px），
    页面会出现滚动条——这是预期行为，不再压缩行距。 */
+
+/* 「USB传歌」不是子页：点在根页直接弹统一确认窗（定义在下方） */
+static void usb_transfer_row_cb(lv_event_t *e);
+
 static void root_page_build(void)
 {
     /* ⚠ lv_menu_page_create 的 title 是 char*（非 const），内部会拷贝，
@@ -1093,6 +1097,11 @@ static void root_page_build(void)
        电源选项本轮先占位（空白页），后续会话继续写 */
     lazy_row_create(s_root_page, LV_SYMBOL_EDIT, "时间与日期",
                     NULL, time_date_page_build);
+    /* USB传歌（2026-11）：把 SD 卡当 U 盘连电脑，实际功能在里世界固件里做
+       （表世界没有 USB 设备栈）。点击 → 统一「前往里世界」确认弹窗 → 重启。 */
+    lv_obj_t *usb_row = menu_row_create(s_root_page, LV_SYMBOL_USB, "USB传歌", NULL);
+    lv_obj_add_flag(usb_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(usb_row, usb_transfer_row_cb, LV_EVENT_CLICKED, NULL);
     lazy_row_create(s_root_page, LV_SYMBOL_BATTERY_FULL, "电源选项",
                     NULL, power_page_build);
     lazy_row_create(s_root_page, LV_SYMBOL_KEYBOARD, "按键帮助",
@@ -1302,40 +1311,42 @@ static void time_date_time_row_cb(lv_event_t *e)
     time_date_popup_show_time();
 }
 
-/* ---- WiFi对时（双固件方案，2026-11-15） --------------------------------
-   点击「WiFi对时」→ 确认弹窗 → 把"下次启动"切到对时固件（ota_0）→ 重启。
+/* ---- 需要「里世界」完成的功能（2026-11 双固件方案的统一入口） -------------
+   表世界是日常播放器，不含 WiFi 协议栈、也不含 USB 设备栈；WiFi对时与
+   USB传歌都放进独立的**里世界固件**（构建变体 sync，烧在 ota_0）：
 
-   为什么不在播放器里直接对时：WiFi 协议栈（esp_wifi/lwip/wpa_supplicant）
-   常驻要多占约 27KB 内部 RAM（静态）+ 65KB（运行时峰值），是蓝牙之后把 UI
-   帧率压下去的主要原因；而播放器只在对时那一刻才需要网络。于是把网络放进
-   一个**独立的对时固件**（构建变体 sync，烧在 ota_0）：播放器一个字节都不给
-   WiFi，对时固件跑完自己重启回播放器（factory），并把结果写进 NVS —— 播放器
-  下次开机弹一条 Toast（见 main.c 的 report_sync_result）。
+     点功能行 → 统一确认弹窗 → 保存播放现场 → 写 otadata 切到 ota_0 → 重启
+     → 里世界（功能列表）→「回到表世界」→ esp_restart()（otadata 已被里世界
+       开机擦掉，重启即回 factory）
+   为什么不在表世界里直接做：WiFi 协议栈常驻约 27KB 内部 RAM（静态）+ 65KB
+   运行时峰值，USB MSC 也要常驻缓冲，都会挤占播放器的 UI 帧率与 DMA 余量；
+   而这两件事都只是"偶尔用一次"。放进里世界后表世界一个字节都不给它们。
 
-   RTC（PCF85063A）是外置芯片，天然跨固件共享，这是方案成立的前提。
-   完整调研、切换流程与验证清单见 ideas_and_exps/DUAL_APP_TIME_SYNC.md。 */
+   ⚠ 统一文案（用户要求）：所有"要去里世界"的功能都弹同一个窗，标题为功能名，
+     正文固定为「该功能需要前往「里世界」完成，点击确认重启到里世界。」。
+   完整方案、风险与验证清单见 ideas_and_exps/INNER_WORLD.md。 */
 
-static lv_obj_t *s_sync_confirm = NULL;   /* 确认弹窗根（遮罩）；NULL = 没显示 */
+static lv_obj_t *s_inner_confirm = NULL;   /* 确认弹窗根（遮罩）；NULL = 没显示 */
 
-static void sync_confirm_close(void)
+static void inner_confirm_close(void)
 {
-    if (s_sync_confirm != NULL) {
-        lv_obj_del(s_sync_confirm);
-        s_sync_confirm = NULL;
+    if (s_inner_confirm != NULL) {
+        lv_obj_del(s_inner_confirm);
+        s_inner_confirm = NULL;
     }
 }
 
-static void sync_confirm_cancel_cb(lv_event_t *e)
+static void inner_confirm_cancel_cb(lv_event_t *e)
 {
     (void)e;
-    sync_confirm_close();
+    inner_confirm_close();
 }
 
-/* 确认：保存播放现场 → 切启动分区 → 重启进对时固件 */
-static void sync_confirm_ok_cb(lv_event_t *e)
+/* 确认：保存播放现场 → 切启动分区 → 重启进里世界固件 */
+static void inner_confirm_ok_cb(lv_event_t *e)
 {
     (void)e;
-    sync_confirm_close();
+    inner_confirm_close();
 
     /* ⚠ 顺序：先把"播到哪 + 当前配置"落盘，再动 otadata。中途断在这里最多
        是"没切成"，不会丢播放现场（与关机保存走同一条路径）。 */
@@ -1344,32 +1355,33 @@ static void sync_confirm_ok_cb(lv_event_t *e)
 
     esp_err_t err = fw_switch_to_sync();
     if (err != ESP_OK) {
-        /* 最常见：ota_0 里没有有效镜像（对时固件还没烧进去）→ 校验失败 */
-        ESP_LOGW(TAG, "switch to sync firmware failed: %s", esp_err_to_name(err));
-        ui_toast_show("对时固件未烧录");
+        /* 最常见：ota_0 里没有有效镜像（里世界固件还没烧进去）→ 校验失败 */
+        ESP_LOGW(TAG, "switch to inner-world firmware failed: %s",
+                 esp_err_to_name(err));
+        ui_toast_show("里世界固件未烧录");
         return;
     }
-    ESP_LOGI(TAG, "switching to sync firmware (ota_0), restarting...");
+    ESP_LOGI(TAG, "switching to inner-world firmware (ota_0), restarting...");
     vTaskDelay(pdMS_TO_TICKS(150));   /* 让日志先出去（UART 缓冲） */
     esp_restart();
 }
 
 /* 点遮罩空白处 = 取消 */
-static void sync_confirm_mask_cb(lv_event_t *e)
+static void inner_confirm_mask_cb(lv_event_t *e)
 {
     (void)e;
-    sync_confirm_close();
+    inner_confirm_close();
 }
 
 /* 被别处删除时（理论上不会）清掉指针，避免悬垂 */
-static void sync_confirm_delete_cb(lv_event_t *e)
+static void inner_confirm_delete_cb(lv_event_t *e)
 {
     (void)e;
-    s_sync_confirm = NULL;
+    s_inner_confirm = NULL;
 }
 
 /* 弹窗按钮（150x48，底部对齐；accent = 黄底黑字） */
-static lv_obj_t *sync_dlg_btn(lv_obj_t *parent, const char *text, int32_t x_ofs,
+static lv_obj_t *inner_dlg_btn(lv_obj_t *parent, const char *text, int32_t x_ofs,
                               bool accent)
 {
     lv_obj_t *btn = lv_obj_create(parent);
@@ -1394,15 +1406,16 @@ static lv_obj_t *sync_dlg_btn(lv_obj_t *parent, const char *text, int32_t x_ofs,
     return btn;
 }
 
-/* 确认弹窗：挂 lv_layer_top（覆盖菜单与状态栏），点遮罩取消 */
-static void sync_confirm_show(void)
+/* 统一确认弹窗：挂 lv_layer_top（覆盖菜单与状态栏），点遮罩取消。
+   feature_name 只作为标题（"WiFi对时" / "USB传歌"），正文固定。 */
+static void inner_confirm_show(const char *feature_name)
 {
-    if (s_sync_confirm != NULL) {
+    if (s_inner_confirm != NULL) {
         return;
     }
 
     lv_obj_t *mask = lv_obj_create(lv_layer_top());
-    s_sync_confirm = mask;
+    s_inner_confirm = mask;
     lv_obj_set_size(mask, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
     lv_obj_set_pos(mask, 0, 0);
     lv_obj_set_style_bg_color(mask, lv_color_black(), 0);
@@ -1411,11 +1424,11 @@ static void sync_confirm_show(void)
     lv_obj_set_style_radius(mask, 0, 0);
     lv_obj_set_style_pad_all(mask, 0, 0);
     lv_obj_clear_flag(mask, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(mask, sync_confirm_mask_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(mask, sync_confirm_delete_cb, LV_EVENT_DELETE, NULL);
+    lv_obj_add_event_cb(mask, inner_confirm_mask_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(mask, inner_confirm_delete_cb, LV_EVENT_DELETE, NULL);
 
     lv_obj_t *panel = lv_obj_create(mask);
-    lv_obj_set_size(panel, 384, 236);
+    lv_obj_set_size(panel, 400, 250);
     lv_obj_center(panel);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x1E1E1E), 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
@@ -1426,7 +1439,7 @@ static void sync_confirm_show(void)
     lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);   /* 吞掉点击，不传给遮罩 */
 
     lv_obj_t *title = lv_label_create(panel);
-    lv_label_set_text(title, "WiFi对时");
+    lv_label_set_text(title, feature_name);
     lv_obj_set_style_text_font(title, UI_SYSTEM_FONT, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 22);
@@ -1436,23 +1449,30 @@ static void sync_confirm_show(void)
     lv_obj_set_style_text_color(body, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(body, 330);
-    lv_label_set_text(body, "将重启进入对时模式：\n蓝牙与播放会中断，完成后自动返回。");
-    lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 74);
+    lv_obj_set_width(body, 348);
+    lv_label_set_text(body, "该功能需要前往「里世界」完成，点击确认重启到里世界。");
+    lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 78);
 
-    lv_obj_t *cancel = sync_dlg_btn(panel, "取消", -82, false);
-    lv_obj_add_event_cb(cancel, sync_confirm_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cancel = inner_dlg_btn(panel, "取消", -82, false);
+    lv_obj_add_event_cb(cancel, inner_confirm_cancel_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *ok = sync_dlg_btn(panel, "开始对时", 82, true);
-    lv_obj_add_event_cb(ok, sync_confirm_ok_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ok = inner_dlg_btn(panel, "确认", 82, true);
+    lv_obj_add_event_cb(ok, inner_confirm_ok_cb, LV_EVENT_CLICKED, NULL);
 
-    ESP_LOGI(TAG, "sync confirm dialog shown");
+    ESP_LOGI(TAG, "inner-world confirm dialog shown: %s", feature_name);
 }
 
 static void time_date_sync_row_cb(lv_event_t *e)
 {
     (void)e;
-    sync_confirm_show();
+    inner_confirm_show("WiFi对时");
+}
+
+/* 设置根页「USB传歌」：与 WiFi 对时走完全相同的确认弹窗 */
+static void usb_transfer_row_cb(lv_event_t *e)
+{
+    (void)e;
+    inner_confirm_show("USB传歌");
 }
 
 static void time_date_tz_row_cb(lv_event_t *e)
@@ -1476,8 +1496,8 @@ static void time_date_fmt_row_cb(lv_event_t *e)
       设置日期 / 时间设置 / WiFi对时 / 时区设置 / 时间格式 五项，
       右侧显示当前值。
       日期/时间/时区点击后弹出滚轮弹窗（ui/time_date_popup.c）；
-      **WiFi对时 = 切到独立的对时固件**（2026-11-15 双固件方案）：点击先弹
-      确认，再写 otadata + 重启，见上方 time_date_sync_row_cb 的说明。
+      **WiFi对时 = 切到「里世界」固件**（2026-11 双固件方案）：点击先弹统一
+      确认窗，再写 otadata + 重启，见上方 time_date_sync_row_cb 的说明。
       RTC 里存的是本地墙钟时间，时区只影响网络对时的 UTC 换算；
       改时区时由弹窗把 RTC 平移，保持绝对时刻不变。 */
 static lv_obj_t *time_date_page_build(void)
@@ -1512,13 +1532,12 @@ static lv_obj_t *time_date_page_build(void)
     lv_obj_add_flag(fmt_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(fmt_row, time_date_fmt_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 说明行（2026-11-15 恢复对时功能后补回：旧版这里有一行长说明"WiFi对时可在
-       电脑版工具里配置"，下线期间改成了"暂未实现"，现在按双固件方案写清两件事——
-       ① WiFi 配置放哪；② 点下去会重启（免得用户以为是死机）。 */
+    /* 说明行：① WiFi 配置放哪；② 功能会重启进里世界（免得用户以为是死机），
+       做完点「回到表世界」才回来。 */
     menu_note_row_create(page,
         "* WiFi 名称/密码写在 SD 卡 .ecov/wifi.txt（第 3 行可选 NTP 服务器）");
     menu_note_row_create(page,
-        "* 对时会重启进入对时模式：蓝牙与播放中断，完成后自动返回");
+        "* WiFi对时在「里世界」里完成：点它会重启进去，对完点「回到表世界」返回");
 
     /* 弹窗保存/对时成功后刷新本页右侧状态 */
     time_date_popup_set_refresh_cb(menu_refresh_time_date);

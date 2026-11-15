@@ -1,0 +1,339 @@
+# 双固件：「表世界」播放器 + 「里世界」维护固件（2026-11）
+
+> 动机一（2026-11-15 已落地并真机验证）：WiFi 对时那套协议栈
+> （esp_wifi/lwip/wpa_supplicant）常驻要多吃约 **27KB 内部 RAM（静态）+
+> 65KB（运行时峰值）**，而内部 RAM 与 IRAM 是同一块 SRAM —— 蓝牙接入之后
+> 它就成了 UI 帧率的主要挤压来源。但播放器其实只在对时那一瞬间需要网络。
+>
+> 动机二（2026-11 新增）：**USB 传歌**（把 SD 卡当 U 盘连电脑）需要 USB 设备栈
+> （TinyUSB MSC）常驻端点缓冲，而且传歌时 SD 卡必须**独占**——与播放器
+> "一直在读卡放歌"的模型直接冲突。
+>
+> 做法：flash 里放**两个 app**。
+> - **表世界**（`factory` @0x10000）= 日常播放器，不含 WiFi 协议栈、不含 USB 栈；
+> - **里世界**（`ota_0` @0x310000）= 一个"停下来做维护"的最小固件：
+>   标题 + 功能列表（**WiFi对时 / USB传歌**）+ 底部「回到表世界」。
+>
+> 表世界里需要网络或需要独占 SD 卡的功能，统一弹同一个确认窗：
+> 「该功能需要前往「里世界」完成，点击确认重启到里世界。」
+> 确认后写 otadata → 重启进里世界；里世界开机第一件事是**擦掉 otadata**
+> （= 之后任何意外复位/断电都回表世界），用户做完点「回到表世界」重启回
+> `factory`。
+>
+> 结论：**不需要自定义 bootloader**，IDF 标准 bootloader 的 OTA 槽 + `otadata`
+> 就够；2026-11-15 已用旧版"对时固件"跑通往返，这次把它升级成里世界（新增
+> USB 传歌 + 常驻功能列表）。
+
+---
+
+## 1. 为什么不需要自定义 bootloader
+
+依据 IDF 6.1 源码（`components/bootloader_support/src/bootloader_utility.c`、
+`components/app_update/esp_ota_ops.c`）：
+
+| 行为 | 依据 |
+|---|---|
+| otadata 有效 → 启动它指向的 OTA 槽 | `bootloader_utility_get_selected_boot_partition()` |
+| otadata 空/无效 → 有 factory 就启动 factory，没有就 "No factory image, trying OTA 0" | 同上 |
+| 切启动分区前会**校验目标镜像**（`ESP_IMAGE_VERIFY`），不通过返回 `ESP_ERR_OTA_VALIDATE_FAILED` | `esp_ota_set_boot_partition()` |
+| 目标是 factory 时，`esp_ota_set_boot_partition()` = **擦掉 otadata**（等价"下次回 factory"） | `esp_ota_set_boot_partition_internal()` |
+| otadata 按 `type=data, subtype=ota` 查找，**位置任意**（不必固定在 0xE000） | `read_otadata()` 里的 `esp_partition_find_first()` |
+
+⚠ **一个必须知道的例外**：本机 `sdkconfig.defaults` 开了
+`CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON/ALWAYS=y`（换开机速度，不校验镜像）。
+所以"镜像坏了 bootloader 自动回退 factory"这条保险**在本机不生效**，安全完全靠
+**"里世界开机第一件事就擦 otadata"** 这条纪律 + `esp_ota_set_boot_partition()`
+写之前自己会校验目标镜像。**不要绕过 `fw_switch_*` 直接写 otadata。**
+
+---
+
+## 2. 最终分区布局
+
+原则不变（见 `partitions.csv` 顶部注释）：**pldata 留在最末尾、font/pldata 按 64KB
+对齐、nvs/phy_init/font/pldata 的偏移一律不动**——这次改动**不影响**播放列表、
+字体镜像与用户配置（不需要重刷字体、不需要重扫列表）。
+
+```
+nvs       data nvs      0x9000   0x6000     （不动）
+phy_init  data phy      0xF000   0x1000     （不动）
+factory   app  factory  0x10000  0x300000   # 3MB    表世界（播放器）
+ota_0     app  ota_0    0x310000 0x280000   # 2.5MB  里世界（WiFi对时 + USB传歌）
+otadata   data ota      0x590000 0x2000     # 8KB    启动选择
+font      data 0x41     0x600000 6M         （不动，4.44MiB 的 NPF1 字库）
+pldata    data 0x40     0xC00000 4M         （不动，锚定最尾部）
+```
+
+- app 分区必须 64KB 对齐，所以 otadata 放在两个 app **之后**：0x10000 处放 otadata
+  会逼着 factory 挪到 0x20000，白丢 64KB。
+- 0x592000~0x600000 还剩 0x6E000（约 440KB）没用，留给将来（factory 涨过 3MB 时把
+  这块划给它，并等量缩小 ota_0）。
+- **为什么 factory = 表世界**：① 播放器保持 0x10000 起始、保持 `factory` 语义 →
+  日常 `idfc flash` 的落点不变；② factory 是 bootloader 的最终兜底；③ 从里世界
+  切回来 = 擦 otadata（一个动作，无序号逻辑）；④ 代价只是里世界必须手工烧到
+  0x310000。
+
+### 2.1 构建时的体积检查（看到 Warning 别慌）
+
+IDF 的 `check_sizes.py` 会把**当前构建的 app 镜像**与分区表里**所有** app 分区比较：
+全部装不下才报错（Exit 1），只有一部分装不下只打 Warning。于是：
+
+| 构建 | 现象 | 说明 |
+|---|---|---|
+| 表世界 debug（约 2.36~2.5MB） | 正常 | 两个槽都装得下 |
+| 表世界 release（约 2.66MB） | `Warning: 1/2 app partitions are too small … Part 'ota_0' (overflow 0x29400)` | **预期**：表世界只烧 factory（3MB），永远不进 ota_0 |
+| 里世界（约 1.7~1.9MB） | 正常 | 必须 ≤ 2.5MB（超了会溢出到 otadata） |
+
+---
+
+## 3. 切换流程（关键：先回退，再干活）
+
+### 3.1 表世界侧（`ui/settings_menu.c`）
+
+两个入口（设置根页「USB传歌」、时间与日期页「WiFi对时」）都调用同一个
+`inner_confirm_show(feature_name)`：
+
+```c
+/* ① 弹统一确认窗：「该功能需要前往「里世界」完成，点击确认重启到里世界。」
+   ② 保存播放现场 ③ 切启动分区 ④ 重启 */
+player_controller_save_last_position();
+config_store_flush_pending(true);
+esp_err_t err = fw_switch_to_sync();      /* 内部会校验 ota_0 镜像 */
+if (err == ESP_OK) { esp_restart(); }
+else { ui_toast_show("里世界固件未烧录"); } /* ESP_ERR_OTA_VALIDATE_FAILED */
+```
+
+### 3.2 里世界侧（`core/system/inner_world_app.c`）
+
+```c
+fw_switch_to_player();   /* 开机第一件事 = 擦 otadata（只影响下次启动） */
+/* 之后才做耗时的初始化 + 显示功能列表 */
+```
+
+于是——里世界中途断电 / 崩溃 / 看门狗复位 / 用户直接按电源键关机，下次启动都是
+表世界（只是没完成对时/传歌）；不存在"卡在里世界反复重启"的状态。
+
+**⚠ 与旧对时固件的关键差别**：旧版跑完对时**自动**重启回表世界；里世界是常驻的
+功能列表，**不会自己重启**——退出只有两条路：
+1. 用户点底部「回到表世界」→ `esp_restart()`（otadata 已空 → 回 factory）；
+2. 用户按电源键关机再开（同样回 factory）。
+
+---
+
+## 4. 里世界界面与功能
+
+### 4.1 主界面（`ui/inner_world_ui.c`）
+
+```
+┌──────────────────────────┐
+│          里世界           │  标题（黄色，唯一的一行；没有副标题）
+│  ┌────────────────────┐  │
+│  │ WiFi对时     12:34  │  │  右侧：上次结果 / 当前时间
+│  ├────────────────────┤  │
+│  │ USB传歌     可传歌  │  │  右侧：SD 卡是否就绪
+│  └────────────────────┘  │
+│                          │
+│      [回到表世界]         │  底部按钮
+└──────────────────────────┘
+```
+
+- **WiFi对时**：点进后复用 `ui/time_sync_ui.c` 的全屏进度界面；结束（成功/失败/
+  取消）后由 `time_sync_ui_set_done_cb()` 回到列表，列表右侧显示
+  「成功 12:34 / 失败 / 已取消」，并 Toast 一条结果。回调**不清除**，可以反复对时。
+- **USB传歌**：点进后异步启动 USB 栈（`core/system/usb_msc.c`），界面（460×460）：
+  - 顶部两行（标题「USB传歌」y=24、副标题「SD 卡已作为 U 盘连接到电脑」y=60，
+    行高收紧）；
+  - 中间圆角信息卡（400×240 @y=100）：状态「等待电脑识别… / 电脑已连接，可以开始
+    传歌」+ 容量；
+  - 卡内底部两条提示**各占一整行、不换行**（label 不设宽度、按文本自适应居中）：
+    「若电脑未识别请把插头翻面」（硬件事实，见 §4.3）、
+    「传完请安全弹出再点下方按钮」；
+  - 底部「回到表世界」按钮（260×56，距卡片底约 36px，不再压住卡片/提示文字）。
+  进入后**不退出**（没有"退出 U 盘"按钮）：传完直接点「回到表世界」重启。
+  （2026-11 按用户截图反馈调整过布局：去掉主界面副标题、收紧 USB 界面顶部行高、
+  提示改单行、按钮与卡片留空隙。）
+- **回到表世界**：保存无需额外动作（里世界不改播放现场），直接 `esp_restart()`。
+
+### 4.2 USB 传歌（USB Mass Storage）
+
+实现见 `core/system/usb_msc.c` + `core/hardware/sd_card.c` 的 `sd_card_raw_init()`：
+
+1. 先 `sd_card_raw_init()`：若已挂载 FATFS 就 `sd_card_deinit()` 卸载，然后以
+   **原始块设备**方式重新初始化 SDMMC（与 `sd_card_init()` 相同的引脚/4-bit/40MHz）；
+2. `tinyusb_msc_new_storage_sdmmc()` 把 `sdmmc_card_t*` 注册为 MSC 介质
+   （`mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB`，不留给固件 FATFS）；
+3. `tinyusb_driver_install()` 安装 TinyUSB 设备栈（HS 模式：S31 的 OTG 有内置
+   UTMI PHY，`TUD_OPT_HIGH_SPEED` 下 MSC 端点 512B）；
+4. 电脑侧就是一个可移动磁盘（MSC READ10/WRITE10 由 esp_tinyusb 的 SCSI 层实现），
+   固件侧**不可**再访问 `/sdcard`。
+
+依赖：托管组件 `espressif/esp_tinyusb ^2.0.1~1`（提供 `tinyusb.h` /
+`tinyusb_msc.h` / `tinyusb_default_config.h`）；`CONFIG_TINYUSB_MSC_ENABLED=y`，
+`CONFIG_TINYUSB_MSC_BUFSIZE=16384` 只写在 `sdkconfig.defaults.sync`。
+
+> **为什么不用 OtoClock 那种"自己 fork msc_device.c + 运行时分配端点缓冲"的做法**：
+> 那是 TinyUSB 0.17 时代的项目内补丁（为了避免 32/64KB 静态缓冲常驻 IRAM）。
+> 本项目的表世界**根本不链接 TinyUSB**，缓冲只存在于里世界固件里，用官方
+> `esp_tinyusb` 2.x 的 MSC 组件即可，不必维护 fork。
+
+### 4.3 ⚠ 硬件事实：USB-C 正反插接的是两个控制器
+
+原理图（`devkit-fake_pod_nano_pro/hardware/FakePod_S31_Schematic_V1.0.pdf` 首页）：
+
+- Type-C 的 A6/A7（DP1/DN1）→ `ESP_USB_P/N` → SoC 的 **USB Serial JTAG**；
+- Type-C 的 B6/B7（DP2/DN2）→ `USB_DP/DN` → SoC 的 **USB OTG HS**（UTMI）。
+
+也就是官方 README 说的：「默认方向为 USB 串口（日志、烧录），**翻面后**为 USB
+声卡（UAC）/ USB 存储（MSC）」。MSC 只能走 OTG 那面，固件无法同时驱动两面，所以
+里世界界面必须提示"若电脑未识别，请把插头翻面"。默认方向插着时电脑只会看到串口。
+
+---
+
+## 5. 构建与烧录
+
+```powershell
+# ① 表世界（日常固件）—— 与以前完全一样；它会顺手把新分区表写进去
+idfc build ; idfc flash
+
+# ② 里世界固件（只在改了里世界/对时/USB 相关代码时才需要重烧）
+idfc build -t sync        # 输出 build\sync\FakePodNanoNightPlayer.bin（必须 ≤2.5MB）
+
+# ③ 把里世界固件烧到 ota_0（⚠ 不能用 idfc flash -t sync！）
+& 'C:\Espressif\tools\python\v6.1\venv\Scripts\esptool.exe' --chip esp32s31 -p COM3 `
+    --before default-reset --after hard-reset write-flash 0x310000 `
+    build\sync\FakePodNanoNightPlayer.bin
+```
+
+要点：
+
+- 🚨 **绝不能用 `idfc flash -t sync`**：那条命令按当前构建的分区表把 app 写到
+  **factory**（0x10000），会把表世界覆盖成里世界固件。
+- `idfc flash` 会额外写 `ota_data_initial.bin`（**空白 otadata**）到 0x590000，
+  所以"重烧表世界"总是安全地落回 factory。
+- `idfc flash` 只写 0x10000 起的 app 区段（表世界最坏 2.79MB，结束于 0x2B9400），
+  **不会碰 0x310000 的里世界固件**——重烧表世界不需要重烧里世界。
+- 镜像顺序：bootloader(0x0) + 分区表(0x8000) + factory(0x10000) + ota_0(0x310000)
+  + otadata(0x590000) + font(0x600000，手动) + pldata(0xC00000，运行时生成)。
+  换机器/全新板子时**桌面顺序**：`idfc flash` → 刷里世界固件 → 刷字体。
+
+### 5.1 无人值守验证（没有触摸输入时）
+
+`CONFIG_FIRMWARE_SYNC_AUTOSTART=y`（默认 n，**只用于调试**）：表世界每次开机完成
+都会切到里世界固件。⚠ 里世界**不会**自动重启回来（要用户点按钮），所以它只能验证
+"切过去"，不能形成自动循环；验证完记得重新 `idfc flash` 关掉该选项。
+
+---
+
+## 6. 共享与隔离
+
+| 资源 | 处理 |
+|---|---|
+| RTC（PCF85063A @ I2C0） | 外置芯片，天然共享。里世界写完直接留在列表，表世界下次启动读到的就是新时间 |
+| NVS | 两固件共用同一分区。里世界**只读**配置（时区 `tz`、亮度），不写任何键（对时结果只显示在里世界列表，**不再**写 `tsync/res`） |
+| font / pldata | 共用只读。里世界读 font 分区（NPF 字体），**完全不碰 pldata** |
+| SD 卡 | 里世界先挂 FATFS（对时要读 `wifi.txt`）；进 USB 传歌时卸载 FATFS、切原始块设备，交电脑独占 |
+| 分区表 | 两个 build 用**同一份 `partitions.csv`**；bootloader 只认 flash 里那张表 |
+| SPI flash 驱动 fork | `components/spi_flash` 的 S31 分支预测补丁两个固件都要（都由依赖图带入） |
+| 蓝牙 / 音频 / 播放列表 | 只编进表世界；里世界里 `CONFIG_BT_ENABLED=n`，bt 组件退化成 INTERFACE 库 |
+| TinyUSB / WiFi 栈 | 只被里世界引用；表世界构建会编这些组件，但静态库成员没被引用 → **镜像里 0 个符号**（见 §7） |
+
+---
+
+## 7. 真机实测（2026-11-15，debug 构建）
+
+### 7.1 镜像与体积
+
+| 固件 | 镜像大小 | 分区 | 余量 |
+|---|---|---|---|
+| 表世界（debug） | 2,624,352 B（2.50MB） | factory 3MB | 约 520KB |
+| 里世界（sync） | 1,737,072 B（1.66MB） | ota_0 2.5MB | 0xd7e90（34%） |
+
+- 里世界比旧版"对时固件"（1,666,912 B）只多 **约 70KB**：TinyUSB + esp_tinyusb 的
+  MSC 类驱动与描述符，远小于 ota_0 余量。
+- 表世界镜像里 **0 个 tinyusb/esp_tinyusb `.obj`**（map 里只有 `LOAD lib...a` 四行，
+  是链接输入不是被引用的成员），与 esp_wifi 那组组件同样"编进构建但不进镜像"。
+- 表世界 debug 的 `check_sizes` 仍报 `Part 'ota_0' overflow 0xcf0`——**预期现象**，
+  表世界只烧 factory（见 §2.1）。
+
+### 7.2 往返流程（串口实测）
+
+```
+[表世界] App started
+[调试 quickconfig SYNC_AUTOSTART] fw_switch: switch next boot -> ota_0 @0x310000
+[重启]
+[里世界] 591   inner_world_app: === 里世界固件启动：role=sync, running partition=ota_0 ===
+[里世界] 601   fw_switch: switch next boot -> factory @0x010000 (擦 otadata)
+[里世界] 824   fw_switch: otadata erased: next boot = factory
+[里世界] 839   config_store: config loaded: vol=18 bright=140 ...
+[里世界] 995~1217 display / LVGL / PPA / 触摸输入设备就绪
+[里世界] 1249  font_npf: NPF1 全字库已挂载（34462 个字形）
+[里世界] 1319~1437 PMU / RTC（2026-11-15 23:16:49）/ SD 卡挂载（61000MB）
+[里世界] 1507  inner_world: 里世界主界面已创建
+[里世界] 1543  inner_world_app: 里世界就绪：WiFi对时 / USB传歌 / 回到表世界
+```
+
+即：**里世界从上电到功能列表约 1.5 秒**（含 LVGL 首帧与屏幕点亮），比表世界开机快
+（表世界要加载蓝牙/音频/播放列表）。LVGL 缓冲在里世界非常宽裕：`draw buffers:
+V_RES/10（42KB/块，双缓冲 85KB，DMA 余量 237,947 B，最大连续块 196,608 B）`——因为
+没有蓝牙/音频抢内部 RAM。
+
+### 7.3 USB 传歌（用户真机验证）
+
+- 里世界点「USB传歌」→ 界面显示「等待电脑识别…」+ SD 卡容量；
+- **USB 线正插（默认方向 = 串口面）时电脑看不到盘**（符合 §4.3 的硬件事实）；
+- **反插（OTG 面）后电脑识别为可移动磁盘**，实测传输速度约 **8MB/s**；
+- 传歌完成后点「回到表世界」→ 重启回表世界，插回默认方向串口恢复正常。
+
+⚠ 一个现场观察：进入 USB 传歌后，串口 `COM3`（USB-Serial-JTAG）会掉线；改插 OTG 面
+才能被电脑识别为 U 盘。传歌期间不要依赖串口日志，调试时先用 WiFi 对时/功能列表
+确认里世界运行正常，再进 USB 模式。
+
+### 7.4 无人值守验证（quickconfig）
+
+没有触摸输入时，用 idfc quickconfig（**不改 sdkconfig、不触发 reconfigure**）：
+
+```powershell
+# 表世界开机 2 秒后自动切里世界
+idfc build -qc SYNC_AUTOSTART ; idfc flash
+
+# 里世界开机后自动进入 USB 传歌（配合上面的 autostart 可全自动跑到 U 盘模式）
+idfc build -t sync -qc INNER_USB_AUTOSTART
+# 然后按 §5 ③ 烧到 0x310000
+```
+
+验证完用**不带 `-qc`** 的普通构建重烧即可恢复（quickconfig 头 `main/idfc_quickconfig.h`
+会被重写成"未启用任何 quickconfig"，该文件已 gitignore）。
+
+---
+
+## 8. 出问题怎么退
+
+| 症状 | 处理 |
+|---|---|
+| 点功能提示"里世界固件未烧录" | ota_0 没烧或镜像坏了：按 §5 的 ③ 重烧；表世界不受影响 |
+| 里世界卡住/死机 | 长按电源键关机再开 → 因为 otadata 已被擦，一定回表世界 |
+| 想临时关闭这个功能 | 不烧 ota_0 即可（点入口只会提示未烧录）；要彻底删代码见下面的"移除" |
+| 误开了 `FIRMWARE_SYNC_AUTOSTART` | 设备停在里世界 → 点「回到表世界」，或重新 `idfc flash` |
+| 想清空里世界槽 | `esptool erase-region 0x310000 0x280000` |
+| USB 传歌电脑看不到盘 | ① 插头翻面（OTG 那一面）；② 看串口 `usb_msc` 日志；③ 确认烧的是新里世界固件 |
+
+**完全移除本方案**（回到单固件）：把 `partitions.csv` 的 factory 改回 0x5F0000、
+删掉 ota_0/otadata 两行；`sdkconfig.defaults.sync`、`main/core/system/` 可留可删；
+`main/Kconfig.projbuild` 的两个选项删掉；`main/CMakeLists.txt` 合回一个列表
+（`SHARED + PLAYER`）；`main.c` 去掉 `#if` 分派；`settings_menu.c` 的两个入口改回
+直接实现或删除。⚠ 改分区表必须重刷分区表。
+
+---
+
+## 9. 已知取舍与后续可做
+
+- **里世界仍有 LVGL**（约 270KB Flash）：换来直接复用现成的功能列表/进度界面/字体/
+  触摸。若要再瘦，可以砍成手绘列表（省 270KB，但会丢"对时进度、失败原因"这些文字反馈）。
+- **里世界重复了一套最小初始化**（display/lvgl/font/touch/PMU/RTC/SD）：故意
+  不复用 `main.c` 的播放器流程，避免"改播放器顺手弄坏里世界"。
+- **USB 传歌进入后不能退回列表**（选择与 OtoClock 一致）：因为 SD 卡已交给电脑，
+  再回到 WiFi 对时需要重新挂载 FATFS + 卸载 USB 栈，复杂度与出错面都大。传完直接
+  点「回到表世界」重启，是最稳的路径。
+- **时区只在表世界侧配置**（config_store 的 `tz`），里世界只读它把 UTC 换算成
+  墙钟时间写 RTC —— 与旧版单固件行为一致。
+- 若将来要"传歌完成后自动回表世界"，可以在 `tud_msc_start_stop_cb`（电脑弹出）里
+  延时 `esp_restart()`；当前不做（用户要求保持到重启）。

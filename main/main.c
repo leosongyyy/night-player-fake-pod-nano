@@ -18,8 +18,22 @@
 #include "core/hardware/touch.h"
 #include "core/storage/config_store.h"
 #include "core/system/fw_switch.h"
-#include "core/system/sync_app.h"
+#include "core/system/inner_world_app.h"
 #include "core/ui/lvgl_port.h"
+
+/* idfc quickconfig（`idfc build -qc <名字>` 生成，见 idfc_buildconfig.json 的
+   QuickConfigs）：临时调试开关走这里，**不走 Kconfig**，所以启用/关闭都不会
+   触发 reconfigure 与全量重编（改 sdkconfig.defaults 会）。
+   头文件只在声明过 QuickConfigs 的构建里生成，用 __has_include 兜住"没生成"
+   的情况（例如直接用 idf.py 构建）。 */
+#if defined(__has_include)
+#  if __has_include("idfc_quickconfig.h")
+#    include "idfc_quickconfig.h"
+#  endif
+#endif
+#ifndef QCONF_SYNC_AUTOSTART
+#define QCONF_SYNC_AUTOSTART 0
+#endif
 
 #if !CONFIG_FIRMWARE_ROLE_SYNC
 /* ↓↓↓ 以下只有播放器固件用（对时固件不编播放器那一整套源码） */
@@ -39,7 +53,6 @@
 #include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
 #include "ui/key_handler.h"
-#include "ui/toast.h"
 #endif
 
 static const char *TAG = "app_main";
@@ -59,25 +72,6 @@ static void on_touch_ready(esp_lcd_touch_handle_t tp, void *ctx)
     (void)ctx;
     lvgl_port_set_touch_handle(tp);
     ESP_LOGI(TAG, "Touch ready, LVGL touch input enabled");
-}
-
-/* ------------------------------------------------------------------ */
-/* 跨固件结果：上一轮"对时固件"（ota_0）跑完留下的结果 Toast             */
-/* ------------------------------------------------------------------ */
-/* 对时固件写的是**成品文案**（"对时成功 12:34" / "对时失败：…"），播放器
-   只负责读出来弹一下——这里绝不能引用 wifi_time_sync 的符号，否则会把 WiFi
-   协议栈整份拉进播放器镜像（内部 RAM 就白省了）。 */
-static void report_sync_result(void)
-{
-    char msg[FW_SYNC_RESULT_MAX];
-    if (!fw_sync_result_take_text(msg, sizeof(msg))) {
-        return;   /* 没有记录：绝大多数开机都是这样 */
-    }
-    ESP_LOGI(TAG, "result from sync firmware: %s", msg);
-    if (lvgl_port_lock(1000)) {
-        ui_toast_show_ms(msg, 3000);
-        lvgl_port_unlock();
-    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -282,26 +276,26 @@ static void player_app_main(void)
 
     ESP_LOGI(TAG, "App started");
 
-    /* 上一次"对时固件"跑完留下的结果：Toast 一下（对时成功 HH:MM / 失败原因）。
-       ⚠ 必须等 boot_flow 的首帧提交完再做：Toast 挂在 lv_layer_top，太早创建会
-         被 boot_flow 的首屏覆盖掉。 */
-    report_sync_result();
+    /* 2026-11 起表世界**不再**在开机时确认 WiFi 对时结果（用户要求）：
+       对时结果只在里世界列表里显示，不再写 NVS、也不再弹 Toast。 */
 
-    /* 【调试】无人值守测试双固件切换：开机完成即切到对时固件并重启。
-       对时固件跑完会切回 factory，于是形成"播放器 → 对时 → 播放器"的循环，
-       用于没有触摸输入时验证 otadata 写入/RTC 共享/回切（见 Kconfig 说明）。
-       ⚠ 默认关闭；开启后只能靠重新烧录退出循环。 */
-#if CONFIG_FIRMWARE_SYNC_AUTOSTART
-    ESP_LOGW(TAG, "FIRMWARE_SYNC_AUTOSTART: 2 秒后切到对时固件（ota_0）");
+    /* 【调试】无人值守测试双固件切换：开机完成即切到里世界固件并重启。
+       ⚠ 里世界启动时把 otadata 擦回表世界，但**不会**自动重启（要等用户点
+          「回到表世界」），所以原来的"播放器 ↔ 对时"自动循环不再成立；本选项
+          现在只用于没有触摸输入时验证"能切过去"。
+       ⚠ 推荐用 quickconfig 开（`idfc build -qc SYNC_AUTOSTART`），不必改
+          sdkconfig/触发全量重配；Kconfig 的 FIRMWARE_SYNC_AUTOSTART 保留兼容。 */
+#if CONFIG_FIRMWARE_SYNC_AUTOSTART || QCONF_SYNC_AUTOSTART
+    ESP_LOGW(TAG, "SYNC_AUTOSTART: 2 秒后切到里世界固件（ota_0）");
     vTaskDelay(pdMS_TO_TICKS(2000));
     player_controller_save_last_position();
     config_store_flush_pending(true);
     if (fw_switch_to_sync() == ESP_OK) {
-        ESP_LOGW(TAG, "FIRMWARE_SYNC_AUTOSTART: restarting into sync firmware");
+        ESP_LOGW(TAG, "SYNC_AUTOSTART: restarting into inner-world firmware");
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
     } else {
-        ESP_LOGE(TAG, "FIRMWARE_SYNC_AUTOSTART: 对时固件不可用（没烧到 ota_0？）");
+        ESP_LOGE(TAG, "SYNC_AUTOSTART: 里世界固件不可用（没烧到 ota_0？）");
     }
 #endif
 
@@ -357,15 +351,17 @@ static void player_app_main(void)
 /* ================================================================== */
 /* 入口：按固件角色分派                                                */
 /* ------------------------------------------------------------------ */
-/* 双固件方案（见 ideas_and_exps/DUAL_APP_TIME_SYNC.md 与 partitions.csv）：
-     · 播放器固件（factory @0x10000，默认）：完整功能，不带 WiFi 协议栈；
-     · 对时固件（ota_0 @0x310000，构建变体 sync）：只做 WiFi/SNTP 对时，
-       写完 RTC 就重启回播放器。 */
+/* 双固件方案（见 ideas_and_exps/INNER_WORLD.md 与 partitions.csv）：
+     · 表世界 / 播放器固件（factory @0x10000，默认）：完整播放功能，
+       不带 WiFi 协议栈、不带 USB 栈；
+     · 里世界固件（ota_0 @0x310000，构建变体 sync）：WiFi对时 + USB传歌，
+       点「回到表世界」重启回播放器。 */
 void app_main(void)
 {
 #if CONFIG_FIRMWARE_ROLE_SYNC
-    /* 本函数内部在结束时 esp_restart() 回播放器，正常情况下不返回 */
-    sync_app_run();
+    /* 里世界固件：初始化最小系统 + 显示功能列表，之后由触摸驱动；
+       返回后 LVGL 任务继续跑（不在这里重启）。 */
+    inner_world_app_run();
 #else
     player_app_main();
 #endif

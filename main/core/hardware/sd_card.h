@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "sdmmc_cmd.h"   /* sdmmc_card_t：原始块设备模式要把卡句柄交出去 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +54,23 @@ uint64_t sd_card_get_id(void);
  * @return ESP_OK 成功
  */
 esp_err_t sd_card_deinit(void);
+
+/** @brief 以**原始块设备**方式初始化 SDMMC（不挂载 FATFS）
+ *
+ * 只给「里世界」固件的 USB 传歌用（core/system/usb_msc.c）：电脑要直接读写
+ * 卡的扇区，固件这边就不能再挂 FATFS。顺序：
+ *   1. 若当前已挂载 FATFS，先 sd_card_deinit() 卸载；
+ *   2. 按与 sd_card_init() **完全相同**的引脚/总线参数初始化 SDMMC 主机与卡；
+ *   3. 返回卡句柄，之后由调用方（TinyUSB MSC）独占访问。
+ *
+ * ⚠ 调用后不要再使用任何 /sdcard 下的文件接口（会访问到未挂载的 FATFS）。
+ * ⚠ 本函数不注册文件系统、不打印目录；卡句柄由本模块持有，进程重启前不释放。
+ *
+ * @param out_card 输出卡句柄（成功时非 NULL）
+ * @return ESP_OK 成功；ESP_ERR_INVALID_STATE 已处于 raw 模式；
+ *         其余为 SDMMC 主机/卡初始化错误
+ */
+esp_err_t sd_card_raw_init(sdmmc_card_t **out_card);
 
 #ifdef __cplusplus
 }

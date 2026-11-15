@@ -46,6 +46,10 @@ managed_components/
 # 这些都是"每台机器/每次本地操作"的状态，不入库（其余配置事实源见 AGENTS.md 第 6 节）。
 .idfc/
 
+# idfc 的 quickconfig 生成头（`idfc build -qc <名字>` 在配置阶段写入，
+# 默认全部关闭；声明在 idfc_buildconfig.json 的 QuickConfigs 里）
+main/idfc_quickconfig.h
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
