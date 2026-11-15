@@ -41,6 +41,22 @@ extern "C" {
     (((len) + 0x0FFFU) & ~0x0FFFU)
 
 /**
+ * @brief 播放列表缓存元信息（与数据同一次 commit 写入头部）
+ *
+ * 开机时用它做"是否需要重建"的快速判断：
+ *   - card_id 与当前 SD 卡不符 → 换卡，必须重建；
+ *   - signature / file_count 与曲库指纹探测结果不符 → 增删/改名/换文件，
+ *     必须重建。
+ * 未变化时跳过完整扫描直接启动。
+ */
+typedef struct {
+    uint64_t card_id;     /* SD 卡 CID 派生 ID（见 sd_card_get_id） */
+    uint64_t signature;   /* 曲库指纹（音频路径 + .pl 的路径/大小/mtime 之和） */
+    uint32_t file_count;  /* 物理音频文件数（不含 .pl 内引用） */
+    uint32_t reserved;    /* 对齐/将来扩展，写 0 */
+} playlist_store_meta_t;
+
+/**
  * @brief 判断分区是否有效（读取头部，检查 magic 与长度合法性；快速，不读数据）
  *
  * @return true 有效；false 无效（从未写入 / 已 invalidate / 被中断）
@@ -66,9 +82,21 @@ esp_err_t playlist_store_invalidate(void);
  *
  * @param data 内存中的源数据
  * @param len  数据长度（须 ≤ PLAYLIST_STORE_MAX_DATA）
+ * @param meta 缓存元信息（卡 ID / 曲库指纹；可为 NULL，写 0 表示未知）
  * @return ESP_OK 成功
  */
-esp_err_t playlist_store_save_playlist(const void *data, size_t len);
+esp_err_t playlist_store_save_playlist(const void *data, size_t len,
+                                       const playlist_store_meta_t *meta);
+
+/**
+ * @brief 读取播放列表缓存元信息
+ *
+ * 只在 is_valid() 为 true 时有意义；头部版本不匹配/损坏返回 false。
+ *
+ * @param[out] out 输出元信息
+ * @return true 成功
+ */
+bool playlist_store_get_meta(playlist_store_meta_t *out);
 
 /**
  * @brief 把整个分区内存映射到地址空间，返回只读基址（省 RAM）

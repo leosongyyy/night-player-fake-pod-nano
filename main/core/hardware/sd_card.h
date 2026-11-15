@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -35,6 +36,16 @@ esp_err_t sd_card_init(void);
  * @return true 已挂载（sd_card_init 成功且未卸载）
  */
 bool sd_card_is_mounted(void);
+
+/**
+ * @brief 读取 SD 卡身份（CID 派生的 64 位散列）
+ *
+ * 用 CID 的厂商/型号/序列号/生产日期等字段做 FNV-1a 64 位散列，
+ * 供播放列表缓存判断"是否换了一张卡"。未挂载时返回 0。
+ *
+ * @return 64 位卡身份；未挂载返回 0
+ */
+uint64_t sd_card_get_id(void);
 
 /**
  * @brief 卸载 SD 卡（FAT 文件系统 + SDMMC 主机释放），供深度休眠前调用

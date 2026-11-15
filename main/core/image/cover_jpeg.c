@@ -126,14 +126,30 @@ static esp_err_t cover_decode_sw(const uint8_t *jpeg, uint32_t len,
                  esp_err_to_name(r), (unsigned)info.width, (unsigned)info.height);
         return (r != ESP_OK) ? r : ESP_FAIL;
     }
-    /* 防御异常尺寸（正常为 460x460；上限 512 防超大分配） */
-    if (info.width > 512 || info.height > 512) {
+    /* 防御异常尺寸：内嵌/目录封面常见 1000x1000，允许到 4096 并在
+       超过 1024 时用软件解码的 1/2、1/4 缩放（见下方 scale 选择）。
+       最终像素尺寸不超过 1024x1024，避免 PSRAM 峰值过大。 */
+    if (info.width > 4096 || info.height > 4096) {
         ESP_LOGE(TAG, "jpeg size too large: %ux%u", (unsigned)info.width, (unsigned)info.height);
         return ESP_ERR_INVALID_SIZE;
     }
 
-    /* 分配像素缓冲并解码 */
-    size_t pixel_bytes = (size_t)info.width * info.height * 2;
+    uint32_t max_dim = info.width > info.height ? info.width : info.height;
+    esp_jpeg_image_scale_t scale = JPEG_IMAGE_SCALE_0;
+    uint32_t div = 1;
+    if (max_dim > 2048) {
+        scale = JPEG_IMAGE_SCALE_1_4;
+        div = 4;
+    } else if (max_dim > 1024) {
+        scale = JPEG_IMAGE_SCALE_1_2;
+        div = 2;
+    }
+    cfg.out_scale = scale;
+
+    /* 缩放后尺寸按向上取整估算；额外留 16px 余量吸收 MCU 对齐差异 */
+    uint32_t out_w = (info.width + div - 1) / div;
+    uint32_t out_h = (info.height + div - 1) / div;
+    size_t pixel_bytes = (size_t)(out_w + 16) * (out_h + 16) * 2;
     uint8_t *buf = cover_alloc(pixel_bytes);
     if (buf == NULL) {
         ESP_LOGE(TAG, "alloc %u B failed", (unsigned)pixel_bytes);

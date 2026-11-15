@@ -9,6 +9,7 @@
 
 #include "core/storage/playlist_format.h"
 #include "core/storage/playlist_store.h"
+#include "core/hardware/sd_card.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -41,11 +42,13 @@ typedef struct {
 
 /* 构建上下文（所有游标/缓冲都存这里，便于在 PSRAM 里） */
 typedef struct {
-    uint8_t  *buf;        /* 整个 PLST 数据的构建缓冲（PSRAM） */
+    uint8_t  *buf;        /* 整个 PLST 数据的构建缓冲（PSRAM）；指纹探测模式为 NULL */
     uint32_t  dir_count;  /* 目录条目游标 */
     uint32_t  song_count; /* 歌曲条目游标 */
     uint32_t  str_len;    /* 字符串池已用长度 */
     bool      truncated;
+    uint64_t  signature;  /* 曲库指纹：所有音频/.pl 条目哈希之和（顺序无关） */
+    uint32_t  audio_count;/* 物理音频文件数（不含 .pl 内引用） */
 } build_ctx_t;
 
 /* 构建栈（显式，PSRAM 分配，替代递归） */
@@ -97,17 +100,22 @@ static int cmp_name(const void *a, const void *b)
 
 /* ---------------- 路径辅助 ---------------- */
 
-/* 相对路径 → SD 完整路径（拼 /sdcard 前缀） */
+/* SD 挂载点（主机侧单元测试可通过编译宏覆盖） */
+#ifndef PLS_SD_ROOT
+#define PLS_SD_ROOT "/sdcard"
+#endif
+
+/* 相对路径 → SD 完整路径（拼挂载点前缀） */
 static void make_full_path(const char *rel, char *out, size_t outsz)
 {
     if (rel[0]) {
-        snprintf(out, outsz, "/sdcard/%s", rel);
+        snprintf(out, outsz, PLS_SD_ROOT "/%s", rel);
     } else {
-        snprintf(out, outsz, "/sdcard");
+        snprintf(out, outsz, PLS_SD_ROOT);
     }
 }
 
-/* ---------------- 音频扩展名判断（当前播放引擎 Helix 仅支持 MP3） ---------------- */
+/* ---------------- 音频扩展名判断（播放引擎支持 MP3/FLAC/OGG Vorbis） ---------------- */
 
 static bool is_audio_file(const char *name)
 {
@@ -116,8 +124,9 @@ static bool is_audio_file(const char *name)
         return false;
     }
     const char *ext = dot + 1;
-    /* 音乐库目前只有 .mp3，播放引擎也只支持 MP3，故仅收录 mp3 */
-    return (strcasecmp(ext, "mp3") == 0);
+    return (strcasecmp(ext, "mp3") == 0) ||
+           (strcasecmp(ext, "flac") == 0) ||
+           (strcasecmp(ext, "ogg") == 0);
 }
 
 /* ---------------- 播放列表（.pl）文件 ---------------- */
@@ -241,11 +250,61 @@ static void scan_pl_file(build_ctx_t *ctx, const char *dir_full, const char *pl_
     ESP_LOGI(TAG, "playlist '%s': %u songs", pl_name, (unsigned)pl_songs);
 }
 
+/* ---------------- 曲库指纹（开机快速判断是否需要重扫） ---------------- */
+
+/* FNV-1a 64：对路径/大小/mtime 做稳定散列。各条目的哈希用**相加**合并，
+   这样目录遍历顺序（readdir 顺序）变化不会导致指纹变化。 */
+static uint64_t sig_fnv_bytes(uint64_t h, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* 向指纹累加一个文件。type: 'A'=音频，'P'=.pl 播放列表。
+   探测与正式构建都走这里，保证两边算法一致。
+   - 音频：播放列表只存"路径/文件名"，内容变化不影响列表 → 只哈希路径；
+   - .pl：内容会改变歌曲集合 → 额外哈希大小与 mtime。 */
+static void sig_add_file(build_ctx_t *ctx, const char *rel_dir,
+                         const char *name, char type, const struct stat *st)
+{
+    char rel[PLS_PATH_MAX + 64];
+    if (rel_dir[0] != '\0') {
+        snprintf(rel, sizeof(rel), "%s/%s", rel_dir, name);
+    } else {
+        snprintf(rel, sizeof(rel), "%s", name);
+    }
+
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a offset basis */
+    h = sig_fnv_bytes(h, &type, sizeof(type));
+    h = sig_fnv_bytes(h, rel, strlen(rel));
+
+    if (type == 'P' && st != NULL) {
+        int64_t size = (int64_t)st->st_size;
+        int64_t mtime = (int64_t)st->st_mtime;
+        h = sig_fnv_bytes(h, &size, sizeof(size));
+        h = sig_fnv_bytes(h, &mtime, sizeof(mtime));
+    }
+
+    ctx->signature += h;   /* 加法合并 = 顺序无关 */
+    if (type == 'A') {
+        ctx->audio_count++;
+    }
+}
+
 /* ---------------- 单目录处理：列出文件与子目录 ---------------- */
 
-/* 用 stat 判断条目类型，收集音频文件 / .pl 播放列表 / 子目录，并各自排序。
-   files/pls/subs 为预先分配（cap）的指针数组，返回各自数量。 */
-static void collect_dir(const char *full_path,
+/* 收集音频文件 / .pl 播放列表 / 子目录，并各自排序。
+   files/pls/subs 为预先分配（cap）的指针数组，返回各自数量。
+   ⚠ 类型优先用 readdir 的 d_type（ESP-IDF FatFs VFS 按 FILINFO.fattrib
+   填 DT_DIR/DT_REG）。旧实现对每个条目 stat：在扁平大目录（1233 首）里
+   FatFs 每次 stat 都要从头扫目录，整轮是 O(n²)，全量重建会明显变慢。
+   只有 d_type == DT_UNKNOWN 才回退 stat；.pl 需要大小/mtime 做指纹，单独 stat。 */
+static void collect_dir(const char *full_path, const char *rel_dir,
+                        build_ctx_t *ctx,
                         char **files, int *nf,
                         char **pls, int *npl,
                         char **subs, int *ns, int cap)
@@ -262,22 +321,51 @@ static void collect_dir(const char *full_path,
         if (name[0] == '.') {
             continue;   /* 跳过 . .. 及隐藏文件 */
         }
-        /* 构造完整路径后用 stat 判断类型（FAT 的 d_type 不可靠） */
-        if (full_path[strlen(full_path) - 1] == '/') {
-            snprintf(entry_path, sizeof(entry_path), "%s%s", full_path, name);
-        } else {
-            snprintf(entry_path, sizeof(entry_path), "%s/%s", full_path, name);
-        }
+
+        bool is_dir = false;
+        bool is_reg = false;
+        bool have_stat = false;
         struct stat st;
-        if (stat(entry_path, &st) != 0) {
-            continue;
+
+        if (e->d_type == DT_DIR) {
+            is_dir = true;
+        } else if (e->d_type == DT_REG) {
+            is_reg = true;
+        } else {
+            if (full_path[strlen(full_path) - 1] == '/') {
+                snprintf(entry_path, sizeof(entry_path), "%s%s", full_path, name);
+            } else {
+                snprintf(entry_path, sizeof(entry_path), "%s/%s", full_path, name);
+            }
+            if (stat(entry_path, &st) != 0) {
+                continue;
+            }
+            have_stat = true;
+            is_dir = S_ISDIR(st.st_mode);
+            is_reg = S_ISREG(st.st_mode);
         }
-        if (S_ISDIR(st.st_mode)) {
+
+        if (is_dir) {
             subs[(*ns)++] = strdup(name);
-        } else if (S_ISREG(st.st_mode)) {
+        } else if (is_reg) {
             if (is_audio_file(name)) {
+                /* 音频文件只按路径进指纹，不需要 stat */
+                sig_add_file(ctx, rel_dir, name, 'A', have_stat ? &st : NULL);
                 files[(*nf)++] = strdup(name);
             } else if (is_pl_file(name)) {
+                if (!have_stat) {
+                    if (full_path[strlen(full_path) - 1] == '/') {
+                        snprintf(entry_path, sizeof(entry_path), "%s%s",
+                                 full_path, name);
+                    } else {
+                        snprintf(entry_path, sizeof(entry_path), "%s/%s",
+                                 full_path, name);
+                    }
+                    if (stat(entry_path, &st) != 0) {
+                        continue;
+                    }
+                }
+                sig_add_file(ctx, rel_dir, name, 'P', &st);
                 pls[(*npl)++] = strdup(name);
             }
         }
@@ -358,7 +446,7 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
         make_full_path(node->path, full_path, sizeof(full_path));
 
         int nf = 0, ns = 0, npl = 0;
-        collect_dir(full_path, files, &nf, pls, &npl, subs, &ns, cap);
+        collect_dir(full_path, node->path, &ctx, files, &nf, pls, &npl, subs, &ns, cap);
         scanned_dirs++;
         ESP_LOGI(TAG, "scan dir='%s' files=%d pls=%d subdirs=%d", node->path, nf, npl, ns);
 
@@ -451,6 +539,8 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
         stats->str_len = ctx.str_len;
         stats->total_size = total_size;
         stats->truncated = ctx.truncated;
+        stats->signature = ctx.signature;
+        stats->file_count = ctx.audio_count;
     }
 
     if (save) {
@@ -460,7 +550,13 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
             progress_cb(PLAYLIST_BUILD_PHASE_WRITE, ctx.song_count, progress_ctx);
         }
         ESP_LOGI(TAG, "saving playlist to partition (len=%u) ...", total_size);
-        esp_err_t ret = playlist_store_save_playlist(ctx.buf, total_size);
+        playlist_store_meta_t meta = {
+            .card_id = sd_card_get_id(),
+            .signature = ctx.signature,
+            .file_count = ctx.audio_count,
+            .reserved = 0,
+        };
+        esp_err_t ret = playlist_store_save_playlist(ctx.buf, total_size, &meta);
         free(files); free(pls); free(subs); free(s_stack); free(ctx.buf);
         s_stack = NULL;
         return ret;
@@ -481,6 +577,151 @@ esp_err_t playlist_build_from_sd(playlist_build_stats_t *stats,
                                  void *progress_ctx)
 {
     return playlist_build_core(stats, true, NULL, NULL, progress_cb, progress_ctx);
+}
+
+/* 快速指纹探测：只遍历目录并 stat 音频/.pl 文件，不读音频内容、不建字符串池、
+   不写 flash。用于开机判断现有播放列表缓存是否仍然匹配当前 SD 卡。
+   ⚠ 遍历规则（跳过隐藏项、单目录条目上限、最大深度、排序）必须与
+   playlist_build_core 完全一致，否则指纹会无故不匹配、导致每次开机重扫。 */
+esp_err_t playlist_builder_probe_signature(uint64_t *signature,
+                                           uint32_t *file_count)
+{
+    if (signature == NULL || file_count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *signature = 0;
+    *file_count = 0;
+
+    build_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    build_node_t *stack = heap_caps_malloc(
+        sizeof(build_node_t) * PLS_MAX_DEPTH, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (stack == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    int sp = 0;
+
+    stack[sp].path[0] = '\0';
+    stack[sp].path_idx = 0;
+    stack[sp].name_idx = 0;
+    sp++;
+
+    int cap = PLS_MAX_ENTRIES;
+    /* 只需子目录名；文件/播放列表只计数（用于与构建器的遍历上限保持一致） */
+    char **subs = calloc((size_t)cap, sizeof(char *));
+    if (subs == NULL) {
+        free(stack);
+        return ESP_ERR_NO_MEM;
+    }
+
+    char entry_path[PLS_PATH_MAX + 64];
+
+    while (sp > 0) {
+        build_node_t *node = &stack[--sp];
+
+        char full_path[PLS_PATH_MAX + 2];
+        make_full_path(node->path, full_path, sizeof(full_path));
+
+        DIR *dir = opendir(full_path);
+        if (dir == NULL) {
+            continue;   /* 与 collect_dir 一致：打不开的目录跳过 */
+        }
+
+        int nf = 0, npl = 0, ns = 0;
+        struct dirent *e;
+        while ((e = readdir(dir)) != NULL &&
+               nf < cap && npl < cap && ns < cap) {
+            const char *name = e->d_name;
+            if (name[0] == '.') {
+                continue;   /* 跳过 . .. 与隐藏项 */
+            }
+
+            bool is_dir = false;
+            bool is_reg = false;
+            bool have_stat = false;
+            struct stat st;
+
+            /* FatFs VFS 的 readdir 会按文件属性填 d_type，正常不需要额外 stat；
+               若为 DT_UNKNOWN 再回退 stat。音频文件只哈希路径，不读取大小/
+               mtime，因此这条路径完全不需要逐文件 stat。 */
+            if (e->d_type == DT_DIR) {
+                is_dir = true;
+            } else if (e->d_type == DT_REG) {
+                is_reg = true;
+            } else {
+                if (full_path[strlen(full_path) - 1] == '/') {
+                    snprintf(entry_path, sizeof(entry_path), "%s%s", full_path, name);
+                } else {
+                    snprintf(entry_path, sizeof(entry_path), "%s/%s", full_path, name);
+                }
+                if (stat(entry_path, &st) != 0) {
+                    continue;
+                }
+                have_stat = true;
+                is_dir = S_ISDIR(st.st_mode);
+                is_reg = S_ISREG(st.st_mode);
+            }
+
+            if (is_dir) {
+                subs[ns++] = strdup(name);
+            } else if (is_reg) {
+                if (is_audio_file(name)) {
+                    sig_add_file(&ctx, node->path, name, 'A',
+                                 have_stat ? &st : NULL);
+                    nf++;
+                } else if (is_pl_file(name)) {
+                    if (!have_stat) {
+                        if (full_path[strlen(full_path) - 1] == '/') {
+                            snprintf(entry_path, sizeof(entry_path), "%s%s",
+                                     full_path, name);
+                        } else {
+                            snprintf(entry_path, sizeof(entry_path), "%s/%s",
+                                     full_path, name);
+                        }
+                        if (stat(entry_path, &st) != 0) {
+                            continue;
+                        }
+                    }
+                    sig_add_file(&ctx, node->path, name, 'P', &st);
+                    npl++;
+                }
+            }
+        }
+        closedir(dir);
+
+        /* 与正式构建一致：目录名排序后逆序入栈，出栈按名称升序 */
+        qsort(subs, (size_t)ns, sizeof(char *), cmp_name);
+        char parent_path[PLS_PATH_MAX];
+        memcpy(parent_path, node->path, strlen(node->path) + 1);
+        for (int i = ns - 1; i >= 0; i--) {
+            if (sp >= PLS_MAX_DEPTH) {
+                break;
+            }
+            build_node_t *child = &stack[sp++];
+            char child_path[PLS_PATH_MAX];
+            if (parent_path[0]) {
+                snprintf(child_path, sizeof(child_path), "%s/%s",
+                         parent_path, subs[i]);
+            } else {
+                snprintf(child_path, sizeof(child_path), "%s", subs[i]);
+            }
+            memcpy(child->path, child_path, strlen(child_path) + 1);
+            child->path_idx = 0;
+            child->name_idx = 0;
+        }
+
+        for (int i = 0; i < ns; i++) {
+            free(subs[i]);
+        }
+    }
+
+    *signature = ctx.signature;
+    *file_count = ctx.audio_count;
+
+    free(subs);
+    free(stack);
+    return ESP_OK;
 }
 
 /* 仅扫描构建到内存（不写回），返回 buffer 供内存解析测试 */

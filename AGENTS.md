@@ -30,7 +30,8 @@ ESP32-S31（rev v0.0，320MHz 双核 + LP core，512KB SRAM）+ **16MB Flash** +
 
 **3. 参考文档**（都在 `ideas_and_exps/`）
 
-`IDFC_USAGE.md`（idfc 完整用法/历史坑）、`BUILD_CONFIG.md`（构建配置）、`BUILD_MATRIX.md`（配置矩阵格式与 idfc 验收）、`AGENTS_DETAILS_ARCHIVE.md`（**2026-11-15 从本文件移出的历史实测数据与逐项理由**，考据时查这里）、`reference_docs/`（原厂资料整理版：`hardware_v1.md`、`pmu_axp2101.md`、`rtc_pcf85063a.md`）、`DUAL_APP_TIME_SYNC.md`（双固件对时）、`WIFI_TIME_SYNC.md`（对时实现细节）、`BLUETOOTH_AUDIO.md`、`NPF_FONT.md` + `BINFONT_RESEARCH.md`、`FONT_FLASH.md`、`FULL_FIRMWARE.md`、`LVGL9_MIGRATION.md`、`IRAM_DMA_AUDIT.md`、`IRAM_AUDIT_LVGL9.md`、`IRAM_OBJECTS_PSRAM_S31.md`、`PSRAM_TASK_STACK.md`、`FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`、`CONFIG_SLOTS.md`、`COVER_JPEG_HW.md`、`PPA_ACCEL.md`、`MARQUEE_STYLE.md`、`CLICK_WHEEL_USAGE.md`、`DISPLAY_FREEZE_TRIAGE.md`、`S31_FLASH_CACHE_RACE.md`、`DONE_PLANS.md` / `FUTURE_PLAN.md`。
+`IDFC_USAGE.md`（idfc 完整用法/历史坑）、`BUILD_CONFIG.md`（构建配置）、`BUILD_MATRIX.md`（配置矩阵格式与 idfc 验收）、`AGENTS_DETAILS_ARCHIVE.md`（**2026-11-15 从本文件移出的历史实测数据与逐项理由**，考据时查这里）、`reference_docs/`（原厂资料整理版：`hardware_v1.md`、`pmu_axp2101.md`、`rtc_pcf85063a.md`）、`DUAL_APP_TIME_SYNC.md`（双固件对时）、`WIFI_TIME_SYNC.md`（对时实现细节）、`BLUETOOTH_AUDIO.md`、`MULTI_FORMAT_AUDIO.md`（MP3/FLAC/OGG 多格式播放与封面）、`COVER_ART.md`（内嵌/目录封面查找顺序）、`NPF_FONT.md` + `BINFONT_RESEARCH.md`、`FONT_FLASH.md`、`FULL_FIRMWARE.md`、`LVGL9_MIGRATION.md`、`IRAM_DMA_AUDIT.md`、`IRAM_AUDIT_LVGL9.md`、`IRAM_OBJECTS_PSRAM_S31.md`、`PSRAM_TASK_STACK.md`、`FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`、`CONFIG_SLOTS.md`、`COVER_JPEG_HW.md`、`PPA_ACCEL.md`、`MARQUEE_STYLE.md`、`CLICK_WHEEL_USAGE.md`、`DISPLAY_FREEZE_TRIAGE.md`、`S31_FLASH_CACHE_RACE.md`、`DONE_PLANS.md` / `FUTURE_PLAN.md`。
+- `components/`：本地组件（esp_lcd_qspi_amoled、3 个触摸驱动、**libogg + Tremor（OGG 定点解码）**、spi_flash fork）；`patches/` 是托管组件的构建期补丁。
 
 **4. idfc 使用说明（重要）**
 
@@ -95,7 +96,7 @@ idfc build -t sync              # 输出 build\sync\FakePodNanoNightPlayer.bin�
 
 **当前实现状态**（细节见各设计文档与源码注释）：
 
-- 播放核心：MP3（Helix，实测 5000+ 首）、文件夹与 `.pl` 歌单、循环（全部/列表/单曲）、顺序/**无限确定性随机**（断点续播）、回放增益、**10 段 EQ**、`.npd` 元数据 + **硬件 JPEG 封面**（失败回退软件解码）。
+- 播放核心：MP3 / FLAC / OGG Vorbis（minimp3 / dr_flac / libogg + Tremor 流式解码，实测 5000+ 首）、文件夹与 `.pl` 歌单、循环（全部/列表/单曲）、顺序/**无限确定性随机**（断点续播）、回放增益、**10 段 EQ**、`.npd` 元数据优先，回退音频内嵌/同目录 JPEG 封面 + **硬件 JPEG 解码**（失败回退软件解码）。
 - **经典蓝牙音频**：A2DP Source（SBC，48k 优先/44.1k 兜底）+ AVRCP CT 绝对音量；EQ 在重采样之后；最多 5 设备各自记忆音量/EQ/安静模式；控制中心开关（长按快速面板）、设置菜单蓝牙页（配对/详情）；已配对耳机可主动回连；安静模式（只留蓝牙的伪关机）。见 `BLUETOOTH_AUDIO.md`。
 - 硬件层：AMOLED（QSPI，全黑启动防白屏）、触摸（CST820，异步初始化）、电池（AXP2101 融合百分比）、音频（I2S + CS43131）、SD（FAT/exFAT）、**RTC 走时 + 双键映射 + PMU 关机/低电保护**。
 - 任务布局：UI（LVGL）固定 Core0、解码/封面固定 Core1，分核不抢占（见"使用技术"）。
@@ -106,6 +107,7 @@ idfc build -t sync              # 输出 build\sync\FakePodNanoNightPlayer.bin�
 - 工具：双核性能监视（串口每 2s）、开发者选项（触摸测试白点，NVS 运行时开关）、全局 Toast。
 
 > `FUTURE_PLAN.md` / `DONE_PLANS.md` 只记较大型需求与修复；只有 `FUTURE_PLAN.md` 里出现过的内容才能移进 `DONE_PLANS.md`。日常小改动不必记录；踩坑变大研究的单开文件（如 `IRAM_DMA_AUDIT.md`）。
+- 音频链路：I2S1 + CS43131，I2S DMA 8×511（约 93ms）的静音冲刷覆盖整条链路防切换爆音；OGG 用 libogg + Tremor 定点解码（1MB PSRAM arena）；息屏统一 80MHz（蓝牙流 160MHz）。
 
 ### 代码结构
 
@@ -120,7 +122,9 @@ main/
     bt/bt_service.c       # 经典蓝牙：控制器/Bluedroid/A2DP/AVRCP + bt_svc 命令任务
   core/storage/           # config_store(+配置槽位) bt_store playlist(+_store/_builder/_format) config_slots
   core/player/            # player_controller / shuffle_player
-  core/music/song_meta.c  core/image/cover_jpeg.c + default_cover(_flash).c
+  core/music/             # song_meta(.npd) + cover_art(内嵌/同目录封面回退)
+  core/image/             # cover_jpeg(硬件/软件 JPEG) + default_cover(_flash)
+  core/audio_decoders/    # 多格式流式解码（minimp3 / dr_flac / libogg + Tremor；统一 audio_decoder 接口）
   core/network/           # wifi_time_sync（只编进对时固件）
   core/fonts/             # system_font / font_npf（mmap 全字库）/ system_global_font_lite / system_smaller_font
   core/ui/                # lvgl_port lvgl_mem lvgl_ppa_accel lvgl_ppa_rotate touch_test virtual_list click_wheel global_style
@@ -170,8 +174,8 @@ patches/                  # lvgl_fast_mem_decl / esp_lcd_touch_deps（托管组�
 - Core0：`LVGL`（每帧刷屏）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0`、系统 esp_timer 任务/ISR、全部驱动中断。
 - Core1：`mp3_play`/`mp3_out`、`cover_load`（注册为 lvgl_port 辅助任务，息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`、`bt_svc` + 蓝牙控制器/Bluedroid 任务；`boot_scan`/`rescan`。
 - 不固定核：`touch_init`（一次性自删）、`mem_monitor`/`cpu_coll*`、`pmu_irq`。
-- **⚠ 非实时任务栈一律用 `task_create_psram_stack()`**（失败自动回退内部 RAM）：内部 RAM 开机末期只剩几 KB、最大连续块约 8KB，内部栈会创建失败（历史症状：`create power service task failed` → 自动息屏/低电关机全失效）。已在 PSRAM：`mem_monitor`/`cpu_coll0/1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`。**必须留内部 RAM**：`LVGL`、`mp3_play`/`mp3_out`、`button_svc`、`player_ctrl`、`deep_worker`、`sleep_timer`、`boot_scan`。
-- **栈预算**：`LVGL` **12KB**（v9 绘制管线很深：6KB 时"首次渲染设置页"必爆栈；凡可能同步渲染 LVGL 的任务都按 ≥12KB 算）、`deep_worker` **12KB**、主任务 8KB（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、cover_load 6KB、mp3_play 8K/out 4K、player_ctrl 4KB。⚠ 调栈前看 `MEM: stk:` 高水位，且**必须覆盖目标路径实测**（如息屏/亮屏后才打印的读数），别只信亮屏态。
+- **⚠ 非实时任务栈一律用 `task_create_psram_stack()`**（失败自动回退内部 RAM）：内部 RAM 开机末期只剩几 KB、最大连续块约 8KB，内部栈会创建失败（历史症状：`create power service task failed` → 自动息屏/低电关机全失效）。已在 PSRAM：`mem_monitor`/`cpu_coll0/1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`、`mp3_play`（64KB，Tremor codebook 首次解码需要）。**必须留内部 RAM**：`LVGL`、`button_svc`、`player_ctrl`、`deep_worker`、`sleep_timer`、`boot_scan`。
+- **栈预算**：`LVGL` **12KB**（v9 绘制管线很深：6KB 时"首次渲染设置页"必爆栈；凡可能同步渲染 LVGL 的任务都按 ≥12KB 算）、`deep_worker` **12KB**、主任务 8KB（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、cover_load 8KB、mp3_play 64KB（PSRAM）、player_ctrl 4KB。⚠ 调栈前看 `MEM: stk:` 高水位，且**必须覆盖目标路径实测**（如息屏/亮屏后才打印的读数），别只信亮屏态。
 - **deep_worker**：息屏/亮屏、关机、以及**需要内部栈的关缓存段**（如重扫的 munmap/擦头）唯一执行者，业务任务用 `deep_worker_call(fn, arg)` 投递。约定：fn 内禁止再投递；**调用方禁止持 LVGL 锁投递**。⚠ **必须在 `app_main` 早期创建**（config_store 之后、硬件初始化之前）——内部 RAM 在开机末期碎片化，晚创建会静默失败（曾导致每次深调用等满 5s 超时）；创建处必须检查返回值。
 
 **3. 内部 RAM / IRAM / DMA 的三条硬规则**

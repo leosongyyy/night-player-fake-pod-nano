@@ -12,10 +12,6 @@ dependencies:
   #   1.8.2 CMakeLists.txt 整文件（只编 dotprod 的 ANSI 实现），升级版本时
   #   必须同步更新那份补丁，否则会编到上游的 Xtensa 汇编/额外模块。
   espressif/esp-dsp: "1.8.2"
-
-  chmorgan/esp-libhelix-mp3:
-    version: "^1.0.3"
-
   lvgl/lvgl:
     version: "9.4.0"
     public: true

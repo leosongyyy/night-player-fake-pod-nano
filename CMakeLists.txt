@@ -50,7 +50,7 @@ set(COMPONENTS
     esp_lcd_touch_cst816           # core/hardware/touch.c（三型号运行时择优）
     esp_lcd_touch_cst820
     esp_lcd_touch_chsc6417
-    # ESP-DSP（2026-11-14 起改为**托管组件** espressif/esp-dsp 1.8.2，Apache-2.0，
+# ESP-DSP（2026-11-14 起改为**托管组件** espressif/esp-dsp 1.8.2，Apache-2.0，
     # 见 main/idf_component.yml；之前是 vendored 1.4.12 + CMake 裁剪）：
     # 蓝牙输出重采样用（core/hardware/audio/resampler.c 的 polyphase FIR
     # 点积调用 dsps_dotprod_f32）。⚠ 托管组件解包在 managed_components/
@@ -59,6 +59,7 @@ set(COMPONENTS
     # 实测 S31（RISC-V）上 1.8.2 可完整编译（174 个编译单元；S31 的 Kconfig 把
     # 实现选成 ANSI C，Xtensa 汇编在源文件内部被条件编译掉了）。
     esp-dsp
+    tremor                         # OGG Vorbis 定点解码（audio_decoder.c），依赖 libogg 自动带入
 
     # ---- main 直接 include 头文件的 IDF 组件 ----
     esp_lcd                        # esp_lcd_panel_*.h / esp_lcd_panel_io.h
@@ -73,7 +74,6 @@ set(COMPONENTS
     esp_partition                  # esp_partition.h（font 分区 mmap、pldata）
     esp_pm                         # esp_pm.h（亮屏 320MHz / 息屏 80MHz）
     esp_timer                      # esp_timer.h（各任务的周期定时）
-    esp_ringbuf                    # freertos/ringbuf.h（音频输出环形缓冲）
     nvs_flash                      # nvs_flash.h / nvs.h（config_store）
     fatfs                          # esp_vfs_fat.h（SD 卡挂载，exFAT 需 IDF 本体打补丁）
     vfs                            # 文件系统注册（fatfs 依赖，直接包含亦稳妥）

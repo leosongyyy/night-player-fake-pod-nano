@@ -131,3 +131,13 @@ I (1884) cover_jpeg: decoded 460x460 (423200 B) in 21 ms [hw]
 - 想回退：`CONFIG_UI_COVER_HW_JPEG=n`（`idfc build` 会重配），一行 Kconfig。
 - 若硬件解码报错，日志会是 `hw jpeg decode failed: …，本次退回软件解码` +
   紧随的 `decoded … [sw]`，封面照常显示。
+
+## 6. 内嵌/目录封面与大图缩放（2026-11）
+
+本文只描述 JPEG **解码**。封面的来源（`.npd` / MP3 ID3 APIC / FLAC PICTURE /
+OGG Vorbis 注释 / 同目录 `cover.jpg`）与查找顺序见 **`COVER_ART.md`**。
+
+硬件路径仍限制 512×512；`cover_decode_hw()` 发现尺寸超限会返回失败，由
+`cover_jpeg_decode()` 统一回退软件路径。软件路径已放宽到 4096×4096，并在
+>1024 / >2048 时分别使用 1/2、1/4 缩放，最终像素不超过约 1024×1024。
+非 460×460 的封面由正在播放页的 `lv_image_set_inner_align(..., CENTER)` 居中裁切/留边。

@@ -26,13 +26,13 @@ extern "C" {
  *
  * 线程安全设计：
  *   - 激活状态（eq_runtime_t）可能在播放中由 UI（Core0）更新，而样本处理在
- *     audio_pcm_write（Core1 的 mp3_out 任务）中执行 → 参数/状态整体替换与
+ *     audio_pcm_write（Core1 的 mp3_play 任务）中执行 → 参数/状态整体替换与
  *     快照读取均走临界区（portMUX）；系数预计算（含 pow/cos/sin，较慢）在
  *     临界区外完成，临界区内仅做 memcpy（~1us），播放中切换 EQ 不爆音不撕裂；
  *   - 滤波器系数与采样率相关：audio_configure_fs 在采样率配置完成点调用
  *     eq_notify_sample_rate() 重算（此时 consumer 未启动，无并发）；
- *   - 切歌时由 mp3_player 在"旧曲停止 + ringbuf 清空"静止点调用
- *     eq_reset_state() 清零滤波器状态（参数不变），避免旧曲状态污染新歌。
+ *   - 切歌时由 mp3_player 在新曲解码开始前调用 eq_reset_state()
+ *     清零滤波器状态（参数不变），避免旧曲状态污染新歌。
  */
 
 /** 单条 EQ 最大段数（.eq 文件超过则判无效） */

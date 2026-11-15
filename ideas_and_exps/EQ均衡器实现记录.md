@@ -3,6 +3,8 @@
 > 📅 本文记录 **S3 时代（1.x / 2026-09）**的实现与实测；DSP/解析/持久化部分仍然有效，
 > 但"亮屏 240MHz"与"设置页第 7 格"是当时状态——S31 亮屏 320MHz，EQ 已移到九宫格第 4 格，
 > 现状见 AGENTS.md 与 `CONFIG_SLOTS.md` §4.1。
+> ⚠ 2026-11 多格式播放改造后，`mp3_out` 任务与 PCM ringbuf 已移除；EQ 仍在
+> `audio_pcm_write` 内执行，但调用者是单任务 `mp3_play`（见 `MULTI_FORMAT_AUDIO.md`）。
 
 > 对应 ideas_and_exps/FUTURE_PLAN.md 第 10 点（2026-09-03 完成）。
 > 本文记录实现思路、关键设计取舍与踩坑，供后续维护/移植参考。

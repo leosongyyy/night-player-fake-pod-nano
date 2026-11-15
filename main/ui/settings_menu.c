@@ -321,7 +321,7 @@ static void screen_off_format(uint32_t sec, char *buf, size_t size)
    ⚠ 必须在**菜单显示时**统计：播放列表（playlist mmap）由 boot_flow 初始化，
    而根页面在 settings_menu_show() 里也是懒加载创建的——首次打开设置菜单时
    播放列表理论上已就绪，但仍用 s_rescan_count_done 保证"整个会话只统计
-   一次"（曲库只在重新扫描后变化，而重新扫描必然重启，数字不会失真）。 */
+   一次"（曲库变化发生在重启时的自动重扫，本会话内不会变）。 */
 static bool s_rescan_count_done = false;
 
 static void rescan_count_refresh_once(void)
@@ -788,8 +788,8 @@ static void rescan_do_deinit(void *arg)
 }
 
 /* 重新扫描任务（PSRAM 栈）：挂起 LVGL → 委托 deep_worker 停播放/卸载映射/
-   使数据失效 → 重启。重启后 boot_flow 检测到分区无效，进入"需要扫描音乐"
-   界面，用户确认后重新扫描 SD 卡（完整闭环，无需本任务做扫描）。
+   使数据失效 → 重启。重启后 boot_flow 检测到分区无效，自动进入扫描界面
+   并重建曲库（无需用户再点按钮）。
 
    ⚠ 顺序不可颠倒（内存安全关键）：
    1. 先挂起 LVGL：player_ticker/列表刷新/正在播放页等都在 LVGL 任务上下文
@@ -1640,7 +1640,7 @@ static lv_obj_t *rescan_page_build(void)
     menu_note_row_create(rescan_page,
         "将重新扫描 SD 卡中的音乐：停止播放、"
         "使已存播放列表数据无效并重启，"
-        "开机后需要重新扫描。是否继续？");
+        "开机后会自动重新扫描。是否继续？");
     lv_obj_t *rescan_yes = menu_row_create(rescan_page, LV_SYMBOL_OK,
                                            "是，重新扫描", NULL);
     lv_obj_add_flag(rescan_yes, LV_OBJ_FLAG_CLICKABLE);

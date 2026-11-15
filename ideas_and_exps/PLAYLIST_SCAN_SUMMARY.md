@@ -7,7 +7,7 @@
 
 ## 1. 目标与背景
 
-- 设备：**ESP32-S31**（FakePodNano Pro V1，16MB Flash + 16MB Octal PSRAM），SD 卡（64GB，FAT32/exFAT）存放约 5000+ 首 mp3。
+- 设备：**ESP32-S31**（FakePodNano Pro V1，16MB Flash + 16MB Octal PSRAM），SD 卡（64GB，FAT32/exFAT）存放约 5000+ 首音频文件（MP3 / FLAC / OGG）。
 - 需求：开机扫描 SD 卡，把**目录结构**与**用户自建的 `.pl` 播放列表**持久化到独立 Flash 分区，运行期通过**内存映射只读**访问（省 RAM）。
 - 数据源：`musics/` 下的音频文件 + 根目录/`playlists/` 下的 `.pl` 歌单文件。
 
@@ -78,6 +78,8 @@ name_str(4) + path_str(4)
 ### 关键接口
 - `playlist_build_from_sd(stats)`：扫描 + 写回分区。
 - `playlist_build_in_memory(stats, &buf, &size)`：仅扫描到内存（测试用，不写回）。
+- `playlist_builder_probe_signature(&sig, &files)`：**开机快速指纹探针**，只遍历目录与文件名、不读音频内容、不写 flash，用于判断缓存是否仍匹配当前曲库。
+- `playlist_store_get_meta(&meta)`：读取缓存头部的 SD 卡 ID / 曲库指纹 / 文件数。
 - `playlist_init()` / `playlist_init_from_buffer(buf)`：解析（mmap / 内存）。
 - `playlist_dir_count() / song_count() / dir_at() / song_at() / get_string() / build_path()`。
 
@@ -91,14 +93,14 @@ name_str(4) + path_str(4)
 
 ### 目录遍历
 - 用**显式栈**（PSRAM 分配）替代递归，避免深目录栈溢出。
-- `collect_dir()` 用 `stat` 判断条目类型（FAT 的 `d_type` 不可靠），收集三类：
-  - **音频文件**（`is_audio_file`：仅 `.mp3`）
+- `collect_dir()` 优先用 `readdir` 的 `d_type` 判断条目类型，只有 `DT_UNKNOWN` 才回退 `stat()`（详见 4.1），收集三类：
+  - **音频文件**（`is_audio_file`：`.mp3` / `.flac` / `.ogg`）
   - **`.pl` 播放列表**（`is_pl_file`）
   - **子目录**
 - 目录/文件/歌单各自按**名称前 4 字节 + 大小写不敏感**排序（`name_key` + `strcasecmp`）。
 
 ### 音乐目录
-- 每个含 mp3 的目录生成一个目录条目，歌曲条目 `name`=文件名、`path`=父目录路径（共享）。
+- 每个含音频文件的目录生成一个目录条目，歌曲条目 `name`=文件名、`path`=父目录路径（共享）。
 
 ### `.pl` 播放列表解析（`scan_pl_file`）
 - `.pl` 每行是一个相对 SD 根目录的路径，可能含空行/空白行。
@@ -109,10 +111,62 @@ name_str(4) + path_str(4)
 
 ---
 
+## 4.1 开机自动发现（2026-11 反哺）
+
+> 本节是 2026-11 从 hello_world 测试固件反哺回本项目的功能：**不再要求用户点「开始扫描」**，开机自动判断"缓存是否仍属于当前这张卡、曲库有没有增删/改名/换文件"。
+
+### 缓存头部（`playlist_store` v2 → v3）
+
+`playlist_store_header_t` 在原 magic/version/data_len/crc32 之后新增：
+
+| 字段 | 说明 |
+|---|---|
+| `card_id` (u64) | SD 卡 CID 派生身份（mfg/oem/name/revision/serial/date 的 FNV-1a 64） |
+| `signature` (u64) | 曲库指纹（见下） |
+| `file_count` (u32) | 物理音频文件数（不含 `.pl` 内引用） |
+| `reserved` (u32) | 0 |
+
+**版本从 v1 升到 v2（自动发现），再升到 v3（多格式）**：旧缓存没有这些字段或格式范围不同，首次启动会判为无效并自动重扫一次。分区布局与数据区偏移（0x1000）未变。
+
+### 曲库指纹
+
+- FNV-1a 64 位；对每个音频文件与 `.pl` 文件各算一个哈希，再**相加**合并（顺序无关，`readdir` 顺序变化不会造成误判）。
+- 音频文件只哈希**相对路径**：播放列表只存路径/文件名，音频内容变化（例如重新编码但路径不变）不需要重建列表。
+- `.pl` 额外哈希 `size + mtime`：歌单内容变化会影响歌曲集合，必须触发重建。
+- 指纹探针与正式构建共用 `sig_add_file()`，保证两边算法一致。
+- 遍历规则（隐藏项跳过、单目录条目上限 4096、最大深度 512、目录排序）也强制一致，否则会出现"每次开机都重扫"。
+
+### 开机决策
+
+`boot_flow_run()` 在 SD 挂载之后：
+
+1. 缓存无效 / 元信息缺失 → 自动扫描；
+2. `card_id` 与当前卡不同 → 清空旧卡的播放位置（`config_store_reset_position()`）→ 自动扫描；
+3. 快速指纹探针与缓存记录不一致（`signature` 或 `file_count` 变化）→ 自动扫描；
+4. 全部一致 → 直接进入常规界面，不扫描。
+
+扫描失败（读卡/写分区失败或扫描任务创建失败）停在「扫描失败」页，不再带着空列表进入主界面；无音乐仍停在「未发现音乐」。
+
+### `d_type` 优化（全量扫描与探针共用）
+
+原实现每个目录条目都 `stat()` 判断类型。FatFs 的 `stat` 每次都要从头扫描目录，在扁平大目录（上千首）里整轮是 O(n²)。现在：
+
+- 优先使用 `readdir` 的 `d_type`（ESP-IDF FatFs VFS 按 `FILINFO.fattrib` 填 `DT_DIR`/`DT_REG`）；
+- 只有 `DT_UNKNOWN` 才回退 `stat()`；
+- 音频文件不再逐文件 `stat`（指纹只哈希路径）；`.pl` 需要 size/mtime，单独 `stat()`。
+
+实测（790 首、1 个目录）：**指纹探针约 161ms；全量扫描约 2.7s（含写 300KB 播放列表）**。
+
+### 扫描任务栈
+
+原代码调用 `xTaskCreatePinnedToCore(..., BOOT_SCAN_STACK_BYTES / 4u, ...)`，而 IDF 的栈单位是**字节**，32KB 常量实际只分配 8KB。现在改为真正的 32KB，失败回退 16KB；任务创建失败会删除进度定时器并显示「扫描失败」页。
+
+---
+
 ## 5. 构建缓冲与写回
 
 - 构建缓冲在 **PSRAM**（约 3.7MB）中组装，扫描完成后：
-  - 写回模式：通过 `playlist_store_save_playlist` 整体持久化（中断安全）。
+  - 写回模式：通过 `playlist_store_save_playlist(data, len, &meta)` 整体持久化，同时写入 `card_id / signature / file_count`（中断安全）。
   - 内存模式：直接返回 buffer 供内存解析（测试用，避免反复擦写 flash）。
 
 ---
@@ -142,6 +196,8 @@ name_str(4) + path_str(4)
 | monitor 中文/日文乱码或崩溃 | Python 终端按 GBK 解码 UTF-8 | 用户通过修改了idfc的源码修复 |
 | 卡目录异常（`System Volume Information` 等残留） | chkdsk 残留 / 目录结构问题 | 用户在电脑上修复卡 |
 | 隐藏目录混入 | 未过滤点开头 | `collect_dir` 跳过 `name[0]=='.'` |
+| **扁平大目录扫描慢** | 每个条目 `stat()`，FatFs 每次都从头扫目录，O(n²) | 优先用 `d_type`，仅 `DT_UNKNOWN` 回退 `stat()`；音频不再逐文件 stat（2026-11） |
+| **扫描任务栈实际只有 8KB** | `xTaskCreatePinnedToCore` 的栈单位是字节，调用处多除了 4 | 去掉 `/4u`，32KB 失败回退 16KB（2026-11） |
 
 ---
 
@@ -178,16 +234,19 @@ scan done: dirs=168 songs=8828 str_len=349169 total=611313 truncated=0
 
 ### 已完成
 - [x] PLST 格式定义
-- [x] 目录 + `.pl` 播放列表扫描构建器（顺序正确、大小写不敏感排序、仅 mp3）
+- [x] 目录 + `.pl` 播放列表扫描构建器（顺序正确、大小写不敏感排序；音频支持 MP3 / FLAC / OGG）
+- [x] **多格式扫描（2026-11）**：`is_audio_file` 扩展为 `.mp3/.flac/.ogg`，pldata 版本升到 v3 触发旧缓存重扫
 - [x] 读取/解析 API（mmap 省 RAM）
 - [x] 内存模式（仅扫描不写回）用于测试
 - [x] 真机验证（168 目录 / 8828 首歌，无截断）
 - [x] 播放列表 UI：目录/歌单列表 → 歌曲列表 → 播放
 - [x] 持久化写回验证（`playlist_build_from_sd` 写回 pldata 后重启读取，开机流程实际启用）
+- [x] **开机自动发现（2026-11）**：pldata v2 引入卡 ID / 曲库指纹 / 文件数，v3 随多格式扩展；开机自动判断换卡与曲库变化，无需用户点「开始扫描」
+- [x] **`d_type` 扫描优化 + 扫描任务栈修复（2026-11）**
 
 ### 待办 / 规划
 - [ ] （可选）扫描逻辑做成 Kconfig 开关
-- [ ] 播放引擎仅支持 mp3（已过滤），后续如需其它格式需扩展解码
+- [ ] 播放引擎已支持 MP3 / FLAC / OGG；APE/WAV/ALAC/Opus 仍未支持
 
 ---
 

@@ -39,9 +39,11 @@ extern "C" {
  *      必须留在内部 RAM**；
  *   3. 栈需求大、执行频率低的任务优先（监视/日志类）。
  *
- * ⚠ 不适用：LVGL（每帧刷屏）、mp3_play/mp3_out（实时解码输出）、
- *   button_svc（按键中断触发、要求低延迟）、player_ctrl/deep_worker
- *   （交互与深链主路径）、boot_scan/rescan（分区写擦 + munmap 关缓存）。
+ * ⚠ 不适用：LVGL（每帧刷屏）、button_svc（按键中断触发、要求低延迟）、
+ *   player_ctrl/deep_worker（交互与深链主路径）、boot_scan/rescan
+ *   （分区写擦 + munmap 关缓存）。
+ * ⚠ 例外：`mp3_play` 因多格式解码（Tremor codebook）需要 64KB 栈，现也使用本接口创建；
+ *   其运行期不触发 flash 关缓存路径。
  */
 
 /**

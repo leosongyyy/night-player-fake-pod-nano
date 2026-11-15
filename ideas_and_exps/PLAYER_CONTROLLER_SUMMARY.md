@@ -2,7 +2,7 @@
 
 > 本文档汇总 FakePodNanoNightPlayer 中**播放控制器（controller）**的设计、实现、接口与后续规划。
 > 它是 NightPlayer 播放系统三大组成部分（播放引擎核心 → 播放列表提供者 → 播放控制器）中的第三部分，
-> 位于播放引擎 `mp3_player` 与播放列表提供者 `playlist` 之上，作为**独立后台服务**负责播放控制与自动续播。
+> 位于本地播放器 `mp3_player`（MP3/FLAC/OGG，解码层见 `audio_decoders/`）与播放列表提供者 `playlist` 之上，作为**独立后台服务**负责播放控制与自动续播。
 >
 > 前置依赖：`PLAYLIST_SCAN_SUMMARY.md`（PLST 扫描与存储）与 `BOOT_FLOW_SUMMARY.md`（开机流程常规界面入口）。
 
@@ -45,17 +45,19 @@
 
 ### 2.3 独立 Core0 任务的原因
 
-- `mp3_player_play()` 在切歌时会阻塞等待旧曲释放资源（最长 2s）。
+- `mp3_player_play()` 在切歌时会阻塞等待旧曲释放资源（最长 3s）。
 - 若由 LVGL/UI 线程直接调用会卡住界面；故放在**独立控制器任务（Core0）**里，
   解码播放本身在 Core1 的 `mp3_play` 任务中，不与之竞争。
 - 控制命令经**命令队列**投递到控制器任务串行处理，线程安全、非阻塞。
 
 ### 2.4 停止回调与自动续播的区分
 
-- `mp3_player` 的停止回调 `mp3_player_stopped_cb(bool is_from_user)`：
-  - `is_from_user == false`：**自然播完** → 控制器收到 `CMD_FINISHED`，按循环模式自动续播。
-  - `is_from_user == true`：用户主动停止（含手动切歌时 `mp3_player_play` 内部停旧曲）→
+- `mp3_player` 的停止回调为 `mp3_player_stopped_cb_t(mp3_player_stop_reason_t reason)`：
+  - `MP3_STOP_NATURAL`：**自然播完** → 控制器按循环模式自动续播。
+  - `MP3_STOP_USER`：用户主动停止（含手动切歌时 `mp3_player_play` 内部停旧曲）→
     **忽略**，避免与已投递的 next/prev/play_song 命令重复跳曲。
+  - `MP3_STOP_FILE_MISSING` / `MP3_STOP_DATA_CORRUPT` / `MP3_STOP_FORMAT_UNSUPPORTED`：
+    坏曲或格式不支持 → 上报事件并自动跳过下一曲。
 
 ---
 
@@ -122,10 +124,10 @@ void player_controller_set_loop_mode(player_loop_mode_t mode);
 - **命令队列**：`xQueueCreate(8, sizeof(cmd_msg))`，投递用非阻塞 `xQueueSend(..., 0)`（队列满则丢弃，避免阻塞调用方）。
 - **命令集**：`CMD_PLAY/PAUSE/TOGGLE/NEXT/PREV/SEEK/PLAY_SONG/FINISHED/STOP`。
 - **控制器任务**：`xTaskCreatePinnedToCore(player_task, "player_ctrl", 4096, NULL, 5, &s_task, 0)`，循环 `xQueueReceive(portMAX_DELAY)` 串行处理。
-- **自然播完回调**：`player_stopped_cb` 仅在 `!is_from_user` 时投递 `CMD_FINISHED`。
+- **自然播完回调**：`player_stopped_cb` 按停止原因投递 `CMD_FINISHED`（USER 停止忽略，坏曲按事件处理）。
 - **自动续播**：`CMD_FINISHED → player_play_global(player_auto_next())`。
 - **手动切歌**：`CMD_NEXT → player_manual_next()`，`CMD_PREV → player_manual_prev()`。
-- **路径缓冲**：`s_path_buf[512]`（静态 BSS），`playlist_build_path()` 填充后传给 `mp3_player_play()`（该接口要求路径为常驻内存，静态缓冲满足）。
+- **路径缓冲**：`s_path_buf[512]`（静态 BSS），`playlist_build_path()` 填充后传给 `mp3_player_play()`（播放器内部会拷贝路径，静态缓冲仍避免上层临时指针生命周期问题）。
 - **位置元信息**：`player_update_meta()` 更新 `cur_dir / cur_song_in_dir / dir_song_count / dir_name / song_name / path`，仅控制器任务写入。
 
 ---

@@ -409,7 +409,7 @@ static void player_update_meta(uint32_t global)
     playlist_build_path(global, s_path_buf, sizeof(s_path_buf));
 
     /* 解析歌曲元数据（.npd）：标题/副标题入静态缓冲，回放增益暂存到
-       mp3_player（play 时在旧曲停止 + ringbuf 清空后才应用到 audio，
+       mp3_player（新曲任务启动并完成解码器打开后才应用到 audio，
        避免切歌过渡期旧歌残留 PCM 用新歌增益播放的音量突变）。
        ⚠ 在控制器任务里同步读 SD 文件（几十 KB，约几十 ms），切歌本身有
        停止旧曲的等待，这里不会卡 UI；JPEG 封面数据解析后立即释放，

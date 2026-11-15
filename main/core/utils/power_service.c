@@ -38,7 +38,8 @@ static const char *TAG = "power_service";
 #define POWER_SVC_TASK_PRIO  1
 #define POWER_SVC_TASK_CORE  1
 
-/* 固定频率（MHz）：亮屏锁 320MHz（S31 CPLL 最高档）；息屏直接锁 80MHz。
+/* 固定频率（MHz）：亮屏锁 320MHz（S31 CPLL 最高档）；息屏统一 80MHz
+   （OGG 换 Tremor 定点解码后，播放与暂停/停止不再区分频点）。
    ⚠ 不用 DFS 动态调频（实测息屏释放频率锁后空闲期降频不明显），改为
    esp_pm_configure 把最大/最小频率都设成同一值强制固定。
    ⚠ S31 的 CPU 频点由 CPLL/BSPLL 分频得到，80MHz 若不被该芯片支持，
@@ -192,7 +193,7 @@ void power_service_init(void)
 
     /* 1. 初始固定 320MHz（亮屏状态）。
           ⚠ esp_pm_configure 依赖 CONFIG_PM_ENABLE=y（见 sdkconfig.defaults）；
-            未开启时返回 ESP_ERR_NOT_SUPPORTED，此处降级：不调频，其余功能正常。 */
+未开启时返回 ESP_ERR_NOT_SUPPORTED，此处降级：不调频，其余功能正常。 */
     power_service_apply_freq();
     ESP_LOGI(TAG, "esp_pm ready: screen on=%d MHz, screen off=%d MHz "
                   "(+%d MHz when BT audio), fixed",
@@ -266,7 +267,7 @@ static void power_service_do_screen_off(void *arg)
           唤醒时重新初始化并全屏重刷。 */
     lvgl_port_suspend();
 
-    /* 3. 固定 CPU 频率：普通 80MHz，蓝牙音频流进行中 160MHz（性能需求） */
+/* 3. 固定 CPU 频率：普通 80MHz，蓝牙音频流进行中 160MHz（性能需求） */
     power_service_apply_freq();
 
     ESP_LOGI(TAG, "screen off: AMOLED sleep in, LVGL suspended, CPU fixed %d MHz",

@@ -10,20 +10,27 @@ static const char *TAG = "playlist_store";
 
 /* 头部魔数："PLTK"，用于 is_valid 快速判断 */
 #define PLAYLIST_STORE_MAGIC 0x504C544Bu
-/* 数据结构版本（写入头部，便于将来升级迁移） */
-#define PLAYLIST_STORE_VERSION 1u
+/* 数据结构版本（写入头部，便于将来升级迁移）
+ * v3：音频格式从仅 MP3 扩展到 MP3/FLAC/OGG，旧缓存自动重扫一次；
+ *     头部仍保留 SD 卡 ID / 曲库指纹 / 文件数（v2 引入）。 */
+#define PLAYLIST_STORE_VERSION 3u
 
 /**
  * @brief 分区头部（占数据区之前的一个扇区，offset 0）
  *
  * magic 是有效性判据；data_len 供读取方得知数据长度；crc32 对数据本体做
  * 附加校验（is_valid 只做快速判断，需要时可据此进一步核验数据完整性）。
+ * card_id/signature/file_count 用于开机快速判断缓存是否仍匹配当前 SD 卡。
  */
 typedef struct {
-    uint32_t magic;     /* 魔数，is_valid 判断依据 */
-    uint32_t version;   /* 数据结构版本 */
-    uint32_t data_len;  /* 数据本体长度（字节） */
-    uint32_t crc32;     /* 数据本体 CRC32 */
+    uint32_t magic;        /* 魔数，is_valid 判断依据 */
+    uint32_t version;      /* 数据结构版本 */
+    uint32_t data_len;     /* 数据本体长度（字节） */
+    uint32_t crc32;        /* 数据本体 CRC32 */
+    uint64_t card_id;      /* SD 卡身份 */
+    uint64_t signature;    /* 曲库指纹 */
+    uint32_t file_count;   /* 物理音频文件数 */
+    uint32_t reserved;     /* 0 */
 } playlist_store_header_t;
 
 /* 头部扇区大小（= 数据区起始偏移） */
@@ -41,8 +48,9 @@ bool playlist_store_is_valid(void)
     if (playlist_store_read_header(&hdr) != ESP_OK) {
         return false;
     }
-    /* 有效性判据：magic 匹配，且数据长度不超过分区容量 */
-    if (hdr.magic != PLAYLIST_STORE_MAGIC) {
+    /* 有效性判据：magic/版本匹配，且数据长度不超过分区容量 */
+    if (hdr.magic != PLAYLIST_STORE_MAGIC ||
+        hdr.version != PLAYLIST_STORE_VERSION) {
         return false;
     }
     if (hdr.data_len > PLAYLIST_STORE_MAX_DATA) {
@@ -61,7 +69,8 @@ esp_err_t playlist_store_invalidate(void)
     return ret;
 }
 
-esp_err_t playlist_store_save_playlist(const void *data, size_t len)
+esp_err_t playlist_store_save_playlist(const void *data, size_t len,
+                                       const playlist_store_meta_t *meta)
 {
     if (data == NULL || len == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -99,12 +108,39 @@ esp_err_t playlist_store_save_playlist(const void *data, size_t len)
         .version = PLAYLIST_STORE_VERSION,
         .data_len = (uint32_t)len,
         .crc32 = esp_rom_crc32_le(0, (const uint8_t *)data, (uint32_t)len),
+        .card_id = meta ? meta->card_id : 0,
+        .signature = meta ? meta->signature : 0,
+        .file_count = meta ? meta->file_count : 0,
+        .reserved = 0,
     };
     ret = pldata_write(0, &hdr, sizeof(hdr));
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "playlist saved: len=%u crc=0x%08x", (unsigned)len, hdr.crc32);
+        ESP_LOGI(TAG, "playlist saved: len=%u crc=0x%08x card=%llx sig=%llx files=%u",
+                 (unsigned)len, hdr.crc32,
+                 (unsigned long long)hdr.card_id,
+                 (unsigned long long)hdr.signature,
+                 (unsigned)hdr.file_count);
     }
     return ret;
+}
+
+bool playlist_store_get_meta(playlist_store_meta_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    playlist_store_header_t hdr;
+    if (playlist_store_read_header(&hdr) != ESP_OK ||
+        hdr.magic != PLAYLIST_STORE_MAGIC ||
+        hdr.version != PLAYLIST_STORE_VERSION ||
+        hdr.data_len > PLAYLIST_STORE_MAX_DATA) {
+        return false;
+    }
+    out->card_id = hdr.card_id;
+    out->signature = hdr.signature;
+    out->file_count = hdr.file_count;
+    out->reserved = 0;
+    return true;
 }
 
 esp_err_t playlist_store_map_to_memory(const void **out_ptr)
@@ -129,7 +165,9 @@ size_t playlist_store_get_data_len(void)
     if (playlist_store_read_header(&hdr) != ESP_OK) {
         return 0;
     }
-    if (hdr.magic != PLAYLIST_STORE_MAGIC || hdr.data_len > PLAYLIST_STORE_MAX_DATA) {
+    if (hdr.magic != PLAYLIST_STORE_MAGIC ||
+        hdr.version != PLAYLIST_STORE_VERSION ||
+        hdr.data_len > PLAYLIST_STORE_MAX_DATA) {
         return 0;
     }
     return hdr.data_len;
