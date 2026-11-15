@@ -290,11 +290,15 @@ static void player_app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2000));
     player_controller_save_last_position();
     config_store_flush_pending(true);
+    /* 与用户点确认走同一条路径：先关音频（CS43131 pop-free 掉电 + 停 I2S），
+       否则切进里世界后余音不断。失败时把音频拉回来。 */
+    player_controller_shutdown_audio_for_switch();
     if (fw_switch_to_sync() == ESP_OK) {
         ESP_LOGW(TAG, "SYNC_AUTOSTART: restarting into inner-world firmware");
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
     } else {
+        audio_recover_after_failed_shutdown();
         ESP_LOGE(TAG, "SYNC_AUTOSTART: 里世界固件不可用（没烧到 ota_0？）");
     }
 #endif

@@ -1096,9 +1096,34 @@ void player_controller_save_last_position(void)
              s_shuffle ? " (shuffle)" : "");
 }
 
-/* 配置槽位切换前把播放现场同步进活跃槽位（见头文件说明） */
-void player_controller_sync_config(void)
+/* ------------------------------------------------------------------ */
+/* 切固件（重启进里世界）前的音频停机                                    */
+/* ------------------------------------------------------------------ */
+
+void player_controller_shutdown_audio_for_switch(void)
 {
+    /* ① 停解码。mp3_player_stop() 是**非阻塞**的（只置 s_stop，由播放任务
+          自己退出并置 IDLE），所以必须等它真的退出——否则播放任务可能还在
+          往 I2S 写数据，后面的 pop-free 掉电序列就被打乱。
+          等待上限 1s，与 fake_shutdown 的关机序列同一套做法。 */
+    mp3_player_stop();
+    for (int waited = 0;
+         waited < 1000 && mp3_player_get_state() != MP3_STATE_IDLE;
+         waited += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    /* ② CS43131 pop-free 掉电（软斜坡静音 → 关耳放 → 关 ASP → 关晶振 →
+          RESET# 拉低）→ 停 I2S。⚠ 顺序不能反：先停时钟会让软斜坡失效。
+          ⚠ 不做这一步时，重启瞬间 I2S 停了但 DAC 仍在工作，会一直输出
+            最后一小块解码内容（"切里世界后余音不断"），而里世界并不初始化
+            音频，于是这块余音会一直挂着。 */
+    audio_shutdown();
+    ESP_LOGI(TAG, "audio shutdown for firmware switch done");
+}
+
+/* 配置槽位切换前把播放现场同步进活跃槽位（见头文件说明） */
+void player_controller_sync_config(void){
     player_sync_config();
 }
 

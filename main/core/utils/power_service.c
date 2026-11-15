@@ -2,6 +2,7 @@
 
 #include <assert.h>
 
+#include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
@@ -62,10 +63,31 @@ static const char *TAG = "power_service";
 /* 低电条件已持续的秒数：条件一旦断开立即清零（要求"持续"而非瞬时抖动） */
 static uint32_t s_low_bat_sec = 0;
 
-/* S31 平台说明：S3 的"息屏暂停超时自动关机"依赖 deepsleep 伪关机，已随平台
-   迁移移除；低电策略 2026-11 按 AXP2101 的电量百分比重新接回（见上方
-   LOW_BAT_* 常量，与开机拒启的 2% 同一数据源、阈值更保守）。
-   关机一律是 AXP2101 真断电（`fake_shutdown` 写 `0x10[0]=1`）。 */
+/* ------------------------------------------------------------------ */
+/* 息屏且不在播放 → 超时自动关机（S3「暂停超时伪关机」在 S31 上的回归）   */
+/* ------------------------------------------------------------------ */
+/* S31 的关机是 AXP2101 PMU **真断电**（`fake_shutdown_enter()` 写
+   0x10[0]=1），不是 S3 的 deepsleep 伪关机；关机后按电源键 / 插充电器开机。
+   与 S3 的差异（均为 S31 实测/硬件条件决定）：
+   · S3 原版只统计"暂停（PAUSED）"，这里把"停止（IDLE）"也算作**不在播放**；
+   · **充电中不关机**（VBUS 在位 / 正在充电）：S3 时代没有充电检测；S31 关机后
+     插电会自动开机，插着电自动关机只会变成"关机 → 跳充电界面"的打扰。
+   分钟数由 CONFIG_PAUSE_AUTO_SHUTDOWN_MIN 配置（默认 10，0=关闭）。 */
+#ifndef CONFIG_PAUSE_AUTO_SHUTDOWN_MIN
+#define CONFIG_PAUSE_AUTO_SHUTDOWN_MIN 10
+#endif
+#define PAUSE_SHUTDOWN_MIN  CONFIG_PAUSE_AUTO_SHUTDOWN_MIN
+
+/* 与 S3 的 power_service_check_pause_shutdown 同一套写法：
+   s_prev_paused = 上一轮是否处于"息屏 + 不在播放"（进入时记开始时刻）；
+   s_pause_start_us = 本次开始的 esp_timer 时刻（us）。 */
+static bool s_prev_paused = false;
+static int64_t s_pause_start_us = 0;
+
+/* S31 平台说明：S3 的"暂停超时伪关机"依赖 deepsleep，2026-11 已按用户要求
+   以"息屏且不在播放超时 → AXP2101 真关机"的形式恢复（函数见下方，常量
+   PAUSE_SHUTDOWN_MIN）。低电策略按 AXP2101 的电量百分比（LOW_BAT_*），
+   关机一律是 `fake_shutdown` 写 `0x10[0]=1` 的真断电。 */
 
 /* 息屏状态与状态切换互斥锁：screen_off/screen_on 可能来自不同任务（按键
    任务/守护任务），用互斥锁保护状态机与"固定频率、挂起/恢复 LVGL、改亮度"
@@ -85,6 +107,44 @@ static volatile bool s_hold_awake = false;
    s_quiet=true 表示处于静音伪关机（安静模式）：强制 80MHz，且跳过低电/自动息屏策略。 */
 static volatile uint32_t s_perf_mask = 0;
 static volatile bool s_quiet = false;
+
+/* 息屏且不在播放 → 超时自动关机（S3「暂停超时伪关机」在 S31 上的回归）。
+   写法与 S3 的 power_service_check_pause_shutdown 一致（独立检查函数 + 每秒
+   由守护任务调用 + s_prev_paused/s_pause_start_us 计时）；
+   **调用侧按 S31 平台**：触发的是 `fake_shutdown_enter()`（AXP2101 真断电），
+   不是 S3 的 deepsleep 伪关机。
+   ⚠ 放在变量定义之后：需要读 s_screen_off / s_quiet。 */
+static void power_service_check_pause_shutdown(void)
+{
+#if PAUSE_SHUTDOWN_MIN > 0
+    battery_info_t binfo;
+    const bool charging = (battery_read_info(&binfo) == ESP_OK)
+                          && (binfo.vbus_present || binfo.charging);
+    const mp3_player_state_t st = mp3_player_get_state();
+
+    /* 不满足条件（亮屏 / 播放中 / 安静模式 / 充电中）：清零，下次重新起算。
+       ⚠ 充电中不关机是 S31 的新增条件（S3 时代没有充电检测）。 */
+    if (!s_screen_off || s_quiet || charging || st == MP3_STATE_PLAYING) {
+        s_prev_paused = false;
+        return;
+    }
+    if (!s_prev_paused) {
+        /* 进入"息屏 + 不在播放"：记录开始时刻 */
+        s_prev_paused = true;
+        s_pause_start_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "screen off & not playing: auto shutdown in %d min",
+                 PAUSE_SHUTDOWN_MIN);
+        return;
+    }
+    if (esp_timer_get_time() - s_pause_start_us
+            >= (int64_t)PAUSE_SHUTDOWN_MIN * 60 * 1000000LL) {
+        ESP_LOGW(TAG, "screen off & not playing for %d min, PMU shutdown",
+                 PAUSE_SHUTDOWN_MIN);
+        s_prev_paused = false;
+        fake_shutdown_enter();   /* S31 平台：AXP2101 真断电（息屏时先亮屏显示提示） */
+    }
+#endif
+}
 
 static esp_err_t power_service_set_cpu_freq(int mhz);
 
@@ -135,8 +195,8 @@ static void power_service_touch_cb(bool pressed, uint16_t tx, uint16_t ty, void 
 
 /* ------------------------------------------------------------------ */
 
-/* 守护任务：亮屏且距最近活动超过配置时长 → 自动息屏。
-   （S3 时代的暂停/低电自动伪关机策略已随 S31 迁移移除，见上方说明） */
+/* 守护任务：亮屏且距最近活动超过配置时长 → 自动息屏；
+   另有两条自动关机策略（低电、息屏且不在播放超时），见下方常量与检查函数。 */
 static void power_service_task(void *arg)
 {
     (void)arg;
@@ -168,6 +228,10 @@ static void power_service_task(void *arg)
         } else {
             s_low_bat_sec = 0;
         }
+
+        /* 息屏且不在播放超时自动关机（S3 的"暂停超时伪关机"在 S31 上回归，
+           写法同 S3，触发按 S31：AXP2101 PMU 真关机；充电中不触发） */
+        power_service_check_pause_shutdown();
 
         /* 息屏超时：仅亮屏时检查（息屏期间只允许按键唤醒）；被 hold_awake
            抑制时（网络对时/长流程）跳过，避免进度界面中途黑屏 */

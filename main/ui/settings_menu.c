@@ -1,6 +1,7 @@
 #include "ui/settings_menu.h"
 
 #include "core/fonts/system_font.h"
+#include "core/hardware/audio/audio.h"
 #include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/bt/bt_service.h"
@@ -1348,14 +1349,20 @@ static void inner_confirm_ok_cb(lv_event_t *e)
     (void)e;
     inner_confirm_close();
 
-    /* ⚠ 顺序：先把"播到哪 + 当前配置"落盘，再动 otadata。中途断在这里最多
-       是"没切成"，不会丢播放现场（与关机保存走同一条路径）。 */
+    /* ⚠ 顺序：先把"播到哪 + 当前配置"落盘，再关音频，最后动 otadata。
+       中途断在这里最多是"没切成"，不会丢播放现场（与关机保存走同一条路径）。 */
     player_controller_save_last_position();
     config_store_flush_pending(true);
 
+    /* 切固件前把音频彻底关掉：只重启不关 DAC 的话，I2S 停止后 CS43131 会
+       一直输出最后一块解码内容（切进里世界后余音不断，见函数注释）。 */
+    player_controller_shutdown_audio_for_switch();
+
     esp_err_t err = fw_switch_to_sync();
     if (err != ESP_OK) {
-        /* 最常见：ota_0 里没有有效镜像（里世界固件还没烧进去）→ 校验失败 */
+        /* 最常见：ota_0 里没有有效镜像（里世界固件还没烧进去）→ 校验失败。
+           音频已经关掉，必须拉回来，否则留在表世界却一直没声音。 */
+        audio_recover_after_failed_shutdown();
         ESP_LOGW(TAG, "switch to inner-world firmware failed: %s",
                  esp_err_to_name(err));
         ui_toast_show("里世界固件未烧录");

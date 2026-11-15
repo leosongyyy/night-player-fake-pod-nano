@@ -136,6 +136,19 @@ void player_controller_stop(void);
  */
 void player_controller_save_last_position(void);
 
+/**
+ * @brief 切固件（重启进里世界）前的音频停机
+ *
+ * 停解码并等播放任务退出 → `audio_shutdown()`（CS43131 pop-free 掉电 + 停 I2S）。
+ * **必须在 `fw_switch_to_sync()` 之前调用**；若切换失败（ota_0 没烧/镜像坏），
+ * 调用方必须 `audio_recover_after_failed_shutdown()` 把音频拉回来，否则设备会
+ * 一直没声音。
+ *
+ * 背景：只重启而不关 DAC 时，I2S 停止后 CS43131 仍会输出最后一块解码内容；
+ * 里世界不初始化音频，于是切进里世界后余音会一直挂着（2026-11 用户实测）。
+ */
+void player_controller_shutdown_audio_for_switch(void);
+
 /** @brief 设置循环模式 */
 void player_controller_set_loop_mode(player_loop_mode_t mode);
 

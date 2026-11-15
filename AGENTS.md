@@ -203,7 +203,8 @@ patches/                  # lvgl_fast_mem_decl / esp_lcd_touch_deps（托管组�
 **5. 息屏/亮屏与低电保护**
 
 - 息屏（经 deep_worker）：AMOLED SLEEP IN → `lvgl_port_suspend` → 固定 80MHz。亮屏：固定 320MHz → 持锁 `display_sleep_exit`（SLEEP OUT + 120ms + 重发完整 init + 全屏重刷）→ 恢复亮度 → `lvgl_port_resume`（**必须在 LVGL 恢复前**）。
-- **低电保护（S31，按电量）**：开机 <2% 且未充电 → 提示 5 秒后 PMU 断电；使用中 <5% 未充电持续 60s → `fake_shutdown_enter()`。充电中/读数不可用（0xFF）不动作。S3 的按电压判据与"息屏暂停超时关机"已删除。
+- **低电保护（S31，按电量）**：开机 <2% 且未充电 → 提示 5 秒后 PMU 断电；使用中 <5% 未充电持续 60s → `fake_shutdown_enter()`。充电中/读数不可用（0xFF）不动作。S3 的按电压判据不恢复（改按电量）。
+- **息屏且不在播放超时自动关机**：`CONFIG_PAUSE_AUTO_SHUTDOWN_MIN`（默认 10 分钟，0=关闭）——**息屏 + 不在播放（暂停/停止）+ 未充电**持续该时长 → `fake_shutdown_enter()`（AXP2101 真断电，不是 S3 的 deepsleep 伪关机）。S3 原版只统计"暂停"，这里把"停止"也算上；**充电中不触发**（S31 关机后插电会自动开机，避免"关机→跳充电界面"）。
 - ⚠ **"息屏停掉 Core1"（esp_cpu_stall）方案已彻底移除**（长期 stall 与被停核的 PSRAM/XIP 取指形成总线竞态 → INT WDT），**不要再引入**。
 
 ### 关键技术要点与踩坑（务必遵守）
