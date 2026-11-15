@@ -6,7 +6,7 @@ extern "C" {
 
 /**
  * @file inner_world_app.h
- * @brief 「里世界」固件的启动流程（构建变体 sync，烧在 ota_0）
+ * @brief 「里世界」固件的启动流程（矩阵 role=inner，烧在 ota_0）
  *
  * 2026-11 新增：原来的"WiFi 对时固件"升级成里世界固件，除了对时还提供
  * **USB 传歌**（把 SD 卡当 U 盘连电脑）。表世界（播放器）里需要网络或需要

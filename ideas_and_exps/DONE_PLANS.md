@@ -2081,7 +2081,7 @@ debug / release 均重新构建通过（仅剩触摸驱动组件的既有 warnin
   兜住"绝不自动格式化"。
 - 依赖托管组件 `espressif/esp_tinyusb ^2.0.1~1`（2.x 才支持 S31 的 HS/UTMI）；
   `esp_tinyusb` 进 `COMPONENTS` 白名单（播放器不链接 → 镜像 0 符号）；
-  `sdkconfig.defaults.sync` 开 `CONFIG_TINYUSB_MSC_ENABLED=y` +
+  `sdkconfig.role.inner`（矩阵 role=inner 的 overlay 文件）开 `CONFIG_TINYUSB_MSC_ENABLED=y` +
   `CONFIG_TINYUSB_MSC_BUFSIZE=16384`（默认 512B 太慢）。
 - `ui/settings_menu.c`：旧「WiFi对时」专用弹窗改成统一 `inner_confirm_show(功能名)`，
   设置根页新增「USB传歌」行，两个入口共用；`fw_switch` 删除 NVS 跨固件结果交接。
@@ -2104,4 +2104,10 @@ debug / release 均重新构建通过（仅剩触摸驱动组件的既有 warnin
 **文档**：新增 `ideas_and_exps/INNER_WORLD.md`（取代/汇总
 `DUAL_APP_TIME_SYNC.md`，旧文保留为历史并加废弃提示）；同步更新 `AGENTS.md`、
 `README.md`、`CHANGELOG.md`、`partitions.csv`、`Kconfig.projbuild`、
-`sdkconfig.defaults.sync`、`idfc_buildconfig.json`、`tools/make_full_firmware.py`。
+`sdkconfig.role.inner`、`idfc_buildconfig.json`、`tools/make_full_firmware.py`。
+
+**2026-11 后续调整**：实测跑通后把构建矩阵从"debug/release/sync 三个变体"改成
+**二维矩阵 `variant` × `role`**（构建目录 `build/<role>.<variant>`）：`variant` 管调试
+设施（LVGL FPS/日志、性能监视、封面版本），`role=inner` 管里世界角色
+（`sdkconfig.role.inner`）。这样里世界也有 debug/release 两档（debug 带 FPS 指示器、
+release 不带），不再是一个固定调试级别的 `sync` 变体。详见 `INNER_WORLD.md` §5.2。

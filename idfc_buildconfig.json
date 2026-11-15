@@ -1,7 +1,7 @@
 {
 	"ProjectName":"FakePodNanoNightPlayer",
 	"BaseConfig":"sdkconfig.defaults",
-	"OutputDir":"build/{variant}",
+	"OutputDir":"build/{role}.{variant}",
 	"BuildVariants":[
 		{
 			"Name":"debug",
@@ -12,11 +12,26 @@
 			"Name":"release",
 			"ConfigFile":"sdkconfig.defaults.release",
 			"Description":"正式发布/日常使用：关闭性能监视器、FPS 计数与调试日志，使用极速版封面。"
-		},
+		}
+	],
+	"DefaultBuildVariant":"debug",
+	"Overlays":[
 		{
-			"Name":"sync",
-			"ConfigFile":"sdkconfig.defaults.sync",
-			"Description":"「里世界」固件（双固件方案）：WiFi对时 + USB传歌。烧到 ota_0 @0x310000，不能用 idfc flash！只能 esptool write_flash 0x310000 build/sync/FakePodNanoNightPlayer.bin。见 ideas_and_exps/INNER_WORLD.md。"
+			"OverlayName":"role",
+			"DefaultType":"player",
+			"Description":"固件角色：player=表世界（播放器，烧 factory @0x10000）；inner=里世界（WiFi对时 + USB传歌，手工烧 ota_0 @0x310000）。",
+			"OverlayTypes":[
+				{
+					"Name":"player",
+					"ConfigFile":null,
+					"Description":"表世界/播放器：完整播放功能，默认启动；日常 idfc flash 的落点。"
+				},
+				{
+					"Name":"inner",
+					"ConfigFile":"sdkconfig.role.inner",
+					"Description":"里世界：标题 + 功能列表（WiFi对时 / USB传歌）+ 回到表世界；开机擦 otadata。⚠ 绝不能用 idfc flash -o role=inner 烧录（会写到 factory 覆盖表世界），只能 esptool write_flash 0x310000。"
+				}
+			]
 		}
 	],
 	"QuickConfigs":[
@@ -26,8 +41,7 @@
 		},
 		{
 			"Name":"INNER_USB_AUTOSTART",
-			"Description":"【调试】里世界开机后自动进入 USB 传歌模式（验证 USB MSC 栈用，没有触摸输入时也能跑）。由 idfc build -t sync -qc INNER_USB_AUTOSTART 临时启用。"
+			"Description":"【调试】里世界开机后自动进入 USB 传歌模式（验证 USB MSC 栈用，没有触摸输入时也能跑）。由 idfc build -o role=inner -qc INNER_USB_AUTOSTART 临时启用。"
 		}
-	],
-	"DefaultBuildVariant":"debug"
+	]
 }

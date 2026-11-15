@@ -12,7 +12,7 @@ extern "C" {
  * @file time_sync_ui.h
  * @brief 「WiFi对时」全屏进度界面（WiFi + NTP）
  *
- * 2026-11 起这是**里世界固件**（ota_0，构建变体 sync）里的界面之一，表世界
+ * 2026-11 起这是**里世界固件**（ota_0，矩阵 role=inner）里的界面之一，表世界
  * 不再直接用它：表世界点「WiFi对时」只做两件事 —— 弹统一确认窗、把下次启动
  * 切到 ota_0 并重启。重启后由 `core/system/inner_world_app.c` 初始化最小系统
  * 与里世界功能列表，用户点「WiFi对时」才调用本模块：

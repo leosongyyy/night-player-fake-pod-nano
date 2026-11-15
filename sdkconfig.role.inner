@@ -1,0 +1,55 @@
+# ===========================================================================
+# Overlay 维度 role = inner：「里世界」固件（WiFi对时 + USB传歌）
+# ---------------------------------------------------------------------------
+# 构建矩阵（idfc_buildconfig.json）：
+#   BuildVariants（主维度）：debug / release
+#   Overlays（第二维）：role = player（默认）/ inner
+#
+#   idfc build                              → build/player.debug    表世界(debug)
+#   idfc build -t release                   → build/player.release  表世界(release)
+#   idfc build -o role=inner                → build/inner.debug     里世界(debug)
+#   idfc build -t release -o role=inner     → build/inner.release   里世界(release)
+#
+# ⚠ 里世界必须**手工**烧到 ota_0（不能用 idfc flash！那条命令按当前分区表把 app
+#   写到 factory @0x10000，会把表世界覆盖成里世界）：
+#       esptool --chip esp32s31 -p COMx write-flash 0x310000 `
+#           build/inner.<variant>/FakePodNanoNightPlayer.bin
+#
+# ⚠ 本文件在配置链**最后**：sdkconfig.defaults → sdkconfig.defaults.<variant> →
+#   sdkconfig.role.inner。所以这里只写"角色专属"项；调试设施（LVGL FPS 指示器、
+#   LVGL 日志、性能监视器开关）仍由 debug/release 变体决定——
+#   里世界 debug 有 FPS 指示器，里世界 release 没有。
+#
+# 完整方案（切换流程、USB MSC 实现、实测、回退）见 ideas_and_exps/INNER_WORLD.md。
+# ===========================================================================
+CONFIG_FIRMWARE_ROLE_SYNC=y
+
+# 蓝牙：里世界完全不需要。关掉后 bt 组件几乎不编任何文件，也不再占内部 RAM
+# （控制器初始化要一块 21KB 的连续内部 RAM）。
+CONFIG_BT_ENABLED=n
+
+# 里世界没有播放器那套"性能监视 / 内存快照"的调用点（只有 main.c 的 PLAYER
+# 分支会 startPerformanceMonitor / mem_trace_log），覆盖为 n 省几 KB Flash。
+# ⚠ 不要在这里关 LV_USE_PERF_MONITOR：那是变体级调试设施，debug 要留 FPS。
+CONFIG_PERFORMANCE_MONITOR=n
+CONFIG_MEM_TRACE=n
+
+# 封面：里世界没有任何封面/播放界面。release 变体默认开 UI_COVER_FLASH
+# （423KB 的极速版封面），这里覆盖掉，别让里世界白背 423KB。
+CONFIG_UI_COVER_FLASH=n
+
+# 主任务栈 16KB：app_main 里要用 lv_refr_now() 提交"里世界首帧"（与表世界
+# 开机同一类深调用链，位图字体下约 6KB）。里世界没有蓝牙/音频占内存，这点
+# 栈给得起；表世界那边才需要为绘制缓冲让路而压到 8KB。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# ---------------------------------------------------------------------------
+# USB 传歌（TinyUSB MSC）：把 SD 卡暴露成 U 盘
+# ---------------------------------------------------------------------------
+CONFIG_TINYUSB_MSC_ENABLED=y
+
+# MSC 端点缓冲（CFG_TUD_MSC_EP_BUFSIZE）默认 512B——那是"能跑"的下限，
+# U 盘拷歌会慢到几 MB/s 以下。里世界没有蓝牙/播放器抢内部 RAM，给到 16KB：
+# 每次批量传输从 512B 提升到 16KB，实测 Windows 下大文件拷贝约 8MB/s。
+# 若构建时报该配置项不存在（esp_tinyusb 版本变化），以组件 Kconfig 为准。
+CONFIG_TINYUSB_MSC_BUFSIZE=16384

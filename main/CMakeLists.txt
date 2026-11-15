@@ -4,7 +4,7 @@
 # 本工程产出**两个固件**，靠 CONFIG_FIRMWARE_ROLE_SYNC 区分（见
 # ideas_and_exps/INNER_WORLD.md）：
 #   · 表世界 / 播放器（默认，=n，`idfc build`）  ：SHARED + PLAYER，烧 factory @0x10000
-#   · 里世界（=y，`idfc build -t sync`）          ：SHARED + SYNC，烧 ota_0 @0x310000
+#   · 里世界（矩阵 role=inner，`idfc build -o role=inner`）：SHARED + SYNC，烧 ota_0 @0x310000
 #     （构建变体名仍是 sync；功能是 WiFi对时 + USB传歌）
 #
 # 为什么要按角色拆：里世界只有 2.5MB 槽位，而表世界那一整套（蓝牙/音频/播放

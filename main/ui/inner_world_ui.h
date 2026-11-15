@@ -10,7 +10,7 @@ extern "C" {
  * @file inner_world_ui.h
  * @brief 「里世界」主界面：标题 + 功能列表（WiFi对时 / USB传歌）+「回到表世界」
  *
- * 2026-11 新增。里世界是烧在 ota_0 的独立固件（构建变体 sync，见
+ * 2026-11 新增。里世界是烧在 ota_0 的独立固件（矩阵 role=inner，见
  * ideas_and_exps/INNER_WORLD.md）：表世界（播放器）点需要网络/独占 SD 卡的
  * 功能时，弹窗确认后重启进来；这里提供两个功能入口，做完点「回到表世界」
  * 重启回播放器（otadata 在里世界启动时已被擦掉，任何重启都回 factory）。

@@ -7,7 +7,7 @@
     0x002000  bootloader.bin            （S31 的 bootloader 偏移是 0x2000，取自 flasher_args.json）
     0x008000  partition-table.bin
     0x010000  <项目名>.bin              （**播放器**固件，烧 factory，不含字体）
-    0x310000  build/sync/<项目名>.bin   （**里世界固件**，烧 ota_0；缺省自动找，可 --no-sync 跳过）
+    0x310000  build/inner.<variant>/<项目名>.bin  （**里世界固件**，role=inner，烧 ota_0；缺省自动找，可 --no-sync 跳过）
     0x590000  ota_data_initial.bin      （**空白 otadata** → 启动 factory 里的播放器）
     0x600000  spiffs/system.npf         （NPF1 全字库，4.44MiB）
 
@@ -17,7 +17,7 @@
 ⚠ 2026-11 起是**双固件**方案（见 ideas_and_exps/INNER_WORLD.md）：
 播放器（表世界）在 `factory`、里世界固件（WiFi对时 + USB传歌）在 `ota_0`，
 两者共用同一份 `partitions.csv`。
-本脚本默认把**两份都**合并进来（`build/sync/<项目名>.bin` 存在时）；
+本脚本默认把**两份都**合并进来（`build/inner.<variant>/<项目名>.bin` 存在时）；
 没有里世界固件时只提示不报错——那样装出来的机器点「WiFi对时」/「USB传歌」
 会提示"里世界固件未烧录"，其余功能完全正常。
 
@@ -30,7 +30,7 @@ main/core/fonts/font_npf.c 与 ideas_and_exps/NPF_FONT.md），不再编译进�
 用法（在项目根目录）：
 
     idfc build -t release
-    idfc build -t sync            # 想让全量固件带上里世界固件时才需要
+    idfc build -o role=inner      # 想让全量固件带上里世界固件时才需要（-t release -o role=inner 用正式版）
     python tools/make_full_firmware.py -t release
 
 产物默认写到 dist/<项目名>_<variant>_full.bin，并附 .sha256。
@@ -206,7 +206,7 @@ def main() -> int:
                         help="NPF1 字体镜像，默认 spiffs/system.npf")
     parser.add_argument("--no-font", action="store_true", help="不合并字体（font 分区保持 0xFF）")
     parser.add_argument("--sync-image", type=Path, default=None,
-                        help="里世界固件镜像；默认自动找 build/sync/<项目名>.bin（存在就合并进 ota_0）")
+                        help="里世界固件镜像；默认自动找 build/inner.<variant>/<项目名>.bin（存在就合并进 ota_0）")
     parser.add_argument("--no-sync", action="store_true",
                         help="不合并里世界固件（ota_0 保持 0xFF；之后点「WiFi对时」/「USB传歌」会提示未烧录）")
     parser.add_argument("-o", "--output", type=Path, default=None, help="输出文件，默认 dist/<项目名>_<variant>_full.bin")
@@ -239,22 +239,28 @@ def main() -> int:
         output = ROOT / output
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # 里世界固件（双固件方案）：默认去 build/sync 找同名镜像
+    # 里世界固件（矩阵 role=inner）：优先与表世界同 variant 的 cell，回退另一个
     sync_path: Path | None = None
     if not args.no_sync:
         if args.sync_image is not None:
             sync_path = args.sync_image if args.sync_image.is_absolute() else ROOT / args.sync_image
             if not sync_path.is_file():
-                print(f"错误：找不到里世界固件 {sync_path}（先 `idfc build -t sync`，或用 --no-sync）",
+                print(f"错误：找不到里世界固件 {sync_path}"
+                      f"（先 `idfc build -o role=inner` 或 `idfc build -t release -o role=inner`，或用 --no-sync）",
                       file=sys.stderr)
                 return 1
         else:
-            candidate = ROOT / "build" / "sync" / f"{project}.bin"
+            other = "debug" if args.variant == "release" else "release"
+            candidate = ROOT / "build" / f"inner.{args.variant}" / f"{project}.bin"
+            fallback = ROOT / "build" / f"inner.{other}" / f"{project}.bin"
             if candidate.is_file():
                 sync_path = candidate
+            elif fallback.is_file():
+                sync_path = fallback
             else:
                 print(f"提示：没有找到里世界固件 {candidate}，本次不合并 ota_0"
-                      f"（想带上就先 `idfc build -t sync`；或显式 --no-sync 消除本提示）")
+                      f"（想带上就先 `idfc build -o role=inner`（或 `-t release -o role=inner`）；"
+                      f"或显式 --no-sync 消除本提示）")
 
     print(f"构建目录 : {build_dir}")
     print(f"Flash    : {fmt_bytes(flash_size)}")

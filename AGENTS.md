@@ -4,7 +4,7 @@
 
 本仓库有两个长期分支，改代码前先确认自己在哪条线上：
 
-- **`master`（本分支）**：面向**最新硬件（ESP32-S31 / FakePodNano Pro，见 `ideas_and_exps/reference_docs/hardware_v1.md`）**的固件开发主线。新功能、平台迁移都在这里做；S3 时代的构建矩阵（`dac_chip` / `font` 维度）与 `releasecandidate` 构建类型已移除，只剩 debug / release / sync（`sync` = 「里世界」固件：WiFi对时 + USB传歌，烧 ota_0），DAC 固定 CS43131、字体固定为位图（NPF1 全字库）。
+- **`master`（本分支）**：面向**最新硬件（ESP32-S31 / FakePodNano Pro，见 `ideas_and_exps/reference_docs/hardware_v1.md`）**的固件开发主线。新功能、平台迁移都在这里做；S3 时代的构建矩阵（`dac_chip` / `font` 维度）与 `releasecandidate` 构建类型已移除，现在是二维矩阵：`variant`（debug / release）× `role`（player = 表世界 / inner = 里世界），构建目录 `build/<role>.<variant>`；DAC 固定 CS43131、字体固定为位图（NPF1 全字库）。
 - **`legacy_s3`**：S3 已出货硬件的维护分支，只收 bug 修复与稳定性改进，**不加新功能、不做平台迁移**。
 
 ⚠ 两条线都要的修复：先在 `legacy_s3` 改好并验证，再 `git cherry-pick` 到 `master`；**不要 `merge`**（sdkconfig/分区表/硬件层会大幅分叉）。
@@ -43,7 +43,7 @@ ESP32-S31（rev v0.0，320MHz 双核 + LP core，512KB SRAM）+ **16MB Flash** +
 idfc set-idfenv "C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1"  # 每项目一次
 idfc set-variant debug ; idfc ports ; idfc set-port COMn ; idfc status      # 每项目一次
 idfc start-server        # 用户手动启动（控制台=启动它的窗口，关窗口即停）
-idfc build [--reconfigure|--no-reconfigure|--fullclean] [--dry-run] [-t release|sync] [-v]
+idfc build [--reconfigure|--no-reconfigure|--fullclean] [--dry-run] [-t debug|release] [-o role=player|inner] [-v]
 idfc flash [-t ...]      # ⚠ 只警告、不重建：改了配置要先 build
 idfc monitor [--wait-for <regex>] [--grep <regex>] [--timeout ms] [--no-reset]
 idfc size [-t ...] [--detailed] ; idfc run --monitor-wait-for "..."
@@ -53,7 +53,7 @@ idfc quickconfig                # 列出 idfc_buildconfig.json 里声明的临�
 idfc build -qc <名字>           # 本次构建临时启用 quickconfig（写 main/idfc_quickconfig.h）
 ```
 
-- 💡 执行回显里那行 `# Executing idfc idfpy -B build\<cell> -D SDKCONFIG_DEFAULTS=... -D SDKCONFIG=... <子命令>` 就是本次实际命令；配置矩阵只剩 `variant`，构建目录 = `build/<variant>`。
+- 💡 执行回显里那行 `# Executing idfc idfpy -B build\<cell> -D SDKCONFIG_DEFAULTS=... -D SDKCONFIG=... <子命令>` 就是本次实际命令；配置矩阵是二维（variant × role），构建目录 = `build/<role>.<variant>`。
 - 🚨 **PATH 里找不到 `idfc.exe` 时**：不要去找/不要用旧版顶替，**提醒用户下载**（上面的发布页）并放到 PATH 目录，然后重试。**绝不能把 idfc.exe 放进工作区**——工作区带 Low 完整性标签，`danger-full-access` 也救不了。
 - 🚨 报 `IDF 服务器可能尚未运行（退出码 -1）` = 服务器没起：提示用户 `idfc start-server`。
 - ⚠ `idfc.exe` 必须**常驻的服务器**（由用户启动），不要自己 `start-server`（沙箱内会拒绝）。
@@ -69,27 +69,28 @@ idfc build --reconfigure        # 改了 sdkconfig.defaults* / Kconfig / idfc_bu
 # release（调试全关 + 极速版封面）
 idfc build -t release ; idfc flash -t release -p COMn
 
-# sync（「里世界」固件：WiFi对时 + USB传歌，烧 ota_0 @0x310000；见 INNER_WORLD.md）
-idfc build -t sync              # 输出 build\sync\FakePodNanoNightPlayer.bin，必须 ≤2.5MB
-# 🚨 绝不能用 idfc flash -t sync（会把里世界固件写到 factory 覆盖表世界）！只能：
+# 「里世界」固件（role=inner：WiFi对时 + USB传歌，烧 ota_0 @0x310000；见 INNER_WORLD.md）
+idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightPlayer.bin，必须 ≤2.5MB
+# idfc build -t release -o role=inner # 正式版（无 LVGL FPS 指示器/日志）
+# 🚨 绝不能用 idfc flash -o role=inner（会把里世界写到 factory 覆盖表世界）！只能：
 & 'C:\Espressif\tools\python\v6.1\venv\Scripts\esptool.exe' --chip esp32s31 -p COM3 `
     --before default-reset --after hard-reset write-flash 0x310000 `
-    build\sync\FakePodNanoNightPlayer.bin
+    build\inner.debug\FakePodNanoNightPlayer.bin
 ```
 
 其它：`idfc run -t debug --monitor-wait-for "App started"`、`idfc size -t debug`、`idfc clean|fullclean -t debug`。
 
-- **过期检测已自动化**：改了 `sdkconfig.defaults*` / `idfc_buildconfig.json` / `main/Kconfig.projbuild` 后 `build` 会自己清理+重配；`--reconfigure` 强制，`--no-reconfigure` 纯增量，`--fullclean` 从零。
-- ⚠ 原理仍要知道：**已存在的 `build/<variant>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），普通增量构建时新配置**不生效也不报错**。手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意。
+- **过期检测已自动化**：改了 `sdkconfig.defaults*` / `sdkconfig.role.*` / `idfc_buildconfig.json` / `main/Kconfig.projbuild` 后 `build` 会自己清理+重配；`--reconfigure` 强制，`--no-reconfigure` 纯增量，`--fullclean` 从零。
+- ⚠ 原理仍要知道：**已存在的 `build/<cell>/sdkconfig` 优先级高于 defaults**（`replace=False` 合并），普通增量构建时新配置**不生效也不报错**。手工绕过 `build` 直接用 `idfpy -B ...` 时必须自己注意。
 - 串口优先级 `-p` > `.idfc` 里 `set-port`；构建类型 `-t` > `set-variant`（当前 debug）。**这两个是隐式状态，不确定先 `idfc status`。**
-- 默认构建类型 = idfc 当前选择的类型（除非用户指定）。
+- 默认构建类型/角色 = idfc 当前选择（默认 debug + player）。**`role` 不要用 `set-overlay` 持久化**，每次里世界都用 `-o role=inner` 显式指定，避免误把里世界刷进 factory。
 
 **6. 构建配置**
 
-- 事实源只有三处（都入库）：`sdkconfig.defaults*` + `idfc_buildconfig.json` + `main/Kconfig.projbuild`。生成的根 `sdkconfig`、`build/<variant>/sdkconfig` 被 gitignore。
-- `sdkconfig.defaults`（+ `.debug` / `.release` / `.sync`）：esp32s31、QIO 16MB、自定义分区表、16MB Octal PSRAM 200MHz（含 XIP/RODATA）、320MHz、64B 缓存线、FreeRTOS 1000Hz、FATFS cp936+UTF-8、`CONFIG_UI_COVER_FLASH=y`（release 的极速封面）。
+- 事实源只有三处（都入库）：`sdkconfig.defaults*` + `sdkconfig.role.*` + `idfc_buildconfig.json` + `main/Kconfig.projbuild`。生成的根 `sdkconfig`、`build/<cell>/sdkconfig` 被 gitignore。
+- `sdkconfig.defaults`（+ `.debug` / `.release`）：esp32s31、QIO 16MB、自定义分区表、16MB Octal PSRAM 200MHz（含 XIP/RODATA）、320MHz、64B 缓存线、FreeRTOS 1000Hz、FATFS cp936+UTF-8、`CONFIG_UI_COVER_FLASH=y`（release 的极速封面）。**`sdkconfig.role.inner`** 是矩阵 `role=inner` 的 overlay（角色差异：FIRMWARE_ROLE_SYNC / BT 关 / 封面裁剪 / 主任务栈 / TinyUSB MSC），配置链在 variant 之后合并。
 - **LVGL 不可改的关键项**：`LV_USE_CUSTOM_MALLOC=y`（对象堆进 PSRAM，`core/ui/lvgl_mem.c`；改回 CLIB 会因内部 RAM 不足直接崩，理由见 `LVGL9_MIGRATION.md` §10）、`LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`、`LV_FONT_FMT_TXT_LARGE=y`（NPF 的 glyph_dsc 是 LARGE 布局）、`LV_DEF_REFR_PERIOD=16`、`LV_USE_SYSMON=y` + `LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下）、裁掉 6 种用不到的颜色格式（只留 RGB565/ARGB8888/RGB565A8/RGB888）、关 `LV_BUILD_EXAMPLES`/`LV_BUILD_DEMOS`、`CONFIG_LV_USE_PPA=n`（改为自定义 SW blend handler `core/ui/lvgl_ppa_accel.c`，见 `PPA_ACCEL.md`）。逐项理由与实测数据见 `BUILD_CONFIG.md`、`IRAM_AUDIT_LVGL9.md` §5、`PPA_ACCEL.md`。
-- **配置矩阵只有 `variant` 一个维度，共 3 个值**：`debug` / `release` / `sync`（「里世界」固件：WiFi对时 + USB传歌，烧 ota_0）。构建目录 `build/<variant>`，配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>`。`-o`/`set-overlay` 已不存在（overlay 维度已删）。
+- **配置矩阵是二维**：`variant`（debug / release）× `role`（player / inner，默认 player），构建目录 `build/<role>.<variant>`（`build/player.debug` / `build/inner.debug` …），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>[;sdkconfig.role.<role>]`（player 无 overlay 文件）。`variant` 管调试设施（LVGL FPS/日志、性能监视、封面版本），`role` 管固件角色（表世界 / 里世界）。⚠ 里世界**必须显式 `-o role=inner`**，不要持久化到 `.idfc`。
 - ⚠ **分区表（`partitions.csv`，偏移写死）**：`nvs`@0x9000(0x6000) / `phy_init`@0xF000(0x1000) / `factory`@**0x10000(3M)**（播放器）/ `ota_0`@**0x310000(2.5M)**（里世界固件）/ `otadata`@**0x590000(8K)** / `font`@0x600000(6M) / `pldata`@0xC00000(4M)。bootloader@0x2000 与分区表@0x8000 由 sdkconfig 控制（不在 CSV 里）。**四条原则**：① **`pldata` 必须留最末尾**——偏移一变旧播放列表作废、首次开机会重扫（锚定尾部后调 font/app 都不动它）；② `font`/`pldata` 偏移按 64KB 对齐（才能整段 mmap）；③ **app 分区偏移也必须 64KB 对齐**（所以 otadata 放两个 app 之后，否则白丢 64KB）；④ **播放器必须装进 factory(3MB)、里世界固件必须装进 ota_0(2.5MB)**——`check_sizes` 只在"所有 app 分区都装不下"时报错，部分装不下只打 Warning（release 播放器 2.66MB 超出 ota_0 属预期）。**nvs/phy_init/font/pldata 的偏移不要再动**；改过 pldata 偏移的两次重排都导致播放列表重扫（历史见 `partitions.csv` 头部注释）。
 - 字体与构建类型无关（都读同一份 `spiffs/system.npf`）。
 

@@ -4,7 +4,7 @@
 
 > 📥 **下载地址：<https://gitee.com/ZYFDroid/idf-client-cli/releases/>**。下载后把 `idfc.exe` 放到 **PATH 中的某个目录**（例如 `C:\Users\<你>\ProgramFiles\bin\`），然后在**项目目录**里直接用 `idfc <子命令>` 调用即可（见 §3）。
 
-> 📅 **2026-11 起（master，2.x）：配置矩阵只剩 `variant` 一个维度**——只保留 `debug` / `release` 两套构建类型（`releasecandidate` 已删除），构建目录就是 **`build/<variant>`**（如 `build/debug`），`-t` 的取值只有这两个。旧的 `dac_chip` / `font` overlay 维度与 `-o` / `set-overlay` 用法属于 **S3 时代（`legacy_s3`，1.x）**，master 上已不可用；`matrix` 现在只有 2 格。矩阵的定义、格式与实测记录见 `BUILD_MATRIX.md`；`idfc help --all` 与 idfc 仓库 README 是权威说明。
+> 📅 **2026-11 起（master，2.x）：配置矩阵是二维**——`variant`（`debug` / `release`，`releasecandidate` 已删除）× `role`（`player` = 表世界 / `inner` = 里世界），构建目录 **`build/<role>.<variant>`**（如 `build/player.debug`、`build/inner.release`），共 **4 格**。`-t` 只接受 debug/release，`-o role=player|inner` 选角色（默认 player）。旧的 `dac_chip` / `font` overlay 维度属于 **S3 时代（`legacy_s3`，1.x）**，master 上已不存在；但 `-o` / `set-overlay` 的机制仍在用（role 维度）。矩阵的定义、格式与实测记录见 `BUILD_MATRIX.md`；`idfc help --all` 与 idfc 仓库 README 是权威说明。
 
 > ⚠ **本文档对应当前的「子命令版」idfc。**
 > 旧版语法（`--server` / `-B build/<cfg> build` / `-B ... reconfigure` / `raw-idf`）**已全部失效**，现在一律报 `没有这样的命令`（退出码 1）。历史对话、旧文档、旧笔记里的 idfc 命令**不要照抄**——先看 §1 的迁移对照。

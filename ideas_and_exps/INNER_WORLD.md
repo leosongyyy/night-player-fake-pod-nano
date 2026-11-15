@@ -168,7 +168,8 @@ fw_switch_to_player();   /* 开机第一件事 = 擦 otadata（只影响下次�
 
 依赖：托管组件 `espressif/esp_tinyusb ^2.0.1~1`（提供 `tinyusb.h` /
 `tinyusb_msc.h` / `tinyusb_default_config.h`）；`CONFIG_TINYUSB_MSC_ENABLED=y`，
-`CONFIG_TINYUSB_MSC_BUFSIZE=16384` 只写在 `sdkconfig.defaults.sync`。
+`CONFIG_TINYUSB_MSC_BUFSIZE=16384` 只写在 **`sdkconfig.role.inner`**（矩阵
+`role=inner` 的 overlay 文件，见 §5.2）。
 
 > **为什么不用 OtoClock 那种"自己 fork msc_device.c + 运行时分配端点缓冲"的做法**：
 > 那是 TinyUSB 0.17 时代的项目内补丁（为了避免 32/64KB 静态缓冲常驻 IRAM）。
@@ -190,23 +191,43 @@ fw_switch_to_player();   /* 开机第一件事 = 擦 otadata（只影响下次�
 
 ## 5. 构建与烧录
 
+构建用 idfc 的**二维矩阵**：`variant`（debug / release）× `role`（player / inner，
+默认 player）。构建目录 = `build/<role>.<variant>`：
+
+| 单元格 | 构建命令 | 产物 | 烧录位置 |
+|---|---|---|---|
+| player.debug（默认） | `idfc build` | `build/player.debug/` | factory @0x10000（`idfc flash`） |
+| player.release | `idfc build -t release` | `build/player.release/` | factory @0x10000（`idfc flash -t release`） |
+| inner.debug | `idfc build -o role=inner` | `build/inner.debug/` | **ota_0 @0x310000（手工 esptool）** |
+| inner.release | `idfc build -t release -o role=inner` | `build/inner.release/` | **ota_0 @0x310000（手工 esptool）** |
+
+> `role=inner` 的差异配置在 `sdkconfig.role.inner`（overlay，在配置链最后）：
+> `FIRMWARE_ROLE_SYNC=y`、`BT_ENABLED=n`、`UI_COVER_FLASH=n`、主任务栈 16KB、
+> TinyUSB MSC。**调试设施仍由 variant 决定**——里世界 debug 带 LVGL FPS 指示器
+> 与日志，里世界 release 不带（面板上更干净、体积更小）。
+
 ```powershell
 # ① 表世界（日常固件）—— 与以前完全一样；它会顺手把新分区表写进去
 idfc build ; idfc flash
 
-# ② 里世界固件（只在改了里世界/对时/USB 相关代码时才需要重烧）
-idfc build -t sync        # 输出 build\sync\FakePodNanoNightPlayer.bin（必须 ≤2.5MB）
+# ② 里世界固件（debug 版；只在改了里世界/对时/USB 相关代码时才需要重烧）
+idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin（必须 ≤2.5MB）
+# 想要正式版（无 FPS 指示器/日志）：
+# idfc build -t release -o role=inner   # → build\inner.release\...
 
-# ③ 把里世界固件烧到 ota_0（⚠ 不能用 idfc flash -t sync！）
+# ③ 把里世界固件烧到 ota_0（⚠ 不能用 idfc flash -o role=inner！）
 & 'C:\Espressif\tools\python\v6.1\venv\Scripts\esptool.exe' --chip esp32s31 -p COM3 `
     --before default-reset --after hard-reset write-flash 0x310000 `
-    build\sync\FakePodNanoNightPlayer.bin
+    build\inner.debug\FakePodNanoNightPlayer.bin
 ```
 
 要点：
 
-- 🚨 **绝不能用 `idfc flash -t sync`**：那条命令按当前构建的分区表把 app 写到
-  **factory**（0x10000），会把表世界覆盖成里世界固件。
+- 🚨 **绝不能用 `idfc flash -o role=inner`**：那条命令按当前构建的分区表把 app
+  写到 **factory**（0x10000），会把表世界覆盖成里世界固件。
+- ⚠ 不要用 `idfc set-overlay role inner` 把它持久化：那样之后普通 `idfc build` /
+  `idfc flash` 都会指向里世界，很容易把里世界刷进 factory。**每次显式 `-o role=inner`**，
+  默认（不写 `-o`）永远是 player。
 - `idfc flash` 会额外写 `ota_data_initial.bin`（**空白 otadata**）到 0x590000，
   所以"重烧表世界"总是安全地落回 factory。
 - `idfc flash` 只写 0x10000 起的 app 区段（表世界最坏 2.79MB，结束于 0x2B9400），
@@ -217,9 +238,28 @@ idfc build -t sync        # 输出 build\sync\FakePodNanoNightPlayer.bin（必�
 
 ### 5.1 无人值守验证（没有触摸输入时）
 
-`CONFIG_FIRMWARE_SYNC_AUTOSTART=y`（默认 n，**只用于调试**）：表世界每次开机完成
-都会切到里世界固件。⚠ 里世界**不会**自动重启回来（要用户点按钮），所以它只能验证
-"切过去"，不能形成自动循环；验证完记得重新 `idfc flash` 关掉该选项。
+用 idfc quickconfig（不改 sdkconfig、不触发 reconfigure，详见 §7.4）：
+`idfc build -qc SYNC_AUTOSTART`（表世界开机自动切里世界）、
+`idfc build -o role=inner -qc INNER_USB_AUTOSTART`（里世界开机自动进 USB 传歌）。
+⚠ 里世界**不会**自动重启回表世界（要用户点按钮），所以 autostart 只能验证
+"切过去"，不能形成自动循环；验证完用不带 `-qc` 的普通构建重烧即可恢复。
+
+### 5.2 为什么用矩阵（role × variant）而不是一个 `sync` 变体
+
+旧方案把"里世界"做成和 debug/release 平级的第三个**变体**（`-t sync`），
+后果是里世界**没有 debug/release 之分**：它只继承公共 `sdkconfig.defaults`，
+而公共配置里 LVGL 的 FPS 指示器是开的（`CONFIG_LV_USE_PERF_MONITOR=y`），
+于是里世界 release 也一直显示 FPS、也没法用"release 更省 Flash"的调试设施差异。
+
+改成二维矩阵后：
+- **variant 维度**（debug/release）管调试设施：LVGL FPS/日志、性能监视、封面版本；
+- **role 维度**（player/inner）管固件角色：`FIRMWARE_ROLE_SYNC`、蓝牙开关、
+  TinyUSB MSC、主任务栈、封面裁剪。
+两者正交，里世界自然得到 debug/release 两档，且配置链顺序保证 overlay（角色）
+可以覆盖 variant 的项（例如 release 默认开 `UI_COVER_FLASH`，里世界覆盖成 n）。
+
+⚠ 代价：矩阵改了 `OutputDir`（`build/{role}.{variant}`），旧的 `build/debug` /
+`build/sync` 目录作废，**每个 cell 首次都要全量构建一次**（旧目录可手工删除）。
 
 ---
 
@@ -296,7 +336,7 @@ V_RES/10（42KB/块，双缓冲 85KB，DMA 余量 237,947 B，最大连续块 19
 idfc build -qc SYNC_AUTOSTART ; idfc flash
 
 # 里世界开机后自动进入 USB 传歌（配合上面的 autostart 可全自动跑到 U 盘模式）
-idfc build -t sync -qc INNER_USB_AUTOSTART
+idfc build -o role=inner -qc INNER_USB_AUTOSTART
 # 然后按 §5 ③ 烧到 0x310000
 ```
 
@@ -312,12 +352,12 @@ idfc build -t sync -qc INNER_USB_AUTOSTART
 | 点功能提示"里世界固件未烧录" | ota_0 没烧或镜像坏了：按 §5 的 ③ 重烧；表世界不受影响 |
 | 里世界卡住/死机 | 长按电源键关机再开 → 因为 otadata 已被擦，一定回表世界 |
 | 想临时关闭这个功能 | 不烧 ota_0 即可（点入口只会提示未烧录）；要彻底删代码见下面的"移除" |
-| 误开了 `FIRMWARE_SYNC_AUTOSTART` | 设备停在里世界 → 点「回到表世界」，或重新 `idfc flash` |
+| 误开了 `FIRMWARE_SYNC_AUTOSTART` / quickconfig `SYNC_AUTOSTART` | 设备停在里世界 → 点「回到表世界」，或重新 `idfc flash`（不带 `-qc`） |
 | 想清空里世界槽 | `esptool erase-region 0x310000 0x280000` |
 | USB 传歌电脑看不到盘 | ① 插头翻面（OTG 那一面）；② 看串口 `usb_msc` 日志；③ 确认烧的是新里世界固件 |
 
 **完全移除本方案**（回到单固件）：把 `partitions.csv` 的 factory 改回 0x5F0000、
-删掉 ota_0/otadata 两行；`sdkconfig.defaults.sync`、`main/core/system/` 可留可删；
+删掉 ota_0/otadata 两行；`sdkconfig.role.inner`、`main/core/system/` 可留可删；
 `main/Kconfig.projbuild` 的两个选项删掉；`main/CMakeLists.txt` 合回一个列表
 （`SHARED + PLAYER`）；`main.c` 去掉 `#if` 分派；`settings_menu.c` 的两个入口改回
 直接实现或删除。⚠ 改分区表必须重刷分区表。

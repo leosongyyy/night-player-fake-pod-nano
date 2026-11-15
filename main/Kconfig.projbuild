@@ -222,10 +222,10 @@ menu "FakePodNanoNightPlayer 应用配置"
     #   · 表世界 / 播放器固件（本项 = n，默认，`idfc build`）：烧到 factory
     #     @0x10000，日常开机启动的就是它，没有 WiFi 协议栈、没有 USB 设备栈
     #     （内部 RAM 全留给 LVGL/蓝牙）；
-    #   · 里世界固件（本项 = y，`idfc build -t sync`）：烧到 ota_0 @0x310000，
+    #   · 里世界固件（`idfc build -o role=inner`，本项 = y）：烧到 ota_0 @0x310000，
     #     提供 WiFi对时 + USB传歌 两个功能，界面是功能列表 + 「回到表世界」。
     #     表世界里点这两类功能时弹统一确认窗，写 otadata 切过去。
-    # ⚠ sync 构建变体**绝不能**用 `idfc flash`（那会按分区表把里世界固件写到
+    # ⚠ role=inner 的构建**绝不能**用 `idfc flash`（那会按分区表把里世界固件写到
     #   factory，覆盖表世界）；烧录用 esptool 手工写 0x310000。
 
     config FIRMWARE_ROLE_SYNC

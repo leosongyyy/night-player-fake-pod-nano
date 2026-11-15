@@ -354,7 +354,7 @@ static void player_app_main(void)
 /* 双固件方案（见 ideas_and_exps/INNER_WORLD.md 与 partitions.csv）：
      · 表世界 / 播放器固件（factory @0x10000，默认）：完整播放功能，
        不带 WiFi 协议栈、不带 USB 栈；
-     · 里世界固件（ota_0 @0x310000，构建变体 sync）：WiFi对时 + USB传歌，
+     · 里世界固件（ota_0 @0x310000，矩阵 role=inner）：WiFi对时 + USB传歌，
        点「回到表世界」重启回播放器。 */
 void app_main(void)
 {

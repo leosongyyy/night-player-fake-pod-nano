@@ -13,7 +13,7 @@ extern "C" {
  * @file usb_msc.h
  * @brief USB 传歌：把 SD 卡作为 USB Mass Storage（U 盘）暴露给电脑
  *
- * 2026-11 新增，只编进**里世界**固件（构建变体 sync，见
+ * 2026-11 新增，只编进**里世界**固件（矩阵 role=inner，见
  * ideas_and_exps/INNER_WORLD.md）。播放器固件一个符号都不引用它。
  *
  * 为什么必须放在独立固件里：

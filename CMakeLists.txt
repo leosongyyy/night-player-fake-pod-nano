@@ -79,13 +79,13 @@ set(COMPONENTS
     vfs                            # 文件系统注册（fatfs 依赖，直接包含亦稳妥）
     sdmmc                          # sdmmc_cmd.h / sd_protocol_defs.h（SD 卡）
 
-    # ---- 网络对时（2026-11 新增 → 只给 sync 固件用） ----
+    # ---- 网络对时（2026-11 新增 → 只给矩阵 role=inner 的固件用） ----
     # 时间与日期 → WiFi对时：WiFi STA 连 AP + SNTP。
     # ⚠ **2026-11 改为双固件方案**（见 ideas_and_exps/INNER_WORLD.md）：
     #   WiFi 协议栈不再进播放器固件（它常驻约 27KB 内部 RAM + 65KB 运行时峰值，
-    #   是蓝牙之后 UI 帧率的主要挤压来源），而是放进独立的「对时固件」（烧在
-    #   ota_0，构建变体 `sync`）。播放器只在需要时用 esp_ota_set_boot_partition()
-    #   切过去，对时固件写完 RTC 再切回 factory。
+    #   是蓝牙之后 UI 帧率的主要挤压来源），而是放进独立的「里世界固件」（烧在
+    #   ota_0，矩阵 role=inner）。表世界只在需要时用 esp_ota_set_boot_partition()
+    #   切过去，里世界点「回到表世界」再重启回 factory。
     #
     # ⚠ 为什么这 5 个组件**必须无条件**留在白名单里（不能按角色裁剪）：
     #   本 `COMPONENTS` 列表写在 `include(project.cmake)` 之前，那时 Kconfig
@@ -141,7 +141,7 @@ project(FakePodNanoNightPlayer)
 # 而 IDF 默认 -Werror 把它当错误。这不是本项目的代码，也不影响运行
 # （BT 名字本来就允许不以 '\0' 结尾，Bluedroid 内部按长度处理）。
 # 只对 bt 组件关掉这一条警告，不动全局的 CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS。
-# ⚠ 必须判断 CONFIG_BT_ENABLED：对时固件（构建变体 sync）把它关掉后，bt 组件会
+# ⚠ 必须判断 CONFIG_BT_ENABLED：里世界固件（矩阵 role=inner）把它关掉后，bt 组件会
 #   注册成 **INTERFACE 库**（没有任何源文件），而 INTERFACE 目标只允许设置
 #   INTERFACE 属性——直接 target_compile_options(... PRIVATE ...) 会在配置阶段报
 #   "target_compile_options may only set INTERFACE properties on INTERFACE targets"。

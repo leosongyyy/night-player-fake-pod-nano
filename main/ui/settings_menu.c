@@ -1313,7 +1313,7 @@ static void time_date_time_row_cb(lv_event_t *e)
 
 /* ---- 需要「里世界」完成的功能（2026-11 双固件方案的统一入口） -------------
    表世界是日常播放器，不含 WiFi 协议栈、也不含 USB 设备栈；WiFi对时与
-   USB传歌都放进独立的**里世界固件**（构建变体 sync，烧在 ota_0）：
+   USB传歌都放进独立的**里世界固件**（矩阵 role=inner，烧在 ota_0）：
 
      点功能行 → 统一确认弹窗 → 保存播放现场 → 写 otadata 切到 ota_0 → 重启
      → 里世界（功能列表）→「回到表世界」→ esp_restart()（otadata 已被里世界
