@@ -205,6 +205,11 @@ static void player_app_main(void)
     ESP_LOGI(TAG, "Initialize PCF85063A RTC");
     if (rtc_init() != ESP_OK) {
         ESP_LOGW(TAG, "RTC unavailable (time display disabled)");
+    } else {
+        /* 清掉 bootloader 可能没消费干净的启动请求字节（RTC RAM_byte 0x03）：
+           正常情况下自定义 bootloader 读完就清 0；这里兜底，避免陈旧的 0xA5
+           让下一次复位又进里世界。 */
+        rtc_write_reg(RTC_REG_RAM_BYTE, 0x00);
     }
     mem_trace_log("07b-rtc");
 

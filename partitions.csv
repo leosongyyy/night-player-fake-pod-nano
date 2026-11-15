@@ -29,7 +29,9 @@
 # ota_0：界面是「WiFi对时 / USB传歌」功能列表 + 「回到表世界」。表世界里点这两
 # 个功能时写 otadata 切过去，里世界启动第一件事就是**把 otadata 擦掉**
 # （= 任何意外复位都回 factory），然后等用户选功能，最后点「回到表世界」重启。
-#   · 用的是 IDF **标准 bootloader 自带的 OTA 槽机制**，不需要自定义 bootloader；
+#   · 启动选择：自定义 bootloader（bootloader_components/main）优先读 PCF85063A
+#     RAM_byte(0x03) 选 ota_0；RTC 不可用时才回退 IDF 标准 OTA 槽 + otadata
+#     （详见 ideas_and_exps/RTC_BOOT_PARTITION.md）；
 #   · 两个固件必须用**同一份分区表**，各自把自己烧到对应槽（表世界 `idfc flash`
 #     到 factory，里世界固件手工 `esptool write_flash 0x310000`，见 INNER_WORLD.md §5）；
 #   · RTC 是外置芯片（PCF85063A），天然跨固件共享；SD 卡是同一张卡（USB 传歌

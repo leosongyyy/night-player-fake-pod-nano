@@ -1,5 +1,13 @@
 # 双固件：「表世界」播放器 + 「里世界」维护固件（2026-11）
 
+> **2026-11-16 更新（RTC-only 切换，已落地）**：日常切换不再写/擦 otadata。
+> 表世界把 `PCF85063A RAM_byte(0x03)=0xA5`，自定义 bootloader
+> （`bootloader_components/main/`）读它并选 `ota_0`，读完清 0；RTC 读失败才回退
+> otadata。里世界开机检查 otadata：为空则跳过 8 KB 擦除。一次往返的 otadata
+> 擦除从 **3 个 4 KB 扇区降到 0**。完整设计/实测/体积见
+> [`RTC_BOOT_PARTITION.md`](RTC_BOOT_PARTITION.md)。
+> 下文 §1「不需要自定义 bootloader」是 2026-11-15 的历史结论，已被此更新取代。
+>
 > 动机一（2026-11-15 已落地并真机验证）：WiFi 对时那套协议栈
 > （esp_wifi/lwip/wpa_supplicant）常驻要多吃约 **27KB 内部 RAM（静态）+
 > 65KB（运行时峰值）**，而内部 RAM 与 IRAM 是同一块 SRAM —— 蓝牙接入之后
@@ -16,17 +24,23 @@
 >
 > 表世界里需要网络或需要独占 SD 卡的功能，统一弹同一个确认窗：
 > 「该功能需要前往「里世界」完成，点击确认重启到里世界。」
-> 确认后写 otadata → 重启进里世界；里世界开机第一件事是**擦掉 otadata**
-> （= 之后任何意外复位/断电都回表世界），用户做完点「回到表世界」重启回
-> `factory`。
+> 确认后写 RTC 的一次性请求字节（`0x03=0xA5`）→ 重启；自定义 bootloader 读到
+> 请求后选 `ota_0` 并清 0 → 进里世界。里世界开机检查 otadata：为空（正常 RTC
+> 路径）就**跳过擦除**，非空（RTC 失败后的兜底切换）才擦；用户做完点
+> 「回到表世界」重启回 `factory`。
 >
-> 结论：**不需要自定义 bootloader**，IDF 标准 bootloader 的 OTA 槽 + `otadata`
-> 就够；2026-11-15 已用旧版"对时固件"跑通往返，这次把它升级成里世界（新增
-> USB 传歌 + 常驻功能列表）。
+> 结论（2026-11-16 起）：**需要一个自定义 bootloader** 来读 RTC 字节选分区；
+> 它只是 `bootloader_components/main` 覆盖 IDF 的 main 组件，体积 16,640 B /
+> 24,576 B（余 32%）。RTC 读失败/超时会自动降级回原来的 otadata 路径，不会变砖。
 
 ---
 
 ## 1. 为什么不需要自定义 bootloader
+
+> ⚠ **2026-11-16 起本节结论已过时**：为了用 RTC 字节选分区，现在确实有一个
+> 自定义 bootloader（`bootloader_components/main`）。下面保留为"最初为什么
+> 用标准 otadata 就够"的历史依据；RTC-only 方案见
+> [`RTC_BOOT_PARTITION.md`](RTC_BOOT_PARTITION.md)。
 
 依据 IDF 6.1 源码（`components/bootloader_support/src/bootloader_utility.c`、
 `components/app_update/esp_ota_ops.c`）：
@@ -41,9 +55,10 @@
 
 ⚠ **一个必须知道的例外**：本机 `sdkconfig.defaults` 开了
 `CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON/ALWAYS=y`（换开机速度，不校验镜像）。
-所以"镜像坏了 bootloader 自动回退 factory"这条保险**在本机不生效**，安全完全靠
-**"里世界开机第一件事就擦 otadata"** 这条纪律 + `esp_ota_set_boot_partition()`
-写之前自己会校验目标镜像。**不要绕过 `fw_switch_*` 直接写 otadata。**
+所以"镜像坏了 bootloader 自动回退 factory"这条保险**在本机不生效**。RTC 主路径
+靠 `fw_switch_to_sync()` 在写请求前用 `esp_image_verify()` 做全量只读校验；
+otadata 兜底路径仍由 `esp_ota_set_boot_partition()` 校验。**不要绕过 `fw_switch_*`
+直接写 RTC 字节/otadata**，否则可能把损坏的里世界镜像加载起来。
 
 ---
 
@@ -105,7 +120,7 @@ else { ui_toast_show("里世界固件未烧录"); } /* ESP_ERR_OTA_VALIDATE_FAIL
 ### 3.2 里世界侧（`core/system/inner_world_app.c`）
 
 ```c
-fw_switch_to_player();   /* 开机第一件事 = 擦 otadata（只影响下次启动） */
+fw_switch_to_player();   /* 回 factory：otadata 空（RTC 主路径）则跳过擦除，非空才擦 */
 /* 之后才做耗时的初始化 + 显示功能列表 */
 ```
 
@@ -299,11 +314,12 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 ```
 [表世界] App started
 [调试 quickconfig SYNC_AUTOSTART] fw_switch: switch next boot -> ota_0 @0x310000
+[表世界] fw_switch: RTC boot request 0xA5 written; otadata untouched (no flash erase)
 [重启]
-[里世界] 591   inner_world_app: === 里世界固件启动：role=sync, running partition=ota_0 ===
-[里世界] 601   fw_switch: switch next boot -> factory @0x010000 (擦 otadata)
-[里世界] 824   fw_switch: otadata erased: next boot = factory
-[里世界] 839   config_store: config loaded: vol=18 bright=140 ...
+[boot] rtc03=0xa5 -> ota_0 (inner)
+[里世界] 410   inner_world_app: === 里世界固件启动：role=sync, running partition=ota_0 ===
+[里世界] 420   fw_switch: otadata already empty (RTC path), skip erase
+[里世界] 600   config_store: config loaded: vol=18 bright=140 ...
 [里世界] 995~1217 display / LVGL / PPA / 触摸输入设备就绪
 [里世界] 1249  font_npf: NPF1 全字库已挂载（34462 个字形）
 [里世界] 1319~1437 PMU / RTC（2026-11-15 23:16:49）/ SD 卡挂载（61000MB）

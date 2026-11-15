@@ -85,6 +85,9 @@ void inner_world_app_run(void)
     ESP_LOGI(TAG, "init: PMU / RTC / SD");
     battery_init();   /* AXP2101：电池与充电状态（限充配置由 PMU 自己保持） */
     rtc_init();       /* PCF85063A：WiFi 对时结果写这里 */
+    /* 兜底清掉 bootloader 的"进里世界"请求字节（正常情况下 bootloader 已消费）。
+       放在 rtc_init 之后：这之前 RTC 设备句柄还没建好，rtc_write_reg 会失败。 */
+    rtc_write_reg(RTC_REG_RAM_BYTE, 0x00);
     sd_card_init();   /* 失败不阻塞：列表会显示「无 SD 卡」，对时/传歌会提示 */
 
     /* ③ 点亮屏幕：先渲染"黑底 + 里世界界面"，再给亮度（与表世界开机同一套

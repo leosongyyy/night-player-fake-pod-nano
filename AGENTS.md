@@ -30,7 +30,7 @@ ESP32-S31（rev v0.0，320MHz 双核 + LP core，512KB SRAM）+ **16MB Flash** +
 
 **3. 参考文档**（都在 `ideas_and_exps/`）
 
-`IDFC_USAGE.md`（idfc 完整用法/历史坑）、`BUILD_CONFIG.md`（构建配置）、`BUILD_MATRIX.md`（配置矩阵格式与 idfc 验收）、`AGENTS_DETAILS_ARCHIVE.md`（**2026-11-15 从本文件移出的历史实测数据与逐项理由**，考据时查这里）、`reference_docs/`（原厂资料整理版：`hardware_v1.md`、`pmu_axp2101.md`、`rtc_pcf85063a.md`）、`INNER_WORLD.md`（双固件：表世界 + 里世界，WiFi对时 + USB传歌）、`WIFI_TIME_SYNC.md`（对时实现细节）、`BLUETOOTH_AUDIO.md`、`MULTI_FORMAT_AUDIO.md`（MP3/FLAC/OGG/WAV 多格式播放与封面）、`COVER_ART.md`（内嵌/目录封面查找顺序）、`NPF_FONT.md` + `BINFONT_RESEARCH.md`、`FONT_FLASH.md`、`FULL_FIRMWARE.md`、`LVGL9_MIGRATION.md`、`IRAM_DMA_AUDIT.md`、`IRAM_AUDIT_LVGL9.md`、`IRAM_OBJECTS_PSRAM_S31.md`、`PSRAM_TASK_STACK.md`、`FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`、`CONFIG_SLOTS.md`、`COVER_JPEG_HW.md`、`PPA_ACCEL.md`、`MARQUEE_STYLE.md`、`CLICK_WHEEL_USAGE.md`、`DISPLAY_FREEZE_TRIAGE.md`、`S31_FLASH_CACHE_RACE.md`、`DONE_PLANS.md` / `FUTURE_PLAN.md`。
+`IDFC_USAGE.md`（idfc 完整用法/历史坑）、`BUILD_CONFIG.md`（构建配置）、`BUILD_MATRIX.md`（配置矩阵格式与 idfc 验收）、`AGENTS_DETAILS_ARCHIVE.md`（**2026-11-15 从本文件移出的历史实测数据与逐项理由**，考据时查这里）、`reference_docs/`（原厂资料整理版：`hardware_v1.md`、`pmu_axp2101.md`、`rtc_pcf85063a.md`）、`INNER_WORLD.md`（双固件：表世界 + 里世界，WiFi对时 + USB传歌）、`RTC_BOOT_PARTITION.md`（RTC-only 切换：自定义 bootloader + flash 擦写账）、`WIFI_TIME_SYNC.md`（对时实现细节）、`BLUETOOTH_AUDIO.md`、`MULTI_FORMAT_AUDIO.md`（MP3/FLAC/OGG/WAV 多格式播放与封面）、`COVER_ART.md`（内嵌/目录封面查找顺序）、`NPF_FONT.md` + `BINFONT_RESEARCH.md`、`FONT_FLASH.md`、`FULL_FIRMWARE.md`、`LVGL9_MIGRATION.md`、`IRAM_DMA_AUDIT.md`、`IRAM_AUDIT_LVGL9.md`、`IRAM_OBJECTS_PSRAM_S31.md`、`PSRAM_TASK_STACK.md`、`FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`、`CONFIG_SLOTS.md`、`COVER_JPEG_HW.md`、`PPA_ACCEL.md`、`MARQUEE_STYLE.md`、`CLICK_WHEEL_USAGE.md`、`DISPLAY_FREEZE_TRIAGE.md`、`S31_FLASH_CACHE_RACE.md`、`DONE_PLANS.md` / `FUTURE_PLAN.md`。
 - `components/`：本地组件（esp_lcd_qspi_amoled、3 个触摸驱动、**libogg + Tremor（OGG 定点解码）**、spi_flash fork）；`patches/` 是托管组件的构建期补丁。
 
 **4. idfc 使用说明（重要）**
@@ -107,7 +107,7 @@ idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightP
 - LVGL 移植层：显示驱动、**tick 直接读硬件时间**、专用任务（Core0）、互斥锁、触摸 indev、通用虚拟列表、全局跑马灯节奏、deep_worker 大栈任务。
 - 开机流程：开机封面 → 低电拒启 → 未插卡 / 列表无效则一键扫描 → 主界面；**设置菜单懒加载**，不占开机路径。
 - UI：四页滑动 tab（目录/歌曲/正在播放/播放设置）、顶部状态栏（时间/页面名/电量+充电图标）、下拉控制中心（亮度/音量竖条、蓝牙、睡眠定时、设置入口）。
-- **表世界 / 里世界（双固件）**：表世界是日常播放器（不含 WiFi 协议栈、不含 USB 栈）。表世界里需要网络或需要独占 SD 卡的功能，统一弹「该功能需要前往「里世界」完成，点击确认重启到里世界。」→ 写 otadata 切到 `ota_0` 的里世界固件。里世界界面 = 标题 + 功能列表（**WiFi对时 / USB传歌**）+ 底部「回到表世界」；里世界开机第一件事擦 otadata（任何意外复位都回表世界）。WiFi对时：连 AP + SNTP → 写 PCF85063A → 回列表显示结果；USB传歌：把 SD 卡以原始块设备交给 TinyUSB MSC，电脑上是可移动磁盘，退出靠重启。**表世界不再在开机时 Toast 对时结果**。见 `INNER_WORLD.md`。
+- **表世界 / 里世界（双固件）**：表世界是日常播放器（不含 WiFi 协议栈、不含 USB 栈）。表世界里需要网络或需要独占 SD 卡的功能，统一弹「该功能需要前往「里世界」完成，点击确认重启到里世界。」→ 写 PCF85063A `RAM_byte(0x03)=0xA5`（一次性请求）→ 重启；自定义 bootloader（`bootloader_components/main`，16,640 B / 余 32%）读该字节选 `ota_0` 并清 0；RTC 读失败/超时才回退 otadata。里世界界面 = 标题 + 功能列表（**WiFi对时 / USB传歌**）+ 底部「回到表世界」；里世界开机检查 otadata，空（RTC 主路径）则跳过擦除，非空（RTC 兜底切换）才擦。正常切换 **0 次 otadata 擦除**（旧路径每次往返 3×4KB）；⚠ `fw_switch.c` 的 `FW_SWITCH_USE_RTC_BOOT` 必须与 bootloader 实际烧录内容匹配，换回 IDF 默认 bootloader 时改 0。WiFi对时：连 AP + SNTP → 写 PCF85063A → 回列表显示结果；USB传歌：把 SD 卡以原始块设备交给 TinyUSB MSC，电脑上是可移动磁盘，退出靠重启。**表世界不再在开机时 Toast 对时结果**。见 `INNER_WORLD.md` 与 `RTC_BOOT_PARTITION.md`。
 - 工具：双核性能监视（串口每 2s）、开发者选项（触摸测试白点，NVS 运行时开关）、全局 Toast。
 
 > `FUTURE_PLAN.md` / `DONE_PLANS.md` 只记较大型需求与修复；只有 `FUTURE_PLAN.md` 里出现过的内容才能移进 `DONE_PLANS.md`。日常小改动不必记录；踩坑变大研究的单开文件（如 `IRAM_DMA_AUDIT.md`）。
@@ -120,7 +120,7 @@ main/
   main.c                  # app_main 只做固件角色分派：表世界 player_app_main() / 里世界 inner_world_app_run()
   Kconfig.projbuild       # 应用级 Kconfig（性能监视、内存快照、封面、PPA、LVGL 热点对象、PMU 按键/充电、RTC、固件角色、版本号）
   CMakeLists.txt          # 源文件按角色分：MAIN_SRCS_SHARED / _PLAYER / _SYNC（+ 托管组件构建期补丁）
-  core/system/            # fw_switch（otadata 切换）/ inner_world_app（里世界启动流程）/ usb_msc（USB传歌，TinyUSB MSC）
+  core/system/            # fw_switch（RTC 请求/otadata 兜底切换）/ inner_world_app（里世界启动流程）/ usb_msc（USB传歌，TinyUSB MSC）
   core/hardware/          # display touch axp2101 boot_reason rtc battery button_service sd_card pldata
     audio/                # audio(I2S+DAC+输出路由) cs43131 mp3_player eq bt_audio resampler
     bt/bt_service.c       # 经典蓝牙：控制器/Bluedroid/A2DP/AVRCP + bt_svc 命令任务
