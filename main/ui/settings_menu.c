@@ -1607,7 +1607,7 @@ static lv_obj_t *help_page_build(void)
     return help_page;
 }
 
-/* 7. 关于子页：作者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
+/* 7. 关于子页：贡献者信息 + 固件版本（Kconfig FIRMWARE_VERSION_STRING）。
     最下方追加"开发者选项"入口子页（同样懒加载，见 dev_page_build） */
 static lv_obj_t *about_page_build(void)
 {
@@ -1618,7 +1618,11 @@ static lv_obj_t *about_page_build(void)
     page_style_apply(about_page);
     menu_text_row_create(about_page,
         "FakePodNanoNightPlayer\n基于 NightPlayer 的第三方固件");
-    menu_text_row_create(about_page, "作者：ZYFDroid\nAI 协作：DeepSeek");
+    /* 贡献者名单（排名不分先后）：标题块 + 每位贡献者一块 */
+    menu_text_row_create(about_page, "贡献者: (排名不分先后)");
+    menu_text_row_create(about_page,
+        "ZYFDroid@gitee.com\n代码：Deepseek\n负责灵机一动：ZYFDroid");
+    menu_text_row_create(about_page, "sAkura-io@gitee.com");
     menu_text_row_create(about_page, "固件版本：" CONFIG_FIRMWARE_VERSION_STRING);
     /* 开发者选项：在关于页最下方挂入口行（本页最后一行），同样懒加载 */
     lazy_row_create(about_page, LV_SYMBOL_WARNING, "开发者选项",
