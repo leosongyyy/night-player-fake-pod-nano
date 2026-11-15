@@ -1,8 +1,9 @@
 # 自定义 bootloader 加 I²C 读取：体积实验（2026-11-16）
 
-> **实验性质**：本文记录的是**只加 hook** 的体积基线（只构建、不烧录）。代码在
-> [`experiments/bootloader_i2c/`](experiments/bootloader_i2c/)，默认不参与工程构建。
-> 最终落地的方案是**整份 override + RTC RAM_byte 选分区**，见
+> **实验性质**：本文记录的是**只加 hook** 的体积基线（只构建、不烧录）。
+> hook 版实验代码已在 RTC-only 方案落地后移除（2026-11-16；需要时从 git 历史
+> `c07abf7` 取回），本文只保留测量记录。最终落地的方案是
+> **整份 override + RTC RAM_byte 选分区**，见
 > [`RTC_BOOT_PARTITION.md`](RTC_BOOT_PARTITION.md)（bootloader 16,640 B，余 7,936 B）。
 > 环境：ESP-IDF 6.1（`esp32s31`，GCC 15.2.0），`player.debug` / `inner.debug` 两个构建目录各测一遍。
 
@@ -35,7 +36,9 @@
 [`reference_docs/pmu_axp2101.md`](reference_docs/pmu_axp2101.md) 的寄存器表），
 和上一轮"PMU 里跨固件记录一个字节"的讨论对得上。
 
-代码：[`experiments/bootloader_i2c/boot_i2c.c`](experiments/bootloader_i2c/boot_i2c.c)
+代码：hook 版已移除；需要时用
+`git show c07abf7:ideas_and_exps/experiments/bootloader_i2c/boot_i2c.c` 取回
+（同目录的 `CMakeLists.txt` / `README.md` 同理）。
 
 ---
 
@@ -156,25 +159,19 @@ hooks 没有回调点。
 
 ---
 
-## 7. 复现步骤
+## 7. 复现（代码已移除）
+
+hook 版代码已不在工作区，不能直接按原步骤复现。需要时从 git 历史取回：
 
 ```powershell
-# 1) 把实验组件放回构建路径
-Copy-Item -Recurse ideas_and_exps\experiments\bootloader_i2c bootloader_components\boot_i2c
-
-# 2) 强制 bootloader 重新 configure（新增组件目录不会自动触发）
-Remove-Item build\player.debug\bootloader-prefix\src\bootloader-stamp\bootloader-configure
-
-# 3) 只构建 bootloader（不烧录）
-idfc idfpy -B build\player.debug bootloader
-# 看最后一行：Bootloader binary size 0x3f50 bytes. 0x20b0 bytes (34%) free.
-
-# 4) 恢复基线（移走组件 + 再 build 一次）
-Remove-Item -Recurse -Force bootloader_components
-Remove-Item build\player.debug\bootloader-prefix\src\bootloader-stamp\bootloader-configure
-idfc idfpy -B build\player.debug bootloader
-# 应回到 0x3c10 / 0x23f0 (37%) free
+git show c07abf7:ideas_and_exps/experiments/bootloader_i2c/boot_i2c.c
+git show c07abf7:ideas_and_exps/experiments/bootloader_i2c/CMakeLists.txt
+git show c07abf7:ideas_and_exps/experiments/bootloader_i2c/README.md
 ```
+
+把它们放到 `bootloader_components/boot_i2c/`，再删掉
+`build\player.debug\bootloader-prefix\src\bootloader-stamp\bootloader-configure`，
+`idfc idfpy -B build\player.debug bootloader` 即可重现 `0x3f50 / 0x20b0 (34% free)`。
 
 > ⚠ 实测踩坑：只 `idfc idfpy ... bootloader` 不会发现新加的
 > `bootloader_components/`，必须删掉 `bootloader-configure` stamp（或做一次
@@ -186,5 +183,6 @@ idfc idfpy -B build\player.debug bootloader
 
 1. 硬件 I²C（`i2c_ll`）版本的体积实测，和 bit-bang 对比；
 2. 只读 1 字节 vs 读 4 字节的差异（预计 <100 B）；
-3. 如果要"按 PMU 字节选分区"：整份 override bootloader 的改动量与风险清单；
+3. ~~按 PMU 字节选分区~~：已落地为整份 override + RTC RAM_byte，见
+   [`RTC_BOOT_PARTITION.md`](RTC_BOOT_PARTITION.md)；
 4. 如果要"传给 App"：RTC retain mem `custom` 字段的写入时机验证。
