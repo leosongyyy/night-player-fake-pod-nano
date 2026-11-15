@@ -15,6 +15,7 @@ extern "C" {
  *   - MP3：ID3v2.2/2.3/2.4 的 PIC/APIC 帧（JPEG）
  *   - FLAC：PICTURE 元数据块（JPEG）
  *   - OGG Vorbis：Vorbis comment 里的 METADATA_BLOCK_PICTURE / COVERART（JPEG）
+ *   - WAV：RIFF 里的 "ID3 " chunk（ID3v2 标签，与 MP3 共用解析）
  *   - 回退：歌曲所在目录的 cover/folder/front/album/封面 .jpg/.jpeg
  *
  * 只返回 JPEG（cover_jpeg_decode 只支持 JPEG），PNG 等格式会被跳过。

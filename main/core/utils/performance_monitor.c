@@ -78,12 +78,11 @@ static void cpu_collector_task(void *pvParameters)
 }
 
 /* 关键任务栈高水位汇总（低频打印，验证深链委托/缩栈安全性）：
-   每 20s 打印一次所有目标任务的"最小剩余栈"（uxTaskGetStackHighWaterMark，
-   自启动以来峰值用栈的余量；本 port StackType_t=uint8_t，返回值即字节）。
-   - 值越小 → 峰值用栈越接近分配值（接近爆栈）；
-   - 任务不存在（未创建，如非播放态的 mp3_play；或已删除）时跳过。
-   用途：确认 deep_worker 接手深链后 button/power_service 等任务的高富余，
-   作为后续缩栈的依据；同时监控 deep_worker 自身 8KB 栈的余量。 */
+   每 20s 打印一次所有目标任务的 uxTaskGetStackHighWaterMark()。
+   ⚠⚠ 返回值是**剩余**字节，不是已用字节：FreeRTOS 从栈底数没被触碰过的
+   0xA5 填充（prvTaskCheckFreeStackSpace），得到"自任务创建以来的最小剩余"。
+   所以**数值越小越危险**，已用 = 栈大小 − 打印值。
+   （本 port StackType_t=uint8_t，返回值即字节。） */
 static void mem_report_stack_hwm(void)
 {
     static const char *names[] = {

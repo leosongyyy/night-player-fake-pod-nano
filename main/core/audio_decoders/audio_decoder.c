@@ -9,11 +9,14 @@
 #include "esp_log.h"
 
 /* 第三方解码库：minimp3 / dr_flac 的实现分别在 *_impl.c；
-   OGG 使用 Tremor（libvorbisidec，定点整数 Vorbis，纯 C）。 */
+   OGG 使用 Tremor（libvorbisidec，定点整数 Vorbis，纯 C）；
+   WAV 是本工程自己实现的解析器，见 wav_decoder.c。 */
 #include "minimp3_ex.h"
 #include "dr_flac.h"
 #include "ivorbisfile.h"
 #include "ogg/ogg_alloc.h"
+
+#include "core/audio_decoders/wav_decoder.h"
 
 static const char *TAG = "audio_dec";
 
@@ -42,6 +45,8 @@ struct audio_decoder {
         mp3_stream_t mp3;
         flac_stream_t flac;
         OggVorbis_File vorbis;
+        /* WAV 由独立单元实现（本工程唯一自己写的格式），这里只存句柄 */
+        wav_decoder_t *wav;
     } u;
     char *io_buf;   /* MP3/FLAC/OGG 共用的 stdio 缓冲（close 时释放） */
 };
@@ -109,7 +114,6 @@ static const char *ext_of(const char *path)
     return (dot && dot != path) ? dot + 1 : "";
 }
 
-
 audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
 {
     if (err && err_len) {
@@ -128,6 +132,8 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
         type = AUDIO_DEC_FLAC;
     } else if (strcasecmp(ext, "ogg") == 0) {
         type = AUDIO_DEC_OGG;
+    } else if (strcasecmp(ext, "wav") == 0) {
+        type = AUDIO_DEC_WAV;
     } else {
         snprintf(err, err_len, "不支持的音频格式：.%s", ext ? ext : "");
         return NULL;
@@ -224,7 +230,7 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
         ESP_LOGI(TAG, "FLAC stream opened: %s %uHz %uch %llu frames",
                  path, (unsigned)dec->sample_rate, (unsigned)dec->channels,
                  (unsigned long long)dec->total_frames);
-    } else {
+    } else if (type == AUDIO_DEC_OGG) {
         FILE *fp = fopen(path, "rb");
         if (!fp) {
             snprintf(err, err_len, "无法打开文件");
@@ -260,6 +266,17 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
         ESP_LOGI(TAG, "OGG/Tremor stream opened: %s %uHz %uch %llu frames",
                  path, (unsigned)dec->sample_rate, (unsigned)dec->channels,
                  (unsigned long long)dec->total_frames);
+    } else if (type == AUDIO_DEC_WAV) {
+        /* WAV 的 RIFF/fmt/data 解析与位宽转换全在 wav_decoder.c；
+           这里只把结果搬进统一字段 */
+        dec->u.wav = wav_decoder_open(path, err, err_len);
+        if (dec->u.wav == NULL) {
+            free(dec);
+            return NULL;   /* wav_decoder_open 已写好原因 */
+        }
+        dec->sample_rate = wav_decoder_sample_rate(dec->u.wav);
+        dec->channels = wav_decoder_channels(dec->u.wav);
+        dec->total_frames = wav_decoder_total_frames(dec->u.wav);
     }
 
     return dec;
@@ -300,6 +317,11 @@ int audio_decoder_read(audio_decoder_t *dec, int16_t *out, int max_frames)
         }
         return (int)(got / (2 * (int)dec->channels));
     }
+
+    if (dec->type == AUDIO_DEC_WAV) {
+        /* 具体解析/位宽转换都在 wav_decoder.c；这里只做转发 */
+        return wav_decoder_read(dec->u.wav, out, max_frames);
+    }
     return -1;
 }
 
@@ -322,6 +344,9 @@ esp_err_t audio_decoder_seek(audio_decoder_t *dec, uint32_t seconds)
         int ok = ov_pcm_seek(&dec->u.vorbis,
                              (ogg_int64_t)seconds * dec->sample_rate);
         return ok == 0 ? ESP_OK : ESP_FAIL;
+    }
+    if (dec->type == AUDIO_DEC_WAV) {
+        return wav_decoder_seek(dec->u.wav, seconds);
     }
     return ESP_ERR_INVALID_STATE;
 }
@@ -350,6 +375,7 @@ const char *audio_decoder_type_name(const audio_decoder_t *dec)
     case AUDIO_DEC_MP3: return "MP3";
     case AUDIO_DEC_FLAC: return "FLAC";
     case AUDIO_DEC_OGG: return "OGG";
+    case AUDIO_DEC_WAV: return "WAV";
     default: return "?";
     }
 }
@@ -373,6 +399,8 @@ void audio_decoder_close(audio_decoder_t *dec)
         }
     } else if (dec->type == AUDIO_DEC_OGG) {
         ov_clear(&dec->u.vorbis);   /* 内部经 close 回调 fclose(fp) */
+    } else if (dec->type == AUDIO_DEC_WAV) {
+        wav_decoder_close(dec->u.wav);   /* 内部负责 fclose 与帧缓冲释放 */
     }
     free(dec->io_buf);
     free(dec);

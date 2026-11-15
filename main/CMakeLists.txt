@@ -64,6 +64,7 @@ set(MAIN_SRCS_PLAYER
     "core/hardware/audio/cs43131.c"
     "core/hardware/audio/mp3_player.c"
     "core/audio_decoders/audio_decoder.c"
+    "core/audio_decoders/wav_decoder.c"    # WAV 是本工程自己实现的解析器（非第三方库）
     "core/audio_decoders/minimp3_impl.c"
     "core/audio_decoders/dr_flac_impl.c"
     "core/hardware/audio/eq.c"

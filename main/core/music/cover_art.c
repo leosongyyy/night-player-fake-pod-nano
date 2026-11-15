@@ -135,43 +135,23 @@ static const uint8_t *ca_apic_payload(const uint8_t *p, const uint8_t *end,
     return p;
 }
 
-/* 读取 ID3 标签并找 APIC。成功时返回新分配的 JPEG 缓冲 */
-static esp_err_t ca_id3_find(const char *path, uint8_t **out, uint32_t *out_len)
+/* 解析一段完整的 ID3v2 标签（tag 指向 "ID3" 头），找 APIC/PIC 里的 JPEG。
+   MP3 的文件头标签与 WAV 的 "ID3 " chunk 共用这个函数（chunk 里就是完整的
+   ID3 标签，所以 WAV 只是"换个位置找到标签"）。
+   成功时返回新分配的 JPEG 缓冲（best/front 规则：front 优先）。 */
+static esp_err_t ca_id3_parse(const uint8_t *tag, size_t total,
+                              uint8_t **out, uint32_t *out_len)
 {
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
+    if (total < 10 || memcmp(tag, "ID3", 3) != 0) {
         return ESP_ERR_NOT_FOUND;
     }
-
-    uint8_t hdr[10];
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
-        memcmp(hdr, "ID3", 3) != 0) {
-        fclose(f);
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    uint8_t ver_major = hdr[3];
-    uint8_t flags = hdr[5];
-    uint32_t body = ca_synchsafe32(hdr + 6);
-    /* v2.4 footer 标志：标签末尾额外 10 字节 */
-    size_t total = 10u + (size_t)body + ((flags & 0x10) ? 10u : 0u);
-    if (body == 0 || total > CA_MAX_TAG) {
-        fclose(f);
+    uint8_t ver_major = tag[3];
+    uint8_t flags = tag[5];
+    uint32_t body = ca_synchsafe32(tag + 6);
+    /* 标签体必须整段落在给定缓冲里（WAV 的 chunk 长度可能与标签自报值略有出入） */
+    if (body == 0 || (size_t)body > total - 10u) {
         return ESP_ERR_INVALID_SIZE;
     }
-
-    uint8_t *tag = ca_alloc(total);
-    if (tag == NULL) {
-        fclose(f);
-        return ESP_ERR_NO_MEM;
-    }
-    if (fseek(f, 0, SEEK_SET) != 0 ||
-        fread(tag, 1, total, f) != total) {
-        free(tag);
-        fclose(f);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    fclose(f);
 
     const uint8_t *p = tag + 10;
     const uint8_t *end = tag + 10 + body;   /* 不含 footer */
@@ -179,13 +159,11 @@ static esp_err_t ca_id3_find(const char *path, uint8_t **out, uint32_t *out_len)
     /* 扩展头：v2.3 的长度不含自身，v2.4 含自身 */
     if (flags & 0x40) {
         if (end - p < 4) {
-            free(tag);
             return ESP_ERR_INVALID_SIZE;
         }
         uint32_t ext = (ver_major >= 4) ? ca_synchsafe32(p) : ca_be32(p);
         size_t skip = (ver_major >= 4) ? ext : (size_t)ext + 4u;
         if (skip > (size_t)(end - p)) {
-            free(tag);
             return ESP_ERR_INVALID_SIZE;
         }
         p += skip;
@@ -236,7 +214,6 @@ static esp_err_t ca_id3_find(const char *path, uint8_t **out, uint32_t *out_len)
                     free(best);
                     *out = copy;
                     *out_len = jlen;
-                    free(tag);
                     return ESP_OK;
                 }
                 if (copy != NULL && best == NULL) {
@@ -251,13 +228,132 @@ static esp_err_t ca_id3_find(const char *path, uint8_t **out, uint32_t *out_len)
         p += hdr_len + size;
     }
 
-    free(tag);
     if (best != NULL) {
         *out = best;
         *out_len = best_len;
         return ESP_OK;
     }
     return ESP_ERR_NOT_FOUND;
+}
+
+/* 读取 MP3 文件头的 ID3 标签并找 APIC。成功时返回新分配的 JPEG 缓冲 */
+static esp_err_t ca_id3_find(const char *path, uint8_t **out, uint32_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t hdr[10];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
+        memcmp(hdr, "ID3", 3) != 0) {
+        fclose(f);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t flags = hdr[5];
+    uint32_t body = ca_synchsafe32(hdr + 6);
+    /* v2.4 footer 标志：标签末尾额外 10 字节 */
+    size_t total = 10u + (size_t)body + ((flags & 0x10) ? 10u : 0u);
+    if (body == 0 || total > CA_MAX_TAG) {
+        fclose(f);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t *tag = ca_alloc(total);
+    if (tag == NULL) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0 ||
+        fread(tag, 1, total, f) != total) {
+        free(tag);
+        fclose(f);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    fclose(f);
+
+    esp_err_t ret = ca_id3_parse(tag, total, out, out_len);
+    free(tag);
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
+/* WAV：RIFF 里的 "ID3 " chunk（ID3v2 标签被塞进 WAV 容器）            */
+/* ------------------------------------------------------------------ */
+
+/* 扫描 RIFF 块找 "ID3 "（或小写 "id3 "，少见）chunk，交给 ca_id3_parse。
+   ⚠ 只认 JPEG：内嵌 PNG 封面会被 ca_apic_payload 的 JPEG 头校验跳过，
+     回退到同目录封面/默认封面（本工程不做 PNG 解码）。 */
+static esp_err_t ca_wav_find(const char *path, uint8_t **out,
+                             uint32_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t hdr[12];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
+        (memcmp(hdr, "RIFF", 4) != 0 && memcmp(hdr, "RF64", 4) != 0) ||
+        memcmp(hdr + 8, "WAVE", 4) != 0) {
+        fclose(f);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    long fsize = ftell(f);
+    long pos = 12;
+    esp_err_t ret = ESP_ERR_NOT_FOUND;
+
+    while (fsize > 0 && pos + 8 <= fsize) {
+        uint8_t ch[8];
+        if (fseek(f, pos, SEEK_SET) != 0 ||
+            fread(ch, 1, sizeof(ch), f) != sizeof(ch)) {
+            break;
+        }
+        uint32_t sz = ca_le32(ch + 4);
+        long body = pos + 8;
+
+        if (memcmp(ch, "ID3 ", 4) == 0 || memcmp(ch, "id3 ", 4) == 0) {
+            if (sz == 0 || sz > CA_MAX_TAG || (long)sz > fsize - body) {
+                break;
+            }
+            uint8_t *tag = ca_alloc(sz);
+            if (tag == NULL) {
+                ret = ESP_ERR_NO_MEM;
+                break;
+            }
+            if (fread(tag, 1, sz, f) != sz) {
+                free(tag);
+                ret = ESP_ERR_INVALID_RESPONSE;
+                break;
+            }
+            ESP_LOGD(TAG, "WAV ID3 chunk: %u B", (unsigned)sz);
+            ret = ca_id3_parse(tag, sz, out, out_len);
+            free(tag);
+            if (ret != ESP_OK) {
+                /* 很多 WAV 的内嵌封面是 PNG，而本工程只解 JPEG；明确提示一次，
+                   免得用户以为封面解析没生效（还会继续回退同目录封面） */
+                ESP_LOGI(TAG, "WAV ID3 chunk 里没有 JPEG 封面"
+                              "（PNG 等其它格式不支持，回退目录封面）");
+            }
+            break;   /* 只处理第一个 ID3 chunk */
+        }
+
+        /* 块长度是奇数时有一个填充字节；长度异常时停止，避免死循环 */
+        long next = body + (long)sz + (long)(sz & 1u);
+        if (next <= pos) {
+            break;
+        }
+        pos = next;
+    }
+
+    fclose(f);
+    return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -879,6 +975,16 @@ esp_err_t cover_art_find(const char *song_path, uint8_t **jpeg_out,
             embed_err = err;
             if (err == ESP_OK) {
                 ESP_LOGI(TAG, "embedded cover: OGG Vorbis comment (%u B)",
+                         (unsigned)*len_out);
+                return ESP_OK;
+            }
+        } else if (strcasecmp(dot, ".wav") == 0) {
+            /* WAV 的封面惯例是塞一个 "ID3 " chunk（ID3v2 标签），少部分播放器
+               写 LIST/INFO，但里面只有文字没有图片 */
+            err = ca_wav_find(song_path, jpeg_out, len_out);
+            embed_err = err;
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "embedded cover: WAV ID3 chunk (%u B)",
                          (unsigned)*len_out);
                 return ESP_OK;
             }

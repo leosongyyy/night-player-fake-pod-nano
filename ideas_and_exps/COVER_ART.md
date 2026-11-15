@@ -10,7 +10,8 @@
 2. **音频内嵌封面**（`core/music/cover_art.c`）：
    - MP3：ID3v2.2 `PIC`，ID3v2.3/2.4 `APIC`；
    - FLAC：`PICTURE` 元数据块；
-   - OGG Vorbis：Vorbis comment 的 `METADATA_BLOCK_PICTURE`（base64）或 `COVERART`（base64）。
+   - OGG Vorbis：Vorbis comment 的 `METADATA_BLOCK_PICTURE`（base64）或 `COVERART`（base64）；
+   - WAV：RIFF 里的 `ID3 ` chunk（里面就是完整 ID3v2 标签，与 MP3 共用 `ca_id3_parse()`）。
 3. **同目录封面图片**：`cover` / `folder` / `front` / `album` / `albumart` / `artwork` / `封面` 等命名的 `.jpg` / `.jpeg`；没有命中关键词时，只有目录里恰好一张 JPEG 才会使用。
 4. 都没有 → 内置默认封面。
 
@@ -19,8 +20,10 @@
 ## 2. 格式与大小限制
 
 - **只支持 JPEG**（`cover_jpeg_decode()` 只解 JPEG）；PNG 会被跳过并打印日志，建议转成 `cover.jpg`。
+  ⚠ 很多 WAV 的内嵌封面是 **PNG**（例如 `毛宁-涛声依旧.wav` 的 640×640 `image/png`），当前会被跳过，
+  最终回退到同目录 JPEG / 默认封面。
 - 单张 JPEG 上限 **2MB**。
-- ID3 标签 / FLAC 图片块上限 **4MB**（含 padding 与其它帧）。
+- ID3 标签 / FLAC 图片块 / WAV 的 `ID3 ` chunk 上限 **4MB**（含 padding 与其它帧）。
 - OGG 注释包上限 **4MB**。
 - 返回的 JPEG 缓冲优先分配在 PSRAM，由 `cover_art_free()` 释放。
 
@@ -50,7 +53,7 @@ ESP32-S31 硬件 JPEG 路径仍限制 **512×512**（受当前驱动/内存策�
 - 小于屏幕：居中留黑边；
 - 不再要求封面必须是 460×460。
 
-封面任务栈从 6KB 提升到 **8KB**，覆盖 ID3/FLAC/OGG 标签解析与目录扫描的局部缓冲。
+封面任务栈从 6KB 提升到 **8KB**，覆盖 ID3/FLAC/OGG/WAV 标签解析与目录扫描的局部缓冲。
 
 ## 4. 内存与线程
 
@@ -62,10 +65,14 @@ ESP32-S31 硬件 JPEG 路径仍限制 **512×512**（受当前驱动/内存策�
 
 - 本仓库：ESP-IDF 6.1 编译通过。
 - hello_world 测试固件：内嵌封面、目录封面、大图缩放与居中裁切已验证；测试曲目无内嵌封面时正确回退默认图。
-- 反哺后尚未重新烧录真机；建议用以下样本回归：
+- 2026-11-15 真机（debug）：MP3 的 `.npd` 封面（硬件解码 460×460，16ms）正常；`毛宁-涛声依旧.wav`
+  的内嵌封面是 PNG，按约定被跳过并打 `WAV ID3 chunk 里没有 JPEG 封面`，随后回退默认封面；
+  `加州旅馆 - 华语群星.wav` 的内嵌 JPEG 被正确取出（`embedded cover: WAV ID3 chunk (59218 B)`），
+  随后走既有硬件 JPEG 解码路径。建议继续用以下样本回归：
   - 带 APIC 的 MP3；
   - 带 PICTURE 的 FLAC；
   - 带 `METADATA_BLOCK_PICTURE` 的 OGG；
+  - 带 `ID3 ` chunk + JPEG APIC 的 WAV（应显示）；
   - 1000×1000 / 3000×3000 的 `cover.jpg`；
   - 只有 PNG 封面的目录（应回退默认图并打日志）。
 

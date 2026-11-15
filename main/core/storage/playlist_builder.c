@@ -115,7 +115,7 @@ static void make_full_path(const char *rel, char *out, size_t outsz)
     }
 }
 
-/* ---------------- 音频扩展名判断（播放引擎支持 MP3/FLAC/OGG Vorbis） ---------------- */
+/* ---------------- 音频扩展名判断（播放引擎支持 MP3/FLAC/OGG/WAV） ---------------- */
 
 static bool is_audio_file(const char *name)
 {
@@ -126,7 +126,8 @@ static bool is_audio_file(const char *name)
     const char *ext = dot + 1;
     return (strcasecmp(ext, "mp3") == 0) ||
            (strcasecmp(ext, "flac") == 0) ||
-           (strcasecmp(ext, "ogg") == 0);
+           (strcasecmp(ext, "ogg") == 0) ||
+           (strcasecmp(ext, "wav") == 0);
 }
 
 /* ---------------- 播放列表（.pl）文件 ---------------- */
