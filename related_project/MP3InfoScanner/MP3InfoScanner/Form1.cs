@@ -20,15 +20,10 @@ namespace TestMP3
     public partial class Form1 : Form
     {
 
-        public string RootDir = "";
 
         public Form1()
         {
-#if DEBUG
-            RootDir = "Q:\\MP3Player";
-#else
-            RootDir = Application.StartupPath;
-#endif
+
             InitializeComponent();
             try
             {
@@ -40,15 +35,17 @@ namespace TestMP3
 
         }
 
+        string[] supportExtension = {".mp3",".wav",".ogg",".flac" };
+
         private void btnDoScan_Click(object sender, EventArgs e)
         {
             btnDoScan.Enabled = false;
             print("========= 扫描开始 =========");
             bool scanOnly = chkScanOnly.Checked;
             Application.DoEvents();
-            List<string> mp3File = Directory.EnumerateFiles(RootDir, "*.mp3", SearchOption.AllDirectories).Where(s => !s.Contains("\\.")).OrderBy(s => s).ToList();
+            List<string> mp3File = Directory.EnumerateFiles(Program.RootDir, "*", SearchOption.AllDirectories).Where(s => supportExtension.Any(et => s.EndsWith(et,StringComparison.OrdinalIgnoreCase))).Where(s => !s.Contains("\\.")).OrderBy(s => s).ToList();
 
-            var outDir = Path.Combine(RootDir, ".ecov");
+            var outDir = Path.Combine(Program.RootDir, ".ecov");
             if (!Directory.Exists(outDir))
             {
                 Directory.CreateDirectory(outDir);
@@ -58,7 +55,7 @@ namespace TestMP3
             foreach (var item in mp3File)
             {
                 current++;
-                var relPath = Path.GetFullPath(item).Substring(Path.GetFullPath(RootDir).Length).TrimStart('/','\\');
+                var relPath = Path.GetFullPath(item).Substring(Path.GetFullPath(Program.RootDir).Length).TrimStart('/','\\');
                 var metaFile = Path.Combine(outDir, relPath+".npd");
                 bool needWrite = false;
                 if (!File.Exists(metaFile))
@@ -317,6 +314,11 @@ namespace TestMP3
         private void btnClear_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
         {
             textBox1.Clear();
+        }
+
+        private void 写入WiFi对时信息ToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            new FrmSetWifiConfig().ShowDialog(this);
         }
     }
 }

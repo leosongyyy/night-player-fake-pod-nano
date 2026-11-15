@@ -1,4 +1,4 @@
-﻿namespace TestMP3
+namespace TestMP3
 {
     partial class Form1
     {
@@ -34,18 +34,22 @@
             this.textBox1 = new System.Windows.Forms.TextBox();
             this.groupBox1 = new System.Windows.Forms.GroupBox();
             this.groupBox2 = new System.Windows.Forms.GroupBox();
+            this.btnClear = new System.Windows.Forms.LinkLabel();
             this.groupBox3 = new System.Windows.Forms.GroupBox();
             this.lblMusicInfo = new System.Windows.Forms.Label();
             this.panel1 = new System.Windows.Forms.Panel();
-            this.chkScanAndSave = new System.Windows.Forms.RadioButton();
             this.chkScanOnly = new System.Windows.Forms.RadioButton();
-            this.btnClear = new System.Windows.Forms.LinkLabel();
+            this.chkScanAndSave = new System.Windows.Forms.RadioButton();
             this.toolTip1 = new System.Windows.Forms.ToolTip(this.components);
+            this.menuStrip1 = new System.Windows.Forms.MenuStrip();
+            this.播放器管理ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.写入WiFi对时信息ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             ((System.ComponentModel.ISupportInitialize)(this.imgPreview)).BeginInit();
             this.groupBox1.SuspendLayout();
             this.groupBox2.SuspendLayout();
             this.groupBox3.SuspendLayout();
             this.panel1.SuspendLayout();
+            this.menuStrip1.SuspendLayout();
             this.SuspendLayout();
             // 
             // imgPreview
@@ -62,7 +66,7 @@
             // 
             // btnDoScan
             // 
-            this.btnDoScan.Location = new System.Drawing.Point(13, 512);
+            this.btnDoScan.Location = new System.Drawing.Point(13, 529);
             this.btnDoScan.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.btnDoScan.Name = "btnDoScan";
             this.btnDoScan.Size = new System.Drawing.Size(282, 48);
@@ -85,7 +89,7 @@
             // groupBox1
             // 
             this.groupBox1.Controls.Add(this.imgPreview);
-            this.groupBox1.Location = new System.Drawing.Point(13, 14);
+            this.groupBox1.Location = new System.Drawing.Point(13, 31);
             this.groupBox1.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.groupBox1.Name = "groupBox1";
             this.groupBox1.Padding = new System.Windows.Forms.Padding(8, 10, 8, 10);
@@ -98,7 +102,7 @@
             // 
             this.groupBox2.Controls.Add(this.btnClear);
             this.groupBox2.Controls.Add(this.textBox1);
-            this.groupBox2.Location = new System.Drawing.Point(303, 14);
+            this.groupBox2.Location = new System.Drawing.Point(303, 31);
             this.groupBox2.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.groupBox2.Name = "groupBox2";
             this.groupBox2.Padding = new System.Windows.Forms.Padding(8, 10, 8, 10);
@@ -107,10 +111,21 @@
             this.groupBox2.TabStop = false;
             this.groupBox2.Text = "日志输出";
             // 
+            // btnClear
+            // 
+            this.btnClear.AutoSize = true;
+            this.btnClear.Location = new System.Drawing.Point(69, -1);
+            this.btnClear.Name = "btnClear";
+            this.btnClear.Size = new System.Drawing.Size(37, 20);
+            this.btnClear.TabIndex = 3;
+            this.btnClear.TabStop = true;
+            this.btnClear.Text = "清空";
+            this.btnClear.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.btnClear_LinkClicked);
+            // 
             // groupBox3
             // 
             this.groupBox3.Controls.Add(this.lblMusicInfo);
-            this.groupBox3.Location = new System.Drawing.Point(13, 329);
+            this.groupBox3.Location = new System.Drawing.Point(13, 346);
             this.groupBox3.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.groupBox3.Name = "groupBox3";
             this.groupBox3.Padding = new System.Windows.Forms.Padding(8, 10, 8, 10);
@@ -133,10 +148,20 @@
             // 
             this.panel1.Controls.Add(this.chkScanOnly);
             this.panel1.Controls.Add(this.chkScanAndSave);
-            this.panel1.Location = new System.Drawing.Point(13, 483);
+            this.panel1.Location = new System.Drawing.Point(13, 500);
             this.panel1.Name = "panel1";
             this.panel1.Size = new System.Drawing.Size(282, 21);
             this.panel1.TabIndex = 7;
+            // 
+            // chkScanOnly
+            // 
+            this.chkScanOnly.AutoSize = true;
+            this.chkScanOnly.Location = new System.Drawing.Point(106, 0);
+            this.chkScanOnly.Name = "chkScanOnly";
+            this.chkScanOnly.Size = new System.Drawing.Size(97, 24);
+            this.chkScanOnly.TabIndex = 1;
+            this.chkScanOnly.Text = "仅测试标签";
+            this.chkScanOnly.UseVisualStyleBackColor = true;
             // 
             // chkScanAndSave
             // 
@@ -148,43 +173,47 @@
             this.chkScanAndSave.TabIndex = 0;
             this.chkScanAndSave.TabStop = true;
             this.chkScanAndSave.Text = "扫描并保存";
-            this.toolTip1.SetToolTip(this.chkScanAndSave, "扫描歌曲标签信息，并保存到.ecov文件。\r\n若文件已经扫描过且未变动，则会跳过扫描。");
             this.chkScanAndSave.UseVisualStyleBackColor = true;
             // 
-            // chkScanOnly
+            // menuStrip1
             // 
-            this.chkScanOnly.AutoSize = true;
-            this.chkScanOnly.Location = new System.Drawing.Point(106, 0);
-            this.chkScanOnly.Name = "chkScanOnly";
-            this.chkScanOnly.Size = new System.Drawing.Size(97, 24);
-            this.chkScanOnly.TabIndex = 1;
-            this.chkScanOnly.Text = "仅测试标签";
-            this.toolTip1.SetToolTip(this.chkScanOnly, "扫描所有歌曲，仅检查标签有效性并输出日志。\r\n适合用于对曲库进行完整检查。");
-            this.chkScanOnly.UseVisualStyleBackColor = true;
+            this.menuStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.播放器管理ToolStripMenuItem});
+            this.menuStrip1.Location = new System.Drawing.Point(0, 0);
+            this.menuStrip1.Name = "menuStrip1";
+            this.menuStrip1.Size = new System.Drawing.Size(891, 25);
+            this.menuStrip1.TabIndex = 8;
+            this.menuStrip1.Text = "menuStrip1";
             // 
-            // btnClear
+            // 播放器管理ToolStripMenuItem
             // 
-            this.btnClear.AutoSize = true;
-            this.btnClear.Location = new System.Drawing.Point(69, -1);
-            this.btnClear.Name = "btnClear";
-            this.btnClear.Size = new System.Drawing.Size(37, 20);
-            this.btnClear.TabIndex = 3;
-            this.btnClear.TabStop = true;
-            this.btnClear.Text = "清空";
-            this.btnClear.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.btnClear_LinkClicked);
+            this.播放器管理ToolStripMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.写入WiFi对时信息ToolStripMenuItem});
+            this.播放器管理ToolStripMenuItem.Name = "播放器管理ToolStripMenuItem";
+            this.播放器管理ToolStripMenuItem.Size = new System.Drawing.Size(80, 21);
+            this.播放器管理ToolStripMenuItem.Text = "播放器管理";
+            // 
+            // 写入WiFi对时信息ToolStripMenuItem
+            // 
+            this.写入WiFi对时信息ToolStripMenuItem.Name = "写入WiFi对时信息ToolStripMenuItem";
+            this.写入WiFi对时信息ToolStripMenuItem.Size = new System.Drawing.Size(180, 22);
+            this.写入WiFi对时信息ToolStripMenuItem.Text = "写入WiFi对时信息";
+            this.写入WiFi对时信息ToolStripMenuItem.Click += new System.EventHandler(this.写入WiFi对时信息ToolStripMenuItem_Click);
             // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 20F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(891, 574);
+            this.ClientSize = new System.Drawing.Size(891, 590);
             this.Controls.Add(this.panel1);
             this.Controls.Add(this.groupBox3);
             this.Controls.Add(this.groupBox2);
             this.Controls.Add(this.groupBox1);
             this.Controls.Add(this.btnDoScan);
+            this.Controls.Add(this.menuStrip1);
             this.Font = new System.Drawing.Font("微软雅黑", 10.5F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
+            this.MainMenuStrip = this.menuStrip1;
             this.Margin = new System.Windows.Forms.Padding(4, 5, 4, 5);
             this.MaximizeBox = false;
             this.Name = "Form1";
@@ -198,7 +227,10 @@
             this.groupBox3.ResumeLayout(false);
             this.panel1.ResumeLayout(false);
             this.panel1.PerformLayout();
+            this.menuStrip1.ResumeLayout(false);
+            this.menuStrip1.PerformLayout();
             this.ResumeLayout(false);
+            this.PerformLayout();
 
         }
 
@@ -216,6 +248,9 @@
         private System.Windows.Forms.RadioButton chkScanAndSave;
         private System.Windows.Forms.LinkLabel btnClear;
         private System.Windows.Forms.ToolTip toolTip1;
+        private System.Windows.Forms.MenuStrip menuStrip1;
+        private System.Windows.Forms.ToolStripMenuItem 播放器管理ToolStripMenuItem;
+        private System.Windows.Forms.ToolStripMenuItem 写入WiFi对时信息ToolStripMenuItem;
     }
 }
 

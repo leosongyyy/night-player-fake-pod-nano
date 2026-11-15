@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,6 +10,14 @@ namespace TestMP3
 {
     internal static class Program
     {
+        public static string RootDir
+        {
+            get
+            {
+                return Application.StartupPath;
+            }
+        }
+
         /// <summary>
         /// 应用程序的主入口点。
         /// </summary>
