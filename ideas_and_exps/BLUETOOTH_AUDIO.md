@@ -45,6 +45,31 @@ MP3 解码（mp3_play，Core1）
 - **EQ 系数只维护一套**：DAC 路径按源 fs，蓝牙路径按协商出的蓝牙 fs；切换输出时
   `eq_notify_sample_rate()` 重算（满足"EQ 在重采样之后"）。
 
+### 2.1 开关蓝牙的 profile 生命周期（⚠ 2026-11 真机踩坑）
+
+关蓝牙**必须先把两个 profile 反初始化，再关 host**：
+
+```c
+esp_avrc_ct_deinit();        /* ① AVRC CT 必须先于 A2DP（IDF 的 btc_avrc_ct_deinit
+                                会检查 g_a2dp_on_deinit，反序会留脏状态） */
+esp_a2d_source_deinit();     /* ② 两者都是异步投递到 BTC 任务 */
+vTaskDelay(300ms);           /* ③ 留时间真正 cleanup（btc_a2d_src_deinit 还要等
+                                状态回 IDLE 才清服务） */
+esp_bluedroid_disable(); esp_bluedroid_deinit();
+esp_bt_controller_disable(); esp_bt_controller_deinit();
+```
+
+- **为什么**：IDF 的 `esp_bluedroid_deinit()` **不会清** BTC 里 profile 的"已初始化"
+  标志（`btc_avrc.c` 的 `s_rc_ct_init` 是静态变量，只有 profile 自己的 deinit 才置 0）。
+  不先反初始化的话，第二次开蓝牙时 `esp_avrc_ct_init()`/`esp_a2d_source_init()`
+  返回 `ESP_ERR_INVALID_STATE`（日志 `btc_avrc_ct_init already initialized` /
+  `a2d source init failed`），A2DP source 停在半初始化态 ——
+  **表现：ACL 能连上耳机，但起不了流，用户看到"关一次蓝牙就再也连不上"**。
+- **不能只 `disable` 不 `deinit`**：S31 的控制器是预编译库，`esp_bt_controller_disable()`
+  → `esp_bt_controller_enable()` 之后寻呼不再工作（实测 `esp_a2d_source_connect`
+  返回 OK 但一条 HCI 事件都没有），所以"省内存的只 disable"方案不可用。
+- 关掉时确实会释放控制器/host 内存（实测 `iram` +51KB），再开时重新分配。
+
 ## 3. 蓝牙参数与协商
 
 - 本机名：`NightPlayer FPNPro`。

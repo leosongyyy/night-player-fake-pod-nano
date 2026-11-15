@@ -830,6 +830,7 @@ static esp_err_t bt_stack_start(void)
         s_power = BT_SVC_POWER_ON;
         return ESP_OK;
     }
+
     s_power = BT_SVC_POWER_STARTING;
 
     /* 只用 Classic：释放 BLE 控制器内存（已编译 BLE 时才有意义） */
@@ -929,6 +930,23 @@ static void bt_stack_stop(void)
     if (s_connected) {
         esp_a2d_source_disconnect(s_peer_bda);
         vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    /* ⚠ 关 host 之前必须**先反初始化两个 profile**：
+       IDF 的 esp_bluedroid_deinit() 不会清 BTC 里 profile 的"已初始化"标志
+       （真正的清理只走 profile 自己的 deinit），不先反初始化的话，下次开蓝牙
+       时 esp_avrc_ct_init()/esp_a2d_source_init() 会返回 ESP_ERR_INVALID_STATE
+       （日志 `btc_avrc_ct_init already initialized` / `a2d source init failed`），
+       A2DP source 停在半初始化态 —— 之后耳机 ACL 能连上但起不了流，
+       用户看到的就是"关一次蓝牙就再也连不上"。
+       ① 顺序必须是 AVRC CT **先于** A2DP（IDF 的 btc_avrc_ct_deinit 会检查
+          g_a2dp_on_deinit，反过来会告警并留下脏状态）；
+       ② 两个 deinit 都是异步投递到 BTC 任务的，必须留出执行时间再关 host
+          （btc_a2d_src_deinit 还会等 A2DP 状态回到 IDLE 才真正 cleanup）。 */
+    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) {
+        esp_avrc_ct_deinit();
+        esp_a2d_source_deinit();
+        vTaskDelay(pdMS_TO_TICKS(300));
     }
 
     esp_bluedroid_disable();
