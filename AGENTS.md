@@ -174,8 +174,8 @@ patches/                  # lvgl_fast_mem_decl / esp_lcd_touch_deps（托管组�
 - Core0：`LVGL`（每帧刷屏）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0`、系统 esp_timer 任务/ISR、全部驱动中断。
 - Core1：`mp3_play`/`mp3_out`、`cover_load`（注册为 lvgl_port 辅助任务，息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`、`bt_svc` + 蓝牙控制器/Bluedroid 任务；`boot_scan`/`rescan`。
 - 不固定核：`touch_init`（一次性自删）、`mem_monitor`/`cpu_coll*`、`pmu_irq`。
-- **⚠ 非实时任务栈一律用 `task_create_psram_stack()`**（失败自动回退内部 RAM）：内部 RAM 开机末期只剩几 KB、最大连续块约 8KB，内部栈会创建失败（历史症状：`create power service task failed` → 自动息屏/低电关机全失效）。已在 PSRAM：`mem_monitor`/`cpu_coll0/1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`、`mp3_play`（64KB，Tremor codebook 首次解码需要）。**必须留内部 RAM**：`LVGL`、`button_svc`、`player_ctrl`、`deep_worker`、`sleep_timer`、`boot_scan`。
-- **栈预算**：`LVGL` **12KB**（v9 绘制管线很深：6KB 时"首次渲染设置页"必爆栈；凡可能同步渲染 LVGL 的任务都按 ≥12KB 算）、`deep_worker` **12KB**、主任务 8KB（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、cover_load 8KB、mp3_play 64KB（PSRAM）、player_ctrl 4KB。⚠ 调栈前看 `MEM: stk:` 高水位，且**必须覆盖目标路径实测**（如息屏/亮屏后才打印的读数），别只信亮屏态。
+- **⚠ 非实时任务栈一律用 `task_create_psram_stack()`**（失败自动回退内部 RAM）：内部 RAM 开机末期只剩几 KB、最大连续块约 8KB，内部栈会创建失败（历史症状：`create power service task failed` → 自动息屏/低电关机全失效）。已在 PSRAM：`mem_monitor`/`cpu_coll0/1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`、`mp3_play`（80KB，Tremor codebook + 蓝牙重采样/EQ）。**必须留内部 RAM**：`LVGL`、`button_svc`、`player_ctrl`、`deep_worker`、`sleep_timer`、`boot_scan`。
+- **栈预算**：`LVGL` **12KB**（v9 绘制管线很深：6KB 时"首次渲染设置页"必爆栈；凡可能同步渲染 LVGL 的任务都按 ≥12KB 算）、`deep_worker` **12KB**、主任务 8KB（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、cover_load 8KB、mp3_play **80KB**（PSRAM；64KB 时 48kHz OGG + 10 段 EQ + 蓝牙流的实测高水位已到 61,016 B，只剩 4.5KB）、player_ctrl 4KB。⚠ 调栈前看 `MEM: stk:` 高水位，且**必须覆盖目标路径实测**（如息屏/亮屏后才打印的读数），别只信亮屏态。
 - **deep_worker**：息屏/亮屏、关机、以及**需要内部栈的关缓存段**（如重扫的 munmap/擦头）唯一执行者，业务任务用 `deep_worker_call(fn, arg)` 投递。约定：fn 内禁止再投递；**调用方禁止持 LVGL 锁投递**。⚠ **必须在 `app_main` 早期创建**（config_store 之后、硬件初始化之前）——内部 RAM 在开机末期碎片化，晚创建会静默失败（曾导致每次深调用等满 5s 超时）；创建处必须检查返回值。
 
 **3. 内部 RAM / IRAM / DMA 的三条硬规则**

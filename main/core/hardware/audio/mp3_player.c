@@ -21,8 +21,11 @@
    小块高频写 I2S，缩短单次“解码→写”间隙，避免 80MHz 下 DMA 欠载。 */
 #define PLAYER_PCM_FRAMES   512
 /* Tremor 在首次解码时用 alloca 建 codebook 索引（约 8 字节/条目），
-   24KB 对高复杂度 OGG 偏紧；栈在 PSRAM，直接给足余量。 */
-#define PLAYER_TASK_STACK   (64 * 1024)
+   24KB 对高复杂度 OGG 偏紧；栈在 PSRAM，直接给足余量。
+   ⚠ 2026-11 由 64KB 提到 80KB：合并蓝牙后，`bt_audio_write()`（重采样 + 10 段
+   EQ + 增益）在**同一个任务栈**上被调用，实测 48kHz OGG + 10 段 EQ + BT 流的
+   高水位已到 61,016 B / 64KB（只剩 4.5KB）。栈在 PSRAM，加大不占内部 RAM。 */
+#define PLAYER_TASK_STACK   (80 * 1024)
 /* 9：高于 LVGL(2)/deep_worker(6)/player_ctrl(5)，低于 lwIP/timer 等系统任务。
    播放任务在 SD/I2S 上阻塞让出 CPU，不会忙等。 */
 #define PLAYER_TASK_PRIO    9
