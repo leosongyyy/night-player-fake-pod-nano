@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "core/fonts/system_font.h"
-#include "core/hardware/audio/audio.h"
 #include "core/hardware/bt/bt_service.h"
 #include "core/hardware/display.h"
 #include "core/storage/bt_store.h"
@@ -93,15 +92,13 @@ static lv_obj_t *s_main_codec = NULL;          /* 耳机不支持 SBC 的警告�
 
 /* ---- 设备详情 ---- */
 static lv_obj_t *s_dev_name           = NULL;  /* 顶部：设备名 */
-static lv_obj_t *s_dev_mac            = NULL;  /* 顶部行右侧：MAC */
-static lv_obj_t *s_dev_status         = NULL;  /* 状态 */
-static lv_obj_t *s_dev_volume         = NULL;  /* 音量 */
+static lv_obj_t *s_dev_connect_status = NULL;  /* 顶部行右侧：连接 / 断开（点整行切换） */
+static lv_obj_t *s_dev_status         = NULL;  /* 状态：未连接 / 已连接 / 播放中 */
 static lv_obj_t *s_dev_eq             = NULL;  /* EQ 名 */
 static lv_obj_t *s_dev_quiet          = NULL;  /* 睡眠免打扰 开/关 */
-static lv_obj_t *s_dev_connect_title  = NULL;  /* 行标题：连接 / 断开连接 */
-static lv_obj_t *s_dev_connect_status = NULL;  /* 行右侧：连接 / 断开 */
 static lv_obj_t *s_dev_delete_title   = NULL;  /* 行标题：删除设备 / 再次点击确认删除 */
 static lv_obj_t *s_dev_delete_status  = NULL;  /* 行右侧：删除 */
+static lv_obj_t *s_dev_mac            = NULL;  /* 页面最底部：MAC 地址 */
 
 /* ---- 扫描视图 ---- */
 static lv_obj_t *s_scan_status = NULL;         /* 顶部状态行（标题 label） */
@@ -146,6 +143,26 @@ static const char *main_status_text(void)
         return power_text();
     }
     return "开";
+}
+
+/* 信号强度档位：bt_service 返回的是标准 HCI Read RSSI 的 delta（相对
+   golden receive power range，**不是 dBm**）：0 = 落在理想窗口内，
+   负数 = 低于下限多少 dB。按用户要求（2026-11）：
+     - 0 / 正数 / 未知 → 不显示（窗口内不夸大成"信号好"）
+     - -12..-1        → 信号中
+     - < -12          → 信号差
+   阈值 RSSI_DELTA_FAIR 是真机可调的唯一常量。 */
+#define RSSI_DELTA_FAIR  (-12)
+
+static const char *rssi_level_text(int delta)
+{
+    if (delta == -128 || delta >= 0) {
+        return "";              /* 未知 / 落在窗口内：不显示 */
+    }
+    if (delta >= RSSI_DELTA_FAIR) {
+        return "信号中";
+    }
+    return "信号差";
 }
 
 /* 增量更新三件套：文字/颜色/显隐都先比较，值没变就不碰对象（不产生重绘）。
@@ -499,28 +516,23 @@ static void main_page_create(void)
 
 static void device_page_create(void)
 {
-    /* 顶部：设备名 + MAC */
-    row_create(s_page_dev, LV_SYMBOL_BLUETOOTH, "", &s_dev_name, &s_dev_mac);
+    /* 顶部：设备名 + 连接/断开。整行可点 = 连接或断开当前设备
+       （原来单独一行"连接/断开"已合并到这里；MAC 移到页面最底部） */
+    lv_obj_t *row = row_create(s_page_dev, LV_SYMBOL_BLUETOOTH, "",
+                               &s_dev_name, &s_dev_connect_status);
+    lv_obj_set_style_text_color(s_dev_connect_status, TEXT_HL_COLOR, 0);
+    lv_obj_add_event_cb(row, cb_dev_connect, LV_EVENT_CLICKED, NULL);
 
-    /* 状态 */
+    /* 状态：未连接 / 已连接 / 播放中 */
     row_create(s_page_dev, NULL, "状态", NULL, &s_dev_status);
 
-    /* 音量（连接期间显示实际音量 = 该设备记忆值） */
-    row_create(s_page_dev, NULL, "音量", NULL, &s_dev_volume);
-
     /* EQ：点击选 .eq（连接期间即时生效） */
-    lv_obj_t *row = row_create(s_page_dev, NULL, "EQ", NULL, &s_dev_eq);
+    row = row_create(s_page_dev, NULL, "EQ", NULL, &s_dev_eq);
     lv_obj_add_event_cb(row, cb_dev_eq, LV_EVENT_CLICKED, NULL);
 
     /* 睡眠免打扰（UI 名；代码里仍叫 quiet_mode） */
     row = row_create(s_page_dev, NULL, "睡眠免打扰", NULL, &s_dev_quiet);
     lv_obj_add_event_cb(row, cb_dev_quiet, LV_EVENT_CLICKED, NULL);
-
-    /* 连接/断开：标题与右侧状态都由 update_device 按连接状态改写 */
-    row = row_create(s_page_dev, NULL, "", &s_dev_connect_title,
-                     &s_dev_connect_status);
-    lv_obj_set_style_text_color(s_dev_connect_status, TEXT_HL_COLOR, 0);
-    lv_obj_add_event_cb(row, cb_dev_connect, LV_EVENT_CLICKED, NULL);
 
     /* 删除设备（两段确认：第一次点击只改本行标题） */
     row = row_create(s_page_dev, NULL, "", &s_dev_delete_title,
@@ -535,6 +547,9 @@ static void device_page_create(void)
              "而是进入低功耗模式并保持蓝牙连接。"
              "防止耳机出现断连提示音或灯光闪烁。",
              NULL);
+
+    /* MAC 地址放最底部（2026-11 用户要求：从顶部移到这里） */
+    row_create(s_page_dev, NULL, "MAC 地址", NULL, &s_dev_mac);
 }
 
 static void scan_page_create(void)
@@ -621,23 +636,27 @@ static void update_device(void)
         return;
     }
 
-    set_label_text(s_dev_name, d.name);
-    char mac[24];
-    bda_to_str(d.bda, mac, sizeof(mac));
-    set_label_text(s_dev_mac, mac);
-
     bool connected = (bt_service_connected_index() == s_dev_idx);
-    set_label_text(s_dev_status,
-                   connected ? (bt_service_is_streaming() ? "播放中" : "已连接")
-                             : "未连接");
-    set_label_color(s_dev_status, connected ? TEXT_HL_COLOR : TEXT_DIM_COLOR);
 
-    char vol_buf[32];
-    uint8_t vol = connected ? audio_get_volume_level() : d.volume;
-    snprintf(vol_buf, sizeof(vol_buf), "%u / %u", (unsigned)vol,
-             (unsigned)AUDIO_VOL_LEVEL_MAX);
-    set_label_text(s_dev_volume, vol_buf);
-    set_label_color(s_dev_volume, TEXT_COLOR);
+    set_label_text(s_dev_name, d.name);
+    set_label_text(s_dev_connect_status, connected ? "断开" : "连接");
+
+    /* 状态：未连接 / 已连接 / 播放中；已连接时附一个简易信号档位
+       （只有信号变差才显示"信号中/差"，来自后台轮询的 HCI Read RSSI delta） */
+    char st[48];
+    const char *base = connected
+                           ? (bt_service_is_streaming() ? "播放中" : "已连接")
+                           : "未连接";
+    const char *sig = connected
+                          ? rssi_level_text(bt_service_connected_rssi_delta())
+                          : "";
+    if (sig[0] != '\0') {
+        snprintf(st, sizeof(st), "%s  %s", base, sig);
+    } else {
+        snprintf(st, sizeof(st), "%s", base);
+    }
+    set_label_text(s_dev_status, st);
+    set_label_color(s_dev_status, connected ? TEXT_HL_COLOR : TEXT_DIM_COLOR);
 
     set_label_text(s_dev_eq, (d.eq_valid && d.eq_name[0]) ? d.eq_name : "无 EQ");
     set_label_color(s_dev_eq, d.eq_valid ? TEXT_HL_COLOR : TEXT_DIM_COLOR);
@@ -645,11 +664,12 @@ static void update_device(void)
     set_label_text(s_dev_quiet, d.quiet_mode ? "开" : "关");
     set_label_color(s_dev_quiet, d.quiet_mode ? TEXT_HL_COLOR : TEXT_DIM_COLOR);
 
-    set_label_text(s_dev_connect_title, connected ? "断开连接" : "连接");
-    set_label_text(s_dev_connect_status, connected ? "断开" : "连接");
-
     set_label_text(s_dev_delete_title,
                    s_delete_armed ? "再次点击确认删除" : "删除设备");
+
+    char mac[24];
+    bda_to_str(d.bda, mac, sizeof(mac));
+    set_label_text(s_dev_mac, mac);
 }
 
 static void update_scan(void)

@@ -76,6 +76,16 @@ const char *bt_service_connected_name(void);
 /** @brief 协商出的 SBC 输出采样率（48000/44100；未连接返回 0） */
 uint32_t bt_service_output_fs(void);
 
+/**
+ * @brief 当前链路的信号强度原始值（标准 HCI Read RSSI 的 delta）
+ *
+ * 返回 -128 表示未知（未连接 / 还没读到）。**不是 dBm**：0 表示落在
+ * golden receive power range 内，正数表示高于上限多少 dB，负数表示低于
+ * 下限多少 dB。连接期间由 bt_svc 任务每 ~3s 轮询一次并缓存，UI 直接读，
+ * 不做回调。
+ */
+int bt_service_connected_rssi_delta(void);
+
 /** @brief 上次连接是否因耳机不支持 SBC 48k/44.1k 而失败（UI 可 Toast 提示） */
 bool bt_service_codec_unsupported(void);
 

@@ -64,6 +64,19 @@ static char          s_peer_name[BT_STORE_NAME_MAX] = "";
 
 static esp_a2d_conn_hdl_t s_conn_hdl = 0;
 
+/* 信号强度（仅用于 UI 的"信号好/中/差"）：连接期间由 bt_svc 任务每 ~3s
+ * 发一次标准 HCI Read RSSI，结果在 GAP 回调里更新缓存。
+ *
+ * ⚠ 返回值是**相对 golden receive power range 的 delta**（0 = 落在理想窗口
+ *   内，正数 = 高于上限，负数 = 低于下限），不是 dBm。S31 控制器只实现
+ *   标准 Read RSSI（`libbredr_app.a` 里有 hci_rd_rssi_handler /
+ *   olc_acl_rssi_diff_read），没有 Espressif 的 "ACL real RSSI" VS 命令，
+ *   所以拿不到绝对 dBm，UI 只做三档提示。
+ * -128 = 未知（未连接 / 还没读到）。 */
+static volatile int  s_rssi_delta = -128;
+static volatile bool s_rssi_pending = false;  /* 已发请求、等事件 */
+static int64_t       s_rssi_last_us = 0;      /* 上次发请求的时刻（节流用） */
+
 /* 流请求（audio_pcm_start/stop 驱动） */
 static volatile bool s_want_stream = false;
 static volatile bool s_stream_pending = false;
@@ -338,6 +351,8 @@ static void bt_link_down(void)
     s_out_fs = 0;
     s_streaming = false;
     s_stream_pending = false;
+    s_rssi_delta = -128;      /* 信号强度失效（详情页显示"已连接"但不带档位） */
+    s_rssi_pending = false;
     bt_store_flush_pending(true);
     ESP_LOGI(TAG, "link down, output restored to DAC");
     /* 断开后重新允许已配对耳机主动回连 */
@@ -362,6 +377,33 @@ static void bt_link_down(void)
 /* ------------------------------------------------------------------ */
 /* GAP 回调                                                             */
 /* ------------------------------------------------------------------ */
+
+/* 信号强度轮询（bt_svc 任务上下文）：连接期间每 ~3s 发一次标准 HCI Read RSSI。
+ * 控制器直接回"最近一次收到包的 RSSI"，不需要空口交互，不会打断 sniff；
+ * 结果在 gap_cb 的 ESP_BT_GAP_READ_RSSI_DELTA_EVT 里更新缓存。
+ * 常驻轮询（而不是等 UI 请求）更简单：连接期间每 3s 一条 HCI 命令，
+ * 开销可以忽略，详情页打开时永远是新鲜值。 */
+static void bt_rssi_poll(void)
+{
+    if (!s_connected) {
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if (s_rssi_pending) {
+        if (now - s_rssi_last_us < 3000000) {
+            return;          /* 等事件（正常几 ms 内到） */
+        }
+        s_rssi_pending = false;   /* 事件丢了（控制器异常）：解除挂起，下次重发 */
+    }
+    if (now - s_rssi_last_us < 2500000) {   /* 与 3s 轮询周期配合的节流 */
+        return;
+    }
+    s_rssi_last_us = now;
+    s_rssi_pending = true;
+    if (esp_bt_gap_read_rssi_delta(s_peer_bda) != ESP_OK) {
+        s_rssi_pending = false;
+    }
+}
 
 /* 空闲态扫描模式：可连接、不可发现。
  *
@@ -473,6 +515,17 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         /* 仅记录日志；切换改为重启协议栈，不再依赖 ACL 事件时序 */
         ESP_LOGD(TAG, "ACL disconnected (reason %d)",
                  (int)param->acl_disconn_cmpl_stat.reason);
+        break;
+    case ESP_BT_GAP_READ_RSSI_DELTA_EVT:
+        /* 标准 HCI Read RSSI 的结果（相对 golden range 的 delta，不是 dBm）。
+         * 只更新缓存；不打日志（2026-11 用户要求：串口保持干净）。 */
+        s_rssi_pending = false;
+        if (param->read_rssi_delta.stat == ESP_BT_STATUS_SUCCESS) {
+            s_rssi_delta = param->read_rssi_delta.rssi_delta;
+        } else {
+            ESP_LOGD(TAG, "read rssi failed: stat=%d",
+                     (int)param->read_rssi_delta.stat);
+        }
         break;
     case ESP_BT_GAP_AUTH_CMPL_EVT:
         ESP_LOGI(TAG, "auth complete: stat=%d name=%s", (int)param->auth_cmpl.stat,
@@ -958,6 +1011,8 @@ static void bt_stack_stop(void)
     s_connected = false;
     s_streaming = false;
     s_scanning = false;
+    s_rssi_delta = -128;
+    s_rssi_pending = false;
     s_power = BT_SVC_POWER_OFF;
     bt_audio_set_absvol_supported(false);
     bt_audio_notify_streaming(false);
@@ -1171,9 +1226,13 @@ static void bt_svc_task(void *arg)
 {
     (void)arg;
     bt_cmd_t cmd;
+    /* 3s 超时用于连接期间的 RSSI 轮询（详情页"信号好/中/差"）；没有命令时
+       每 3s 醒一次，未连接时只做一次原子判断，开销可忽略。 */
     while (true) {
-        if (xQueueReceive(s_queue, &cmd, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_queue, &cmd, pdMS_TO_TICKS(3000)) == pdTRUE) {
             bt_handle_cmd(&cmd);
+        } else {
+            bt_rssi_poll();
         }
     }
 }
@@ -1300,6 +1359,11 @@ const char *bt_service_connected_name(void)
 uint32_t bt_service_output_fs(void)
 {
     return s_connected ? s_out_fs : 0;
+}
+
+int bt_service_connected_rssi_delta(void)
+{
+    return s_connected ? s_rssi_delta : -128;
 }
 
 bool bt_service_codec_unsupported(void)
