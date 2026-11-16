@@ -2111,3 +2111,29 @@ debug / release 均重新构建通过（仅剩触摸驱动组件的既有 warnin
 设施（LVGL FPS/日志、性能监视、封面版本），`role=inner` 管里世界角色
 （`sdkconfig.role.inner`）。这样里世界也有 debug/release 两档（debug 带 FPS 指示器、
 release 不带），不再是一个固定调试级别的 `sync` 变体。详见 `INNER_WORLD.md` §5.2。
+
+## 56. 扫描任务栈与扫描期动态分配全面搬到 PSRAM（FUTURE_PLAN #55 / #56）✅ 已完成（2026-11-16，真机验证）
+
+**来源**：`FUTURE_PLAN.md` 原 #55（扫描栈单位 bug）与 #56（扫描期动态分配改 PSRAM），
+由 2026-11-15 的 `SAKURAIO_FORK_EVAL.md` 评估提出。
+
+**做了什么**：
+
+1. **栈单位 bug 复核**：master 的 `boot_show_scanning()` 传的是 `BOOT_SCAN_STACK_BYTES`
+   （32768，字节语义），**没有 fork 那个 `/4u`**；本次顺手把注释写清楚
+   （IDF 的 `xTaskCreatePinnedToCore` 栈单位就是字节）。
+2. **扫描栈改放 PSRAM**：改用 `task_create_psram_stack()`（32KB，失败退 16KB，
+   再失败才落"扫描失败"屏）。前提是**播放列表数据已搬到 SD 卡**（`PLDATA_ON_SDCARD.md`）：
+   扫描过程不再 `esp_partition_erase/write`、也不再 `munmap`，关缓存断言不可能命中。
+   收益：开机最紧张时刻不再向内部 RAM 要 32KB（原先常退到 16KB）。
+3. **扫描期动态分配改 PSRAM**：新增 `psram_strdup()`（`heap_caps_malloc(SPIRAM)` +
+   失败回退 `strdup`）替换 `collect_dir()` 三处 `strdup`；三个 `calloc(4096)` 指针数组
+   与指纹探针的 `subs` 改成 `heap_caps_calloc(PSRAM)`（原来每次扫描吃 ~48KB 内部 RAM）。
+4. **准入检查 + 日志**：扫描开头打印 `pre-scan memory: internal largest=…, PSRAM free=…`，
+   内部最大连续块 <4KB 或 PSRAM 余量 < 构建缓冲+512KB 时告警（不再等失败才发现）。
+5. 构建缓冲同步 `0x2cc000 → 0x400000`（4MB，见 `PLDATA_ON_SDCARD.md` §14）并改
+   `heap_caps_calloc`，让镜像填充区内容确定性可复现。
+
+**真机实测**（9047 首 / 173 目录）：`internal largest=79872 B`、扫描完成进主界面无
+wdt/assert，PSRAM 峰值仍余 15.9MB；详见 `PLDATA_ON_SDCARD.md` §14.2。
+

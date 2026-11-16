@@ -15,10 +15,10 @@
 
 static const char *TAG = "playlist_builder";
 
-/* 构建缓冲总大小（字符串池起点到池上限 ≈ 2.8MB，放 PSRAM）。
-   ⚠ 与 playlist_format.h 的 PLS_STR_MAX_OFFSET 联动：完整版固件（字体/封面
-   进 PSRAM）下可用内存有限，2.8MB 缓冲足以覆盖实际扫描（100 首曲目
-   字符串池仅用 ~3KB），同时避免内存不足 */
+/* 构建缓冲总大小（字符串池起点 0x40000 → 池上限 0x400000，即 4MB，放 PSRAM）。
+   ⚠ 与 playlist_format.h 的 PLS_STR_MAX_OFFSET 联动：实际曲库字符串池只用到
+   几百 KB（9042 首 ≈ 358KB），4MB 是"曲库再大 10 倍也装得下"的上限；
+   S31 的 16MB PSRAM 足够（历史 2.8MB 是 S3 时代的内存妥协）。 */
 #define PLS_BUILD_BUF_SIZE PLS_STR_MAX_OFFSET
 
 /* 单目录内文件/子目录数量上限 */
@@ -56,6 +56,26 @@ static build_node_t *s_stack = NULL;
 static int s_sp = 0;
 
 /* ---------------- 字符串池 ---------------- */
+
+/* 目录条目名字符串：**优先放 PSRAM**（FUTURE_PLAN 第 56 条）。
+   S31 上内部 RAM 才是稀缺资源（蓝牙就吃掉约 50KB），而扫描一个 9000 首的扁平
+   目录要临时存几十~上百 KB 的文件名；内部 RAM 见底会让 pthread/互斥锁/任务栈
+   创建失败（fork 上实测内部只剩 19 B）。PSRAM 有 16MB，把这些临时名字放过去。
+   PSRAM 分配失败时回退 strdup（内部 RAM），保证极端情况下仍能扫描。
+   ⚠ 返回值用 free() 释放（两种来源在同一个堆分配器上）。 */
+static char *psram_strdup(const char *s)
+{
+    if (s == NULL) {
+        return NULL;
+    }
+    size_t n = strlen(s) + 1;
+    char *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p != NULL) {
+        memcpy(p, s, n);
+        return p;
+    }
+    return strdup(s);
+}
 
 /* 向池尾部追加一个 null-terminated 字符串，返回相对池起点的 index */
 static uint32_t str_add(build_ctx_t *ctx, const char *s)
@@ -347,12 +367,22 @@ static void collect_dir(const char *full_path, const char *rel_dir,
         }
 
         if (is_dir) {
-            subs[(*ns)++] = strdup(name);
+            char *dup = psram_strdup(name);
+            if (dup == NULL) {
+                ctx->truncated = true;
+                continue;
+            }
+            subs[(*ns)++] = dup;
         } else if (is_reg) {
             if (is_audio_file(name)) {
                 /* 音频文件只按路径进指纹，不需要 stat */
                 sig_add_file(ctx, rel_dir, name, 'A', have_stat ? &st : NULL);
-                files[(*nf)++] = strdup(name);
+                char *dup = psram_strdup(name);
+                if (dup == NULL) {
+                    ctx->truncated = true;
+                    continue;
+                }
+                files[(*nf)++] = dup;
             } else if (is_pl_file(name)) {
                 if (!have_stat) {
                     if (full_path[strlen(full_path) - 1] == '/') {
@@ -367,7 +397,12 @@ static void collect_dir(const char *full_path, const char *rel_dir,
                     }
                 }
                 sig_add_file(ctx, rel_dir, name, 'P', &st);
-                pls[(*npl)++] = strdup(name);
+                char *dup = psram_strdup(name);
+                if (dup == NULL) {
+                    ctx->truncated = true;
+                    continue;
+                }
+                pls[(*npl)++] = dup;
             }
         }
     }
@@ -389,8 +424,30 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
     build_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
 
-    /* 构建缓冲（PSRAM，约 3.7MB），全部数据在此组装后一次性写入分区 */
-    ctx.buf = heap_caps_malloc(PLS_BUILD_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* 准入检查（FUTURE_PLAN 第 56 条）：本流程的大块内存——4MB 构建缓冲、显式栈、
+       指向数组、目录名串——**全部走 PSRAM**，内部 RAM 只剩任务栈等少量需求。
+       仍然先看一眼余量并打日志：真机出现过"扫描期内部 RAM 见底 → 后续
+       互斥锁/pthread 创建失败 assert"的故障，有这行日志一眼能定位。 */
+    {
+        size_t int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        ESP_LOGI(TAG, "pre-scan memory: internal largest=%u B, PSRAM free=%u B",
+                 (unsigned)int_largest, (unsigned)psram_free);
+        if (int_largest < 4096) {
+            ESP_LOGW(TAG, "internal RAM very low (largest=%u B): 扫描本身不占内部"
+                          "大块，但后续创建任务/互斥锁可能失败", (unsigned)int_largest);
+        }
+        if (psram_free < PLS_BUILD_BUF_SIZE + (512u * 1024u)) {
+            ESP_LOGW(TAG, "PSRAM 余量偏小（%u B < 构建缓冲 %u B + 512KB）",
+                     (unsigned)psram_free, (unsigned)PLS_BUILD_BUF_SIZE);
+        }
+    }
+
+    /* 构建缓冲（PSRAM，4MB），全部数据在此组装后一次性写入 pldata 后端。
+       ⚠ 用 calloc（而不是 malloc）：目录区与歌曲区之间、以及字符串池末尾的
+         未使用填充区会原样进入镜像/文件，malloc 的堆残留会让每次扫描产出
+         不同的字节（CRC/文件比对因此不可复现）。calloc 让内容确定性可复现。 */
+    ctx.buf = heap_caps_calloc(1, PLS_BUILD_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!ctx.buf) {
         ESP_LOGE(TAG, "alloc build buffer failed");
         return ESP_ERR_NO_MEM;
@@ -426,11 +483,16 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
     root->path_idx = 0;
     root->name_idx = 0;
 
-    /* 每目录收集用的指针数组（heap 分配，扫描完释放） */
+    /* 每目录收集用的指针数组（**PSRAM**，扫描完释放）：
+       PLS_MAX_ENTRIES=4096 → 3 × 4096 × 4B ≈ 48KB，放内部 RAM 会在大目录扫描
+       期间把内部余量吃光（FUTURE_PLAN 第 56 条）。 */
     int cap = PLS_MAX_ENTRIES;
-    char **files = calloc((size_t)cap, sizeof(char *));
-    char **pls = calloc((size_t)cap, sizeof(char *));
-    char **subs = calloc((size_t)cap, sizeof(char *));
+    char **files = heap_caps_calloc((size_t)cap, sizeof(char *),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char **pls = heap_caps_calloc((size_t)cap, sizeof(char *),
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char **subs = heap_caps_calloc((size_t)cap, sizeof(char *),
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!files || !pls || !subs) {
         free(files); free(pls); free(subs); free(s_stack); free(ctx.buf);
         ESP_LOGE(TAG, "alloc entry arrays failed");
@@ -545,12 +607,12 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
     }
 
     if (save) {
-        /* 写回模式：整体写入分区（playlist_store：先擦后写，中断安全），随后释放。
-           进入写入阶段前通知一次，供 UI 提示"正在写入扫描数据" */
+        /* 写回模式：整体写入 pldata 后端（SD 卡缓存文件，tmp + rename 原子提交），
+           随后释放。进入写入阶段前通知一次，供 UI 提示"正在写入扫描数据" */
         if (progress_cb != NULL) {
             progress_cb(PLAYLIST_BUILD_PHASE_WRITE, ctx.song_count, progress_ctx);
         }
-        ESP_LOGI(TAG, "saving playlist to partition (len=%u) ...", total_size);
+        ESP_LOGI(TAG, "saving playlist to SD card (len=%u) ...", total_size);
         playlist_store_meta_t meta = {
             .card_id = sd_card_get_id(),
             .signature = ctx.signature,
@@ -572,7 +634,7 @@ static esp_err_t playlist_build_core(playlist_build_stats_t *stats, bool save,
     return ESP_OK;
 }
 
-/* 扫描构建并写回 pldata 分区 */
+/* 扫描构建并写回 pldata 后端（SD 卡缓存文件，见 core/hardware/pldata.c） */
 esp_err_t playlist_build_from_sd(playlist_build_stats_t *stats,
                                  playlist_build_progress_cb progress_cb,
                                  void *progress_ctx)
@@ -609,8 +671,10 @@ esp_err_t playlist_builder_probe_signature(uint64_t *signature,
     sp++;
 
     int cap = PLS_MAX_ENTRIES;
-    /* 只需子目录名；文件/播放列表只计数（用于与构建器的遍历上限保持一致） */
-    char **subs = calloc((size_t)cap, sizeof(char *));
+    /* 只需子目录名；文件/播放列表只计数（用于与构建器的遍历上限保持一致）。
+       PSRAM 分配（同 playlist_build_core，FUTURE_PLAN 第 56 条） */
+    char **subs = heap_caps_calloc((size_t)cap, sizeof(char *),
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (subs == NULL) {
         free(stack);
         return ESP_ERR_NO_MEM;
@@ -665,7 +729,11 @@ esp_err_t playlist_builder_probe_signature(uint64_t *signature,
             }
 
             if (is_dir) {
-                subs[ns++] = strdup(name);
+                char *dup = psram_strdup(name);
+                if (dup == NULL) {
+                    continue;   /* 名字都存不下：跳过该子目录（与构建器的截断语义一致） */
+                }
+                subs[ns++] = dup;
             } else if (is_reg) {
                 if (is_audio_file(name)) {
                     sig_add_file(&ctx, node->path, name, 'A',

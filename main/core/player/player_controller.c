@@ -805,7 +805,7 @@ esp_err_t player_controller_init(void)
         return ESP_OK;
     }
 
-    /* 初始化播放列表读取（内存映射 pldata 分区） */
+    /* 初始化播放列表读取（SD 卡缓存文件 → PSRAM 缓冲） */
     esp_err_t r = playlist_init();
     if (r != ESP_OK) {
         ESP_LOGE(TAG, "playlist_init failed: %s", esp_err_to_name(r));

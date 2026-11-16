@@ -10,11 +10,12 @@
 #include "core/image/default_cover.h"
 #include "core/player/player_controller.h"
 #include "core/hardware/display.h"
+#include "core/hardware/pldata.h"    /* pldata_has_data：FORCE_RESCAN 调试分支判断有无缓存 */
 #include "core/hardware/sd_card.h"
 #include "core/storage/config_store.h"
 #include "core/storage/playlist_builder.h"
 #include "core/storage/playlist_store.h"
-#include "core/ui/lvgl_port.h"   /* lvgl_port_lock/unlock：写入分区时冻结 LVGL */
+#include "core/ui/lvgl_port.h"   /* lvgl_port_lock/suspend：充电界面刷新与息屏 */
 #include "core/utils/deep_worker.h"   /* 充电界面息屏/亮屏的深链 */
 #include "core/utils/mem_trace.h"
 #include "core/utils/fake_shutdown.h"
@@ -32,6 +33,21 @@
 
 static const char *TAG = "boot_flow";
 
+/* idfc quickconfig（`idfc build -qc <名字>` 生成，见 idfc_buildconfig.json 的
+   QuickConfigs）：临时调试开关走这里，不走 Kconfig、不触发 reconfigure。
+   ⚠ 当前已知坑：idfc 每次构建都会重写这个头文件，而 ccache 的"缺失头文件"
+   记录不会随头文件出现而失效——首次启用某个 quickconfig 后，如果对应 .c 的
+   内容没变，可能拿到**旧的缓存对象**（开关看着开了、实际没编进去）。遇到这种
+   情况给那个 .c 加一行注释（改内容）再 build 即可。 */
+#if defined(__has_include)
+#  if __has_include("idfc_quickconfig.h")
+#    include "idfc_quickconfig.h"
+#  endif
+#endif
+#ifndef QCONF_FORCE_RESCAN
+#define QCONF_FORCE_RESCAN 0
+#endif
+
 /* 前向声明（各界面函数互相调用，定义顺序有交叉） */
 static void boot_show_no_music(void);
 static void boot_show_scan_failed(void);
@@ -40,7 +56,6 @@ static void boot_show_scanning(void);
 static void boot_progress_timer_cb(lv_timer_t *timer);
 static void boot_scan_task(void *arg);
 static void boot_sleep_toast_timer_cb(lv_timer_t *timer);
-static void clear_scan_data_btn_cb(lv_event_t *e);
 static void reset_position_btn_cb(lv_event_t *e);
 
 /* S31 平台：电池信息已由 AXP2101 提供（电压/电量/充电状态，见 battery.c），
@@ -51,12 +66,11 @@ static void reset_position_btn_cb(lv_event_t *e);
 #define BOOT_PROGRESS_TIMER_MS 300u
 
 /* 扫描任务栈：32KB（解析 .pl 需大局部数组）。
-   ⚠ 栈**必须在内部 RAM**：扫描过程会调用 pldata_write/pldata_erase_range，
-   其中 pldata_unmap_if_mapped() → esp_partition_munmap → esp_mmu_unmap 会
-   走"关缓存"流程（esp_cache_freeze_caches_disable_interrupts 断言
-   s_task_stack_is_sane_when_cache_frozen()：关缓存期间 PSRAM 不可访问，
-   栈在 PSRAM 会直接 assert 崩溃）。内部 32KB 栈在开机早期仍可分配
-   （此时 UI 尚未创建，内部 RAM 还有约 130KB 空闲）。 */
+   ⚠ 2026-11-16 起栈放 **PSRAM**（task_create_psram_stack）：播放列表数据换成
+   SD 卡上的缓存文件后，扫描任务不再触发任何"关外部缓存"流程——只有 flash 擦写
+   与分区 map/unmap 才关缓存，写 SD 只是文件 I/O。所以关缓存断言
+   s_task_stack_is_sane_when_cache_frozen() 不可能被命中。
+   顺带把开机最紧张时刻的内部 RAM（原来向 32KB 要、常退回 16KB）腾给 LVGL/驱动。 */
 #define BOOT_SCAN_STACK_BYTES (32768u)
 
 /* 开机睡眠定时提醒（FUTURE_PLAN 第 27 点）：
@@ -88,9 +102,10 @@ static boot_state_t s_state = BOOT_ST_NONE;
 static volatile uint32_t s_scan_song_count = 0;
 static volatile bool     s_scan_done       = false;
 static volatile bool     s_scan_ok         = false;
-/* 写入分区阶段是否已由扫描任务持住 LVGL 锁（见 boot_scan_progress_cb）：
-   持锁期间 LVGL 完全冻结，写完 flash 后由 boot_scan_task 负责归还。 */
-static volatile bool     s_scan_lvgl_locked = false;
+/* 写入阶段标志：扫描任务只置位，真正改 UI 文案的是 300ms 的进度定时器
+   （LVGL 任务上下文）。写 SD 不关外部缓存，所以**不需要**像 flash 时代那样
+   抢 LVGL 锁冻结界面（见 boot_scan_progress_cb）。 */
+static volatile bool     s_scan_writing    = false;
 
 /* LVGL 对象句柄 */
 static lv_obj_t   *s_root           = NULL;   /* 开机 UI 根容器（全屏黑底） */
@@ -258,9 +273,12 @@ static void boot_show_low_battery(const battery_info_t *info)
              BOOT_LOW_BAT_SHUTDOWN_MS);
 }
 
-/* 2. 未插入 SD 卡：提示 + failsafe 按钮组（重置歌曲位置 / 清除扫描数据），
-      停在此屏。内容整体相对屏幕中心上移（基准偏移 -30），视觉居中偏上，
-      给底部留白（460px 屏去掉标题与两按钮后仍不显拥挤） */
+/* 2. 未插入 SD 卡：提示 + failsafe 按钮（重置歌曲位置），停在此屏。
+      内容整体相对屏幕中心上移（基准偏移 -30），视觉居中偏上。
+      ⚠ 2026-11-16 起**删掉了"清除扫描数据"按钮**：播放列表缓存已从 flash 分区
+        搬到 SD 卡上的文件，没有卡的时候根本没有任何东西可清（旧按钮调
+        playlist_store_invalidate() 只对那些"卡在、缓存坏"的场景有用，而那种
+        场景 boot_flow 会自动重扫）。要强制重扫用设置菜单的"重新扫描"。 */
 static void boot_show_no_sd(void)
 {
     s_state = BOOT_ST_NO_SD;
@@ -272,20 +290,15 @@ static void boot_show_no_sd(void)
     s_status_label = boot_make_hint(root, "请插入 SD 卡后重启设备");
     lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -30);
 
-    /* failsafe 按钮组（上下排布，避开中央提示文字）：
-       - 重置歌曲位置：清 NVS 里"上次播放歌曲/随机位置"记录 → 下次插卡开机
-         从第一首开始（不恢复可能已损坏/随卡丢失的现场，见
-         config_store_reset_position）
-       - 清除扫描数据：擦除 pldata 头部，使内部扫描数据分区无效 */
+    /* failsafe 按钮：重置歌曲位置（清 NVS 里"上次播放歌曲/随机位置"记录 →
+       下次插卡开机从第一首开始，不恢复可能已损坏/随卡丢失的现场，
+       见 config_store_reset_position） */
     lv_obj_t *btn_reset = boot_make_button(root, "重置歌曲位置", reset_position_btn_cb);
     lv_obj_align(btn_reset, LV_ALIGN_CENTER, 0, 55);
 
-    lv_obj_t *btn_clear = boot_make_button(root, "清除扫描数据", clear_scan_data_btn_cb);
-    lv_obj_align(btn_clear, LV_ALIGN_CENTER, 0, 145);
-
     /* 进入 failsafe 界面即把亮度拉满（255）并持久化到 NVS：
        无卡场景可能带着上次的低亮度（甚至全黑）开机，拉满便于看清界面/
-       操作"清除扫描数据"。boot_flow_run 在 app_main 的 LVGL 锁内调用，
+       操作按钮。boot_flow_run 在 app_main 的 LVGL 锁内调用，
        此处调 display_set_brightness 安全；app_main 随后点亮时读到的
        config_store 亮度也已是 255（set 会写 NVS 并通知回调，boot 阶段
        UI 未创建，无回调副作用）。 */
@@ -293,15 +306,15 @@ static void boot_show_no_sd(void)
     display_set_brightness(DISPLAY_BRIGHTNESS_DEFAULT);
 }
 
-/* 3. 扫描进行中：每 300ms 更新已扫描音乐数量；进入写入阶段时由扫描任务
-      抢住 LVGL 锁并提示"正在写入扫描数据"（见 boot_scan_progress_cb） */
+/* 3. 扫描进行中：每 300ms 更新已扫描音乐数量；进入写入阶段后定时器把底部
+      文案改成"正在写入扫描数据..."（扫描任务只置 s_scan_writing 标志） */
 static void boot_show_scanning(void)
 {
     s_state = BOOT_ST_SCANNING;
     s_scan_song_count = 0;
     s_scan_done = false;
     s_scan_ok = false;
-    s_scan_lvgl_locked = false;
+    s_scan_writing = false;
 
     lv_obj_t *root = boot_root_create();
 
@@ -314,26 +327,23 @@ static void boot_show_scanning(void)
     lv_obj_t *unit = boot_make_hint(root, "首");
     lv_obj_align(unit, LV_ALIGN_CENTER, 0, 60);
 
-    /* 底部状态文字：扫描期间为"正在扫描..."；进入写入阶段后由扫描任务在持有
-       LVGL 锁的情况下改写为"正在写入扫描数据..."并立刻提交该帧（此后界面冻结） */
+    /* 底部状态文字：扫描期间为"正在扫描..."；进入写入阶段后由进度定时器
+       改写为"正在写入扫描数据..."（界面不冻结，照常刷新） */
     s_status_label = boot_make_hint(root, "正在扫描...");
     lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, 130);
 
     /* 每 300ms 更新进度，并检查扫描是否完成以切换界面 */
     s_scan_timer = lv_timer_create(boot_progress_timer_cb, BOOT_PROGRESS_TIMER_MS, NULL);
 
-    /* 启动后台扫描任务（32KB 栈，⚠ 必须内部 RAM：扫描会触发 pldata 的
-       munmap/erase 关缓存流程，PSRAM 栈会 assert 崩溃，见上方常量注释）。
-       ⚠ IDF 的 xTaskCreatePinnedToCore 栈单位是**字节**，不要再除以 4
-          （历史上按 FreeRTOS 旧 word 语义除过，实际只有 8KB）。 */
-    BaseType_t ret = xTaskCreatePinnedToCore(boot_scan_task, "boot_scan",
-                                             BOOT_SCAN_STACK_BYTES, NULL, 5,
-                                             NULL, 1);
+    /* 启动后台扫描任务（32KB 栈，放 PSRAM：写 SD 不关外部缓存，PSRAM 栈安全，
+       见 BOOT_SCAN_STACK_BYTES 注释）。task_create_psram_stack 在 PSRAM 分配
+       失败时会自动退回内部 RAM。 */
+    BaseType_t ret = task_create_psram_stack(boot_scan_task, "boot_scan",
+                                             BOOT_SCAN_STACK_BYTES, NULL, 5, NULL, 1);
     if (ret != pdPASS) {
-        /* 32KB 连续内部 RAM 分配失败时退回 16KB（历史 8KB 版本已能完成
-           1233 首扫描；16KB 给新增指纹/路径逻辑留余量） */
+        /* 32KB 也拿不到时退回 16KB（历史 8KB 版本已能完成 1233 首扫描） */
         ESP_LOGW(TAG, "32KB scan stack alloc failed, retry 16KB");
-        ret = xTaskCreatePinnedToCore(boot_scan_task, "boot_scan",
+        ret = task_create_psram_stack(boot_scan_task, "boot_scan",
                                       16 * 1024, NULL, 5, NULL, 1);
     }
     if (ret != pdPASS) {
@@ -803,7 +813,7 @@ void boot_flow_run_charger_mode(void)
 /* 扫描后台任务与进度回调                                               */
 /* ------------------------------------------------------------------ */
 
-/* 扫描进度回调（扫描任务上下文；**写入阶段会短暂操作 LVGL**，见下） */
+/* 扫描进度回调（扫描任务上下文；只写 volatile 标志，绝不碰 LVGL） */
 static void boot_scan_progress_cb(playlist_build_phase_t phase, uint32_t song_count,
                                   void *ctx)
 {
@@ -814,35 +824,16 @@ static void boot_scan_progress_cb(playlist_build_phase_t phase, uint32_t song_co
         return;
     }
 
-    /* ⚠⚠ 写入阶段（playlist_store_save_playlist → 擦写 pldata 分区）会**关闭外部
-       flash 缓存**，此时所有"映射在 flash 上的数据"都不可访问——本项目的系统
-       字体正是 NPF1 全字库：`font_npf.c` 用 esp_partition_mmap 把 font 分区直接
-       映射进来，LVGL 渲染文字时（draw_main 里取字形位图）就是读这块 flash。若
-       LVGL 在写入期间还在渲染，取字形的总线访问会卡在"缓存已关、flash 忙"状态里
-       出不来：**LVGL 任务永久卡死**（实测：task_wdt 在 5s 后报 "CPU 0: LVGL" 并
-       打出 lv_label 绘制 → lv_refr 的调用栈；WDT 关闭时表现为扫描完成后界面再也
-       不动、日志刷 task_wdt，只能断电重启。详见 ideas_and_exps/NPF_FONT.md §7.1）。
-       修法与 TTF 时代（commit 255f0b9）一致：**先把 LVGL 锁拿过来**让渲染停下来，
-       并主动提交"正在写入…"这一帧；锁交给 boot_scan_task 在写完 flash（含无音乐
-       时的 playlist_store_invalidate）之后归还。
-       ⚠ 本回调跑在扫描任务上下文（Core1，栈在内部 RAM——关缓存期间栈必须可访问）。
-       ⚠ 持锁期间本任务只做 flash 擦写，不再碰 PSRAM/LVGL。 */
-    if (lvgl_port_lock(-1)) {
-        s_scan_lvgl_locked = true;
-
-        if (s_count_label != NULL) {
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%u", (unsigned)s_scan_song_count);
-            lv_label_set_text(s_count_label, buf);
-        }
-        if (s_status_label != NULL) {
-            lv_label_set_text(s_status_label, "正在写入扫描数据...");
-        }
-        lv_refr_now(NULL);   /* 冻结前把最后一帧真正画出去 */
-        ESP_LOGI(TAG, "write phase: LVGL locked, UI frozen until write finishes");
-    } else {
-        ESP_LOGW(TAG, "write phase: LVGL lock failed, UI may glitch during write");
-    }
+    /* 进入写入阶段：只是把标志置位，由 300ms 的进度定时器（LVGL 任务上下文）
+       把底部文案改成"正在写入扫描数据..."。
+       ⚠ 这里**不再抢 LVGL 锁冻结界面**。flash 时代必须冻结的理由是
+       `playlist_store_save_playlist` 走 esp_partition_erase/write，会关闭外部
+       flash 缓存，而 LVGL 渲染要读 font 分区的 mmap 字形 → 总线卡死
+       （NPF_FONT.md §7.1 的真机事故）。2026-11-16 起播放列表数据搬到 SD 卡上的
+       缓存文件，写盘只是文件 I/O、**不关外部缓存**，这条事故路径从根上消失。
+       ⚠ 本回调仍跑在扫描任务上下文（栈在 PSRAM），所以绝不能在里面对
+       flash/分区做擦写或 map/unmap（现在也不再需要）。 */
+    s_scan_writing = true;
 }
 
 /* 扫描后台任务：调用构建器扫描并保存，结束后置完成标志 */
@@ -858,28 +849,21 @@ static void boot_scan_task(void *arg)
              (unsigned)stats.dir_count, (unsigned)stats.song_count,
              esp_err_to_name(ret));
 
-    /* 若扫描成功但没有任何音乐：清除分区有效性，避免下次重启误判为"有数据"而
-       直接进入常规界面（无音乐仍应重新提示扫描）。
-       ⚠ 这里同样是擦 flash（关缓存），必须在**归还 LVGL 锁之前**做完。 */
+    /* 若扫描成功但没有任何音乐：删掉刚生成的缓存文件，避免下次重启误判为
+       "有数据"而直接进入常规界面（无音乐仍应重新提示扫描）。
+       ⚠ 现在只是删卡上的文件，不关外部缓存，可以在本任务（PSRAM 栈）里直接做。 */
     if (ret == ESP_OK && stats.song_count == 0) {
         playlist_store_invalidate();
     }
 
-    /* 写入阶段结束：归还 LVGL 锁，界面恢复渲染（进度定时器随即切到主界面/无音乐页）。
-       顺序很关键：必须在置 s_scan_done 之前解锁——定时器要靠这把锁才能跑起来。 */
-    if (s_scan_lvgl_locked) {
-        s_scan_lvgl_locked = false;
-        lvgl_port_unlock();
-        ESP_LOGI(TAG, "write phase: LVGL unlocked, UI resumes");
-    }
-
+    s_scan_writing = false;
     s_scan_ok = (ret == ESP_OK);
     s_scan_done = true;
     vTaskDelete(NULL);
 }
 
-/* 扫描进度定时器（LVGL 任务上下文，已持锁）：每 300ms 更新数量；
-   进入写入阶段后提示"正在写入扫描数据"；扫描完成则切换界面 */
+/* 扫描进度定时器（LVGL 任务上下文，已持锁）：每 300ms 更新数量与阶段文案；
+   扫描完成则切换界面 */
 static void boot_progress_timer_cb(lv_timer_t *timer)
 {
     if (s_state != BOOT_ST_SCANNING) {
@@ -892,8 +876,14 @@ static void boot_progress_timer_cb(lv_timer_t *timer)
         lv_label_set_text(s_count_label, buf);
     }
 
-    /* 注：进入写入阶段后不再由这里更新"正在写入…"文案——那一刻扫描任务已经
-       抢走 LVGL 锁并自己把这一帧画完了（见 boot_scan_progress_cb）。 */
+    /* 写入阶段：文案改成"正在写入扫描数据..."（写 SD 只要零点几秒，
+       定时器可能只赶上一次，反正随后就切界面了） */
+    if (s_scan_writing && !s_scan_done && s_status_label != NULL) {
+        const char *cur = lv_label_get_text(s_status_label);
+        if (cur == NULL || strcmp(cur, "正在写入扫描数据...") != 0) {
+            lv_label_set_text(s_status_label, "正在写入扫描数据...");
+        }
+    }
 
     if (!s_scan_done) {
         return;   /* 扫描尚未结束 */
@@ -941,18 +931,6 @@ static void boot_sleep_toast_timer_cb(lv_timer_t *timer)
 /* 按钮事件回调（LVGL 任务上下文，已持锁）                              */
 /* ------------------------------------------------------------------ */
 
-/* "清除扫描数据"（failsafe）：擦除 pldata 头部使分区无效，界面停留并提示 */
-static void clear_scan_data_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    ESP_LOGI(TAG, "clear scan data button pressed");
-    esp_err_t ret = playlist_store_invalidate();
-    if (s_status_label != NULL) {
-        lv_label_set_text(s_status_label,
-                          ret == ESP_OK ? "已清除扫描数据" : "清除失败，请重试");
-    }
-}
-
 /* "重置歌曲位置"（failsafe）：清掉 NVS 里上次播放歌曲与随机播放位置记录，
    供"换卡/歌曲缺失/上次现场引用了损坏文件"等场景从干净状态重新开始；
    下次插卡开机会从第一首播放（随机模式重新生成起点），界面停留并提示 */
@@ -975,9 +953,9 @@ static void reset_position_btn_cb(lv_event_t *e)
    "延迟加载"。
    · 内嵌精简字库仍作为 NPF 挂载失败时的兜底（system_font.c），覆盖全部 UI
      固定文案（见 ideas_and_exps/FontSymbols.md）；
-   · "数据无效"这一支会扫描 SD 卡并整体重写 pldata 分区，写入阶段会关闭外部
-     flash 缓存——此时 mmap 在 font 分区上的字形位图不可访问，所以**写入期间必须
-     让 LVGL 停止渲染**（见 boot_scan_progress_cb 的持锁逻辑与 NPF_FONT.md §7.1）。 */
+   · "数据无效"这一支会扫描 SD 卡并把结果写到卡上的缓存文件
+     `/sdcard/.ecov/pldata.bin`（写 SD **不关外部缓存**，font 分区的 mmap 字形
+     照常可读，所以写入期间界面不需要冻结）。 */
 void boot_flow_run(void)
 {
     /* 0. 低电拒启（S31）：电量 < 2% 且未在充电 → 提示屏，停在此界面。
@@ -992,16 +970,32 @@ void boot_flow_run(void)
         return;
     }
 
-    /* 1. SD 卡检查：未挂载 → 无卡界面（failsafe 清除扫描数据） */
+    /* 1. SD 卡检查：未挂载 → 无卡界面（failsafe 重置歌曲位置） */
     if (!sd_card_is_mounted()) {
         ESP_LOGW(TAG, "SD card not mounted");
         boot_show_no_sd();
         return;
     }
 
+#if QCONF_FORCE_RESCAN
+    /* 【调试】模拟设置菜单「重新扫描」的第一步：**删掉卡上缓存文件**，然后
+       **继续走下面的正常流程**（is_valid() 会失败 → 自动扫描 → 写卡）。
+       因此这条路径与真实重扫完全一致，只是省掉"重启"那一圈，用于没有触摸
+       输入时验证；平时不启用。 */
+    if (pldata_has_data()) {
+        ESP_LOGW(TAG, "FORCE_RESCAN: 删除卡上缓存 %s -> %s",
+                 "/sdcard/.ecov/pldata.bin",
+                 esp_err_to_name(playlist_store_invalidate()));
+    }
+#endif
+
     /* 2. 播放列表缓存检查：不再只看"头部有效"，还要确认它属于**当前这张卡**
           且曲库没有增删/改名/换文件。任何一项不匹配都自动重扫，不再要求用户
-          手动点"开始扫描"。 */
+          手动点"开始扫描"。
+          ⚠ **完全不读 flash 里的旧 `pldata` 分区**（2026-11-16 明确取消一次性迁移）：
+          卡上没缓存文件就直接扫，别再拿 flash 里的旧数据往回填——否则"重新扫描"
+          （删文件 → 重启）会被旧数据瞬间"迁移"回来，扫描根本不执行。
+          代价只是老固件升级后第一次开机多扫一次（9047 首约 2.3s）。 */
     bool need_scan = false;
     const char *reason = "";
 

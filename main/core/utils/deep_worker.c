@@ -14,9 +14,11 @@ static const char *TAG = "deep_worker";
 /* 执行器任务参数
    ⚠ 栈 8KB（**不能再加大**）：本任务执行所有"深调用链"（息屏/亮屏的
    esp_pm_configure + AMOLED 重新初始化 + lv_refr_now 全屏重刷、关机
-   停外设/渲染提示等），以及设置菜单"重新扫描"的关缓存段
-   （player_controller_deinit → playlist_deinit → pldata_munmap →
-   esp_partition_munmap：关缓存要求当前任务栈在内部 RAM）。
+   停外设/渲染提示等），以及设置菜单"重新扫描"的"停现场"一段
+   （player_controller_deinit → playlist_deinit → pldata_munmap）。
+   注：2026-11-16 起 `pldata_munmap` 是空操作（播放列表数据搬到 SD 卡缓存文件，
+   不再有 flash 分区映射要解除），本任务的栈放内部 RAM 是历史习惯，不再是
+   "关缓存断言"的硬要求（详见 ideas_and_exps/PLDATA_ON_SDCARD.md）。
    ⚠ **栈 12KB（2026-10 TTF 迁移由 8KB 上调）**：本任务要跑 `lv_refr_now`
    全屏重刷（息屏唤醒）与关机提示渲染。TTF 时代这条链包含 FreeType 光栅化
    字形（光栅化器把渲染池放栈上），实测要吃掉近 12KB；**2026-11 已改回位图

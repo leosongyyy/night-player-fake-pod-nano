@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "core/storage/playlist_format.h"   /* PLS_STR_MAX_OFFSET：数据本体上限 */
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -11,27 +12,29 @@ extern "C" {
 #endif
 
 /**
- * @brief 播放列表存储（包装 pldata 分区，提供"整体重写 + 头部 commit"语义）
+ * @brief 播放列表存储（包装 pldata 后端，提供"整体重写 + 头部 commit"语义）
  *
- * 分区布局（4MB，见 partitions.csv 的 `pldata`）：
+ * 镜像布局（自 2026-11-16 起存于 SD 卡文件 `/sdcard/.ecov/pldata.bin`，
+ * 与旧的 4MB `pldata` flash 分区镜像逐字节相同）：
  *
  *     offset 0x0000 │ 头部扇区（1 个 4KB 扇区）  │ ← commit 标志
- *     offset 0x1000 │ 数据区（最多 4MB - 4KB）  │ ← 播放列表数据本体
+ *     offset 0x1000 │ 数据区（PLST 数据本体）    │ ← 播放列表数据
  *
  * 设计要点：
- *  - **is_valid** 通过头部 magic / 长度合法性判断分区数据是否有效。
- *  - **invalidate** 只擦头部扇区，使分区立刻变为"无效"（数据暂不可用）。
- *  - **save_playlist** 一次性整体重写：先擦头部（立即失效）→ 再擦/写数据区 →
- *    最后写头部（commit）。中途任何一步断电中断，头部都处于擦除态，
- *    分区始终表现为"无效"，不会读到半截数据。
- *  - **map_to_memory** 把整个分区内存映射（只读、省 RAM），数据留在 Flash。
+ *  - **is_valid** 通过头部 magic / 版本 / 长度，外加**整块 CRC32**（SD 会坏，
+ *    值得校验一次；620KB ≈ 2ms）判断数据是否有效。CRC 字段为 0 视为"老固件
+ *    没填"，跳过校验。
+ *  - **invalidate** 删除卡上缓存文件，使数据立刻失效。
+ *  - **save_playlist** 一次性整体重写：先擦头部（内存缓冲立即失效）→ 再擦/写
+ *    数据区 → 写头部（commit）→ 最后 `pldata_commit()` 落盘（tmp + rename 原子
+ *    替换）。中途断电时卡上要么是完整旧文件、要么没有文件，绝不会是半截数据。
+ *  - **map_to_memory** 返回整份镜像的基址（PSRAM，只读访问）。
  *
- * 注意：save_playlist 是一次性整写；对已写入区域重复保存会先整体擦除，安全。
- * 数据区起点 offset 0x1000（对齐扇区），头部单独占一个扇区。
+ * 注意：save_playlist 是一次性整写；数据区起点 offset 0x1000（4KB 对齐）。
  */
 
-/** 分区中可容纳的最大数据长度（4MB - 1 个头部扇区） */
-#define PLAYLIST_STORE_MAX_DATA (PLDATA_PART_SIZE - 0x1000U)
+/** 数据本体最大长度 = 构建缓冲上限（4MB，见 playlist_format.h PLS_STR_MAX_OFFSET） */
+#define PLAYLIST_STORE_MAX_DATA ((size_t)PLS_STR_MAX_OFFSET)
 
 /** 数据区起始偏移（紧跟头部扇区，扇区对齐） */
 #define PLAYLIST_STORE_DATA_OFFSET 0x1000U
@@ -57,18 +60,18 @@ typedef struct {
 } playlist_store_meta_t;
 
 /**
- * @brief 判断分区是否有效（读取头部，检查 magic 与长度合法性；快速，不读数据）
+ * @brief 判断缓存是否有效（头部 + CRC32 校验；快速，不解析数据）
  *
- * @return true 有效；false 无效（从未写入 / 已 invalidate / 被中断）
+ * @return true 有效；false 无效（卡上无文件 / 已 invalidate / 被中断 / CRC 坏）
  */
 bool playlist_store_is_valid(void);
 
 /**
- * @brief 使分区暂时无效（只擦头部扇区，数据区保留）
+ * @brief 使缓存立刻失效（删除卡上缓存文件）
  *
  * 调用后 is_valid() 返回 false，直到下次 save_playlist() 成功。
  *
- * @return ESP_OK 成功
+ * @return ESP_OK 成功（文件本来不存在也算成功）
  */
 esp_err_t playlist_store_invalidate(void);
 
@@ -76,9 +79,9 @@ esp_err_t playlist_store_invalidate(void);
  * @brief 一次性整体保存播放列表数据
  *
  * 内部顺序保证"中断安全"：
- *   1. 先擦头部（数据立即失效）→ 2. 按 len 对齐扇区擦数据区 → 3. 写数据 →
- *   4. 最后写头部（commit，此时才生效）。
- * 中途断电中断，头部保持擦除态，分区始终无效。
+ *   1. 先擦头部（内存缓冲立即失效）→ 2. 按 len 对齐擦数据区 → 3. 写数据 →
+ *   4. 写头部（commit）→ 5. `pldata_commit()` 落盘（tmp → fsync → rename）。
+ * 中途断电中断，卡上要么是旧的完整文件，要么没有文件。
  *
  * @param data 内存中的源数据
  * @param len  数据长度（须 ≤ PLAYLIST_STORE_MAX_DATA）
@@ -99,13 +102,13 @@ esp_err_t playlist_store_save_playlist(const void *data, size_t len,
 bool playlist_store_get_meta(playlist_store_meta_t *out);
 
 /**
- * @brief 把整个分区内存映射到地址空间，返回只读基址（省 RAM）
+ * @brief 拿到整份镜像的基址（PSRAM，只读）
  *
- * 返回的基址指向分区开头（offset 0），数据本体位于
+ * 返回的基址指向镜像开头（offset 0），数据本体位于
  * PLAYLIST_STORE_DATA_OFFSET 处。请先用 is_valid() / get_data_len()
  * 确认有效性与长度，再读取。
  *
- * @param[out] out_ptr 返回映射基址（指向分区开头）
+ * @param[out] out_ptr 返回镜像基址（指向 offset 0）
  * @return ESP_OK 成功
  */
 esp_err_t playlist_store_map_to_memory(const void **out_ptr);

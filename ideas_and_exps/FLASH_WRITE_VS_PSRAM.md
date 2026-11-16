@@ -8,6 +8,12 @@
 > 本文是逐条审计的结论。审计结果：**没有发现新的可触发缺陷**（唯一新增的
 > 规则是"IRAM ISR 里绝不许碰 LVGL/PSRAM"，属预防性约束），但机制值得写清楚，
 > 否则下一次改动很容易踩进来。
+>
+> ⚠ **2026-11-16 更新**：播放列表数据已从 flash 的 `pldata` 分区搬到 SD 卡缓存文件
+> （`/sdcard/.ecov/pldata.bin`），所以下文凡是把 `pldata` 当作"flash 擦写/关缓存"
+> 场景的例子，**那条路径已经不存在**（`pldata_write/erase/munmap` 现在只是内存/文件
+> 操作）。审计结论对 **NVS / font / OTA 等其他 flash 路径仍然成立**。
+> 详见 `PLDATA_ON_SDCARD.md` §14。
 
 ---
 

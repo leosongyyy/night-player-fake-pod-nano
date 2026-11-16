@@ -2,6 +2,12 @@
 
 > 本文档汇总 FakePodNanoNightPlayer 中**开机流程**（电池 / SD 卡 / 播放列表缓存 三重检查）的设计、实现与验证结果。
 > 前置依赖：`PLAYLIST_SCAN_SUMMARY.md` 所述的播放列表（PLST）扫描与存储系统（`playlist_build_from_sd` / `playlist_store` / pldata 分区）。
+>
+> ⚠ **2026-11-16 存储介质变更**：缓存不再是 flash 的 `pldata` 分区，而是 SD 卡文件
+> `/sdcard/.ecov/pldata.bin`（开机整块读 57~59ms；扫描末尾写回 95ms，原来 6.1s）。
+> 开机流程的分支（低电 / 无卡 / 扫描 / 常规）**没有变**，但"无效缓存"的语义变成
+> "卡上没有缓存文件"，扫描也不再冻结 UI（写 SD 不关外部缓存）。详见
+> `PLDATA_ON_SDCARD.md` §14。
 
 ---
 
@@ -85,8 +91,11 @@
 - 若扫描成功但 `song_count == 0`，扫描任务调用 `playlist_store_invalidate()` 擦除分区头部，使分区保持**无效**状态，保证下次重启仍自动扫描，而非误入常规界面。
 - 若扫描/写分区失败或扫描任务创建失败，`boot_progress_timer_cb` 在 `s_scan_ok == false` 时切到「扫描失败」页并停留；不会调用 `player_controller_init()` 进入空列表主界面。
 
-### 4.4 failsafe 清除扫描数据
-- 无卡界面提供「清除扫描数据」按钮，点击调用 `playlist_store_invalidate()`（只擦 pldata 头部，数据区保留），界面停留并提示"已清除扫描数据"。
+### 4.4 failsafe 重置歌曲位置
+- 无卡界面提供「重置歌曲位置」按钮（清 NVS 里的上次播放位置）。
+- ⚠ 2026-11-16 起**删掉了原「清除扫描数据」按钮**：播放列表缓存已搬到 SD 卡文件
+  `/sdcard/.ecov/pldata.bin`，没有卡的时候没有任何东西可清；要强制重扫走设置菜单
+  「重新扫描」（它删缓存文件后重启，见 `PLDATA_ON_SDCARD.md` §14）。
 
 ### 4.5 常规界面入口
 - `boot_enter_normal()` 先删除开机 UI 根容器（`s_root`），再调用 `app_ui_create()`（创建主界面 + 顶部状态栏 + 下拉通知栏）。

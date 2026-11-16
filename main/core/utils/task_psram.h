@@ -32,16 +32,18 @@ extern "C" {
  *      会命中 esp_mm 的断言
  *      `assert failed: esp_cache_freeze_caches_disable_interrupts ...
  *       (s_task_stack_is_sane_when_cache_frozen())` 并直接 panic。
- *      具体触发点：`esp_partition_munmap` / `esp_partition_mmap`（本项目
- *      pldata 层的 `pldata_munmap`、`pldata_unmap_if_mapped`——后者在
- *      pldata_write / pldata_erase_range 里都会调用）、任何 `esp_flash_*`
- *      擦写。**凡是要写/擦播放列表分区的任务（扫描/重新扫描/清数据）栈
- *      必须留在内部 RAM**；
+ *      具体触发点：`esp_partition_munmap` / `esp_partition_mmap`、任何
+ *      `esp_flash_*` 擦写。
+ *      ⚠ 2026-11-16 起播放列表数据（pldata）搬到 SD 卡缓存文件，`pldata_write` /
+ *      `pldata_erase_range` / `pldata_munmap` 都变成纯内存/文件操作，
+ *      **不再关外部缓存**；`boot_scan` 的栈也已换成 PSRAM（写 SD 安全）。
+ *      仍然留在内部 RAM 的是真的会碰 flash 擦写的任务（font/NVS/pldata 迁移读取
+ *      等一次性路径，以及 deep_worker 这类串行执行"深链"的任务）。
+ *      详见 ideas_and_exps/PLDATA_ON_SDCARD.md；
  *   3. 栈需求大、执行频率低的任务优先（监视/日志类）。
  *
  * ⚠ 不适用：LVGL（每帧刷屏）、button_svc（按键中断触发、要求低延迟）、
- *   player_ctrl/deep_worker（交互与深链主路径）、boot_scan/rescan
- *   （分区写擦 + munmap 关缓存）。
+ *   player_ctrl/deep_worker（交互与深链主路径）。
  * ⚠ 例外：`mp3_play` 因多格式解码（Tremor codebook）需要 64KB 栈，现也使用本接口创建；
  *   其运行期不触发 flash 关缓存路径。
  */

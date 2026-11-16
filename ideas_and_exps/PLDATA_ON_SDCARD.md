@@ -1,6 +1,6 @@
-# 把 pldata 从 flash 分区搬到 SD 卡文件（可行性研究）
+# 把 pldata 从 flash 分区搬到 SD 卡文件（可行性研究 + 实施记录）
 
-> 2026-11-15。**纯代码/文档研究，未烧录、未改任何源码**（用户要求"不动设备"）。
+> 2026-11-15 研究；**2026-11-16 已按 P1+P2 落地并真机验证**（见文末 §14）。
 > 结论先说：**可行，且收益比预期大**；真正的代价不是内存或性能，而是
 > "固件第一次开始写用户的音乐卡"这一类新风险。建议分三阶段落地（见 §10）。
 
@@ -530,3 +530,95 @@ factory 3MB → 3.5MB（release 余量 354KB → ≈850KB），代价只有"重�
 收益（扫描 6s→0.4s、消灭关缓存事故域、+4MB flash、解开布局枷锁）远大于代价
 （620KB PSRAM 常驻 + 一个新的 OOM 失败模式 + "固件会写卡"这一类新风险）；
 唯一需要用户明确点头的是 §6.1——**从此固件的 bug 有可能损坏 SD 卡上的文件系统**。
+
+---
+
+# 14. 实施记录（2026-11-16，**P1 + P2 已落地并真机验证**）
+
+> 本节是"实际做成什么样"，与前面几节的**研究/估算**口径不同；有冲突以本节为准。
+> P3（删分区 + 重排布局 + 重刷字体）**未做**。
+
+## 14.1 最终形态（与 §4.3 草图的差异）
+
+| 项 | 落地结果 |
+| --- | --- |
+| 缓存文件 | **`/sdcard/.ecov/pldata.bin`**（同级 `pldata.tmp`）。目录 `.ecov` 以 `.` 开头 → 扫描器 `collect_dir()` 跳过，不会进 UI/播放列表 |
+| 镜像格式 | 与旧 `pldata` 分区镜像**逐字节相同**（4KB 头扇区 + PLST 数据本体），`playlist_store` / `playlist_format` 的格式定义零改动 |
+| 后端 API | 保留原有 8 个函数；**新增** `pldata_commit()`（tmp → `fsync` → rename）、`pldata_drop()`（删文件 = invalidate）、`pldata_has_data()` |
+| `pldata` 分区 | **保留但不读**（P1 不删）：固件**完全不访问**它，因为一次性迁移已被删除（见 §14.5）；分区里的旧数据纯属死数据，等 P3 删分区时一起清掉 |
+| 构建缓冲 | `PLS_STR_MAX_OFFSET` **0x2cc000(2.8MB) → 0x400000(4MB)**（S3 时代的内存妥协作废；字符串池 3.75MB）。镜像上限随之定为 `PLDATA_MAX_IMAGE = 4KB + 4MB`，`PLAYLIST_STORE_MAX_DATA` 改由 `PLS_STR_MAX_OFFSET` 推导 + `_Static_assert` 护栏 |
+| 缓冲初始化 | 构建缓冲改 `heap_caps_calloc`：目录区与字符串池之间的 ~183KB 填充区不再是堆残留 → 每次扫描产出**确定性字节**（CRC/文件可比对） |
+| 扫描期分配 | 目录名串 `psram_strdup()`、3 个指针数组 `heap_caps_calloc(PSRAM)`（FUTURE_PLAN #56）→ 扫描不再吃内部 RAM |
+| 扫描栈 | `task_create_psram_stack()` 32KB（失败退 16KB）；**PSRAM 栈在扫描流程里安全**（写 SD 不关外部缓存） |
+| 写入阶段 UI | **删掉抢 LVGL 锁冻结**：扫描任务只置 `s_scan_writing` 标志，300ms 进度定时器把文案改成"正在写入扫描数据..." |
+| 无卡界面 | 删「清除扫描数据」按钮（无卡时没有东西可清；要强制重扫走设置菜单「重新扫描」） |
+| 重新扫描（设置菜单） | 简化成**"挂起 LVGL → 停播放/清 playlist 指针 → 删除 `/sdcard/.ecov/pldata.bin` → 重启"**，不再委托 `deep_worker`（已无关缓存段）；**删除失败（写保护卡/卡满）不重启**，恢复界面并 Toast 提示 |
+| 调试开关 | 新增 quickconfig **`FORCE_RESCAN`**（没有触摸输入时也能验证"删缓存 → 扫描 → 写卡"整条路径） |
+
+## 14.2 真机实测（9047 首 / 173 目录，数据本体 620,257 B → 文件 624,353 B）
+
+| 项目 | 结果 |
+| --- | --- |
+| 开机读卡 | **57~59 ms**（含 PSRAM 分配 + 整块 CRC32 校验），`pldata loaded from SD: 624353 B` |
+| 写入卡（扫描末尾一次） | **95 ms**（`committed 624353 B to SD in 95 ms`）；flash 时代同一份数据 **6.14 s** → **≈65×** |
+| 扫描本身 | ≈2.3 s（5838 个文件 / 173 目录）；另有开机指纹探针 1.34 s（未变） |
+| 扫描期内存 | `pre-scan memory: internal largest=79872 B, PSRAM free=15.9 MB`；扫完 `MEM: heap≈15.33 MB`（比 flash 版少约 33KB，多出来的 620KB 在 PSRAM） |
+| UI 冻结 | **无**。写入阶段 fps 47→62 连续，无 task_wdt/assert；`enter normal UI` 紧接着出现 |
+| 缓存命中 | 第二次启动：`playlist cache match` → 直接进主界面（`App started` 3.6 s），不重扫 |
+| CRC 闭环 | 新写入文件 `crc=0xcfd33f81`，下次开机 `is_valid()` 校验通过（无 CRC mismatch） |
+| 4MB 缓冲 | 扫描峰值 PSRAM 仍余 15.9 MB，`heap_caps_calloc(4MB)` 一次成功 |
+| **删缓存 → 重扫闭环** | `FORCE_RESCAN`（等价于设置菜单「重新扫描」的删除动作）：`pldata: cache file deleted: /sdcard/.ecov/pldata.bin` → `auto scan required (no valid cache)` → 扫描 9047 首 → `committed 624353 B in 107 ms` → 进主界面；随后冷启动命中缓存（57~58 ms 读取），40 秒运行期无任何删除/异常（`--no-reset` 观察） |
+
+## 14.3 还没上机验证的（下次补）
+
+1. **无卡界面**（拔卡不方便）、**写卡中途断电**、**写保护卡 / 卡满**（应落到扫描失败屏；
+   设置菜单重扫的删除失败分支会给 Toast 且不重启，同样没实测）。
+2. 设置菜单「重新扫描」的**按钮点到重启**那一段 UI 交互（无法远程点击）；不过它的核心
+   动作（删 `pldata.bin` + 重启后自动扫描）已用 `FORCE_RESCAN` 在同一段代码路径上验证：
+   删除后 boot_flow 打印 `auto scan required (no valid cache)` 并真的重扫了 9047 首。
+
+## 14.4 踩坑
+
+* **ccache + `__has_include` 会复用旧对象**：`main/idfc_quickconfig.h` 由 idfc 每次构建生成，
+  首次启用某个 quickconfig 时若对应 `.c` 内容未变，ccache 可能直接命中"当时头文件还不存在"
+  的缓存对象——现象是**头文件里开关是 1、obj 里却没有那段代码**（本次就是靠 `#warning` 探针
+  才发现的）。解法：给那个 `.c` 加一行注释（改内容）再 build。已在 `boot_flow.c` 顶部注释记录。
+* **idfc 的 `-qc` 需要新版本**：2026-11-16 之前的版本会报"参数不在可接受参数的列表中"，
+  此时只能手工写 `main/idfc_quickconfig.h`（但会被下一次 `idfc build` 覆盖）。
+* `MEM: heap=` 与 `MEMTRACE psram` 是两个口径，看 pldata 占用要对比 `11-sd` 与 `11b-pldata`
+  两行（本次差 638,980 B ≈ 626,688 B 缓冲 + 12KB 碎片）。
+
+## 14.5 取消 flash→SD 一次性迁移（2026-11-16，用户实测发现）
+
+**症状**：真机上点设置菜单「重新扫描」没有任何效果——界面重启之后没有出现扫描进度，
+直接进了主界面。
+
+**根因**：P1 阶段留了一段"一次性迁移"（`playlist_store_import_legacy_flash`）：开机时若
+**卡上没有缓存文件**且 flash 的 `pldata` 分区里有有效缓存，就把旧数据读出来写到卡上。
+而「重新扫描」的第一步恰好是**删掉卡上缓存文件**、然后重启——重启后迁移逻辑立刻把 flash
+里的旧数据搬回卡上，于是：
+
+```
+删除 pldata.bin → 重启 → 迁移把 flash 旧列表写回 pldata.bin
+             → is_valid() 通过 → 库里指纹也匹配 → need_scan = false → 根本不扫描
+```
+
+也就是说，**迁移与"重新扫描"这两件事在语义上互斥**：一个想用旧数据，一个想丢掉旧数据。
+
+**处理**：把迁移整段删掉（`playlist_store_import_legacy_flash()`、它的声明、`esp_partition`
+依赖全部移除），固件**从此完全不读 flash 里的 `pldata` 分区**。删完后同一条路径的真机日志：
+
+```
+pldata: cache file deleted: /sdcard/.ecov/pldata.bin
+boot_flow: auto scan required (no valid cache)      ← 真的开始扫了
+playlist_builder: scan done: dirs=173 songs=9047 total=620257
+pldata: committed 624353 B to SD in 107 ms
+boot_flow: enter normal UI
+```
+
+**代价**：从老固件升级上来的机器第一次开机会重扫一次（9047 首约 2.3 s + 写卡 0.1 s），
+比起"重新扫描永远失效"完全不值一提。
+
+**顺带**：`pldata` 分区现在是纯死数据（固件不读不写），P3 删分区时直接清掉即可。
+
+

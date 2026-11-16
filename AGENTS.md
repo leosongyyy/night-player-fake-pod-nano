@@ -91,7 +91,9 @@ idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightP
 - `sdkconfig.defaults`（+ `.debug` / `.release`）：esp32s31、QIO 16MB、自定义分区表、16MB Octal PSRAM 200MHz（含 XIP/RODATA）、320MHz、64B 缓存线、FreeRTOS 1000Hz、FATFS cp936+UTF-8、`CONFIG_UI_COVER_FLASH=y`（release 的极速封面）。**`sdkconfig.role.inner`** 是矩阵 `role=inner` 的 overlay（角色差异：FIRMWARE_ROLE_SYNC / BT 关 / 封面裁剪 / 主任务栈 / TinyUSB MSC），配置链在 variant 之后合并。
 - **LVGL 不可改的关键项**：`LV_USE_CUSTOM_MALLOC=y`（对象堆进 PSRAM，`core/ui/lvgl_mem.c`；改回 CLIB 会因内部 RAM 不足直接崩，理由见 `LVGL9_MIGRATION.md` §10）、`LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`、`LV_FONT_FMT_TXT_LARGE=y`（NPF 的 glyph_dsc 是 LARGE 布局）、`LV_DEF_REFR_PERIOD=16`、`LV_USE_SYSMON=y` + `LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下）、裁掉 6 种用不到的颜色格式（只留 RGB565/ARGB8888/RGB565A8/RGB888）、关 `LV_BUILD_EXAMPLES`/`LV_BUILD_DEMOS`、`CONFIG_LV_USE_PPA=n`（改为自定义 SW blend handler `core/ui/lvgl_ppa_accel.c`，见 `PPA_ACCEL.md`）。逐项理由与实测数据见 `BUILD_CONFIG.md`、`IRAM_AUDIT_LVGL9.md` §5、`PPA_ACCEL.md`。
 - **配置矩阵是二维**：`variant`（debug / release）× `role`（player / inner，默认 player），构建目录 `build/<role>.<variant>`（`build/player.debug` / `build/inner.debug` …），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>[;sdkconfig.role.<role>]`（player 无 overlay 文件）。`variant` 管调试设施（LVGL FPS/日志、性能监视、封面版本），`role` 管固件角色（表世界 / 里世界）。⚠ 里世界**必须显式 `-o role=inner`**，不要持久化到 `.idfc`。
-- ⚠ **分区表（`partitions.csv`，偏移写死）**：`nvs`@0x9000(0x6000) / `phy_init`@0xF000(0x1000) / `factory`@**0x10000(3M)**（播放器）/ `ota_0`@**0x310000(2.5M)**（里世界固件）/ `otadata`@**0x590000(8K)** / `font`@0x600000(6M) / `pldata`@0xC00000(4M)。bootloader@0x2000 与分区表@0x8000 由 sdkconfig 控制（不在 CSV 里）。**四条原则**：① **`pldata` 必须留最末尾**——偏移一变旧播放列表作废、首次开机会重扫（锚定尾部后调 font/app 都不动它）；② `font`/`pldata` 偏移按 64KB 对齐（才能整段 mmap）；③ **app 分区偏移也必须 64KB 对齐**（所以 otadata 放两个 app 之后，否则白丢 64KB）；④ **播放器必须装进 factory(3MB)、里世界固件必须装进 ota_0(2.5MB)**——`check_sizes` 只在"所有 app 分区都装不下"时报错，部分装不下只打 Warning（release 播放器 2.66MB 超出 ota_0 属预期）。**nvs/phy_init/font/pldata 的偏移不要再动**；改过 pldata 偏移的两次重排都导致播放列表重扫（历史见 `partitions.csv` 头部注释）。
+- ⚠ **分区表（`partitions.csv`，偏移写死）**：`nvs`@0x9000(0x6000) / `phy_init`@0xF000(0x1000) / `factory`@**0x10000(3M)**（播放器）/ `ota_0`@**0x310000(2.5M)**（里世界固件）/ `otadata`@**0x590000(8K)** / `font`@0x600000(6M) / `pldata`@0xC00000(4M)。bootloader@0x2000 与分区表@0x8000 由 sdkconfig 控制（不在 CSV 里）。
+  - ⚠⚠ **2026-11-16 起播放列表数据已不在 `pldata` 分区**：改存 SD 卡文件 `/sdcard/.ecov/pldata.bin`（开机整块读进 PSRAM，见 `PLDATA_ON_SDCARD.md`）。**固件完全不读这个分区**（早期做过"一次性迁移到卡上"，已删除——它会让设置菜单「重新扫描」被旧数据瞬间填回来、扫描根本不执行，见该文 §14.5）；分区里现在是死数据，**P3 删分区 + 重排布局**时一起清掉（那时才需要重刷分区表 + 字体）。在那之前分区表仍按下面的四条原则维护。
+  - **四条原则**：① **`pldata` 必须留最末尾**——偏移一变旧播放列表作废、首次开机会重扫（锚定尾部后调 font/app 都不动它）；② `font`/`pldata` 偏移按 64KB 对齐（才能整段 mmap）；③ **app 分区偏移也必须 64KB 对齐**（所以 otadata 放两个 app 之后，否则白丢 64KB）；④ **播放器必须装进 factory(3MB)、里世界固件必须装进 ota_0(2.5MB)**——`check_sizes` 只在"所有 app 分区都装不下"时报错，部分装不下只打 Warning（release 播放器 2.66MB 超出 ota_0 属预期）。**nvs/phy_init/font/pldata 的偏移不要再动**；改过 pldata 偏移的两次重排都导致播放列表重扫（历史见 `partitions.csv` 头部注释）。
 - 字体与构建类型无关（都读同一份 `spiffs/system.npf`）。
 
 ### 项目内容
@@ -102,7 +104,7 @@ idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightP
 
 - 播放核心：MP3 / FLAC / OGG Vorbis / WAV（minimp3 / dr_flac / libogg + Tremor / 自研 WAV 解析器，流式解码，实测 5000+ 首）、文件夹与 `.pl` 歌单、循环（全部/列表/单曲）、顺序/**无限确定性随机**（断点续播）、回放增益、**10 段 EQ**、`.npd` 元数据优先，回退音频内嵌/同目录 JPEG 封面 + **硬件 JPEG 解码**（失败回退软件解码）。
 - **经典蓝牙音频**：A2DP Source（SBC，48k 优先/44.1k 兜底）+ AVRCP CT 绝对音量；EQ 在重采样之后；最多 5 设备各自记忆音量/EQ/安静模式；控制中心开关（长按快速面板）、设置菜单蓝牙页（配对/详情）；已配对耳机可主动回连；安静模式（只留蓝牙的伪关机）。见 `BLUETOOTH_AUDIO.md`。
-- 硬件层：AMOLED（QSPI，全黑启动防白屏）、触摸（CST820，异步初始化）、电池（AXP2101 融合百分比）、音频（I2S + CS43131）、SD（FAT/exFAT）、**RTC 走时 + 双键映射 + PMU 关机/低电保护**。
+- 硬件层：AMOLED（QSPI，全黑启动防白屏）、触摸（CST820，异步初始化）、电池（AXP2101 融合百分比）、音频（I2S + CS43131）、SD（FAT/exFAT，**播放列表缓存文件 `/sdcard/.ecov/pldata.bin` 也在这里**）、**RTC 走时 + 双键映射 + PMU 关机/低电保护**。
 - 任务布局：UI（LVGL）固定 Core0、解码/封面固定 Core1，分核不抢占（见"使用技术"）。
 - LVGL 移植层：显示驱动、**tick 直接读硬件时间**、专用任务（Core0）、互斥锁、触摸 indev、通用虚拟列表、全局跑马灯节奏、deep_worker 大栈任务。
 - 开机流程：开机封面 → 低电拒启 → 未插卡 / 列表无效则一键扫描 → 主界面；**设置菜单懒加载**，不占开机路径。
@@ -172,7 +174,7 @@ patches/                  # lvgl_fast_mem_decl / esp_lcd_touch_deps（托管组�
 **1. 分层与初始化顺序**
 
 - `core/` 放与应用无关的底层（hardware / ui / utils / player / storage / music / image / fonts / network / system），`ui/` 放应用界面。新文件按此分层，snake_case + 模块前缀。
-- `main.c`（播放器分支）只做装配：`config_store_init → config_store_load_active_slot → deep_worker_init → display_init → lvgl_port_init → system_font_init → boot_splash_show(持锁首帧+点亮) → touch_init(+ready 回调) → battery_init → boot_reason_init → rtc_init（充电界面标志位要用）→ 充电界面判定（PMU 插电开机 或 RTC bit2）→ audio_init/音量/EQ → bt_service_init → pldata_init → button_service_init → sd_card_init → boot_flow_run(持锁切屏+复核亮度) → sleep_timer/quiet_mode → key_handler → power_service → startPerformanceMonitor()`。
+- `main.c`（播放器分支）只做装配：`config_store_init → config_store_load_active_slot → deep_worker_init → display_init → lvgl_port_init → system_font_init → boot_splash_show(持锁首帧+点亮) → touch_init(+ready 回调) → battery_init → boot_reason_init → rtc_init（充电界面标志位要用）→ 充电界面判定（PMU 插电开机 或 RTC bit2）→ audio_init/音量/EQ → bt_service_init → button_service_init → sd_card_init → pldata_init（读卡上缓存 `/sdcard/.ecov/pldata.bin`，**必须在 SD 之后、LVGL 锁之前**：整块读 57~59ms）→ boot_flow_run(持锁切屏+复核亮度) → sleep_timer/quiet_mode → key_handler → power_service → startPerformanceMonitor()`。
 - ⚠ **LVGL 故意在 display 之后立刻启动**（只依赖面板句柄 + config_store，触摸句柄可 NULL 后补）：先把开机封面画出来点亮，把后续硬件与 `app_ui_create`（约 700ms）藏到封面背后——首次点亮从约 1.9s 提前到约 0.7s，进主界面时刻不变。防白屏顺序（亮度 0 时先写满整屏 → 再置亮度）与"亮度命令必须与刷屏同锁"的约定不要改。
 
 **2. 任务核心布局（UI Core0 / 音频 Core1）**
@@ -180,13 +182,13 @@ patches/                  # lvgl_fast_mem_decl / esp_lcd_touch_deps（托管组�
 - Core0：`LVGL`（每帧刷屏）、`button_svc`、`deep_worker`、`player_ctrl`、`cpu_coll0`、系统 esp_timer 任务/ISR、全部驱动中断。
 - Core1：`mp3_play`/`mp3_out`、`cover_load`（注册为 lvgl_port 辅助任务，息屏随 LVGL 挂起）、`sleep_timer`、`power_svc`、`cpu_coll1`、`bt_svc` + 蓝牙控制器/Bluedroid 任务；`boot_scan`/`rescan`。
 - 不固定核：`touch_init`（一次性自删）、`mem_monitor`/`cpu_coll*`、`pmu_irq`。
-- **⚠ 非实时任务栈一律用 `task_create_psram_stack()`**（失败自动回退内部 RAM）：内部 RAM 开机末期只剩几 KB、最大连续块约 8KB，内部栈会创建失败（历史症状：`create power service task failed` → 自动息屏/低电关机全失效）。已在 PSRAM：`mem_monitor`/`cpu_coll0/1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`、`mp3_play`（80KB，Tremor codebook + 蓝牙重采样/EQ）。**必须留内部 RAM**：`LVGL`、`button_svc`、`player_ctrl`、`deep_worker`、`sleep_timer`、`boot_scan`。
+- **⚠ 非实时任务栈一律用 `task_create_psram_stack()`**（失败自动回退内部 RAM）：内部 RAM 开机末期只剩几 KB、最大连续块约 8KB，内部栈会创建失败（历史症状：`create power service task failed` → 自动息屏/低电关机全失效）。已在 PSRAM：`mem_monitor`/`cpu_coll0/1`、`rescan`、`dev_restart`、`cover_load`、`power_svc`、`touch_init`、`pmu_irq`、`mp3_play`（80KB，Tremor codebook + 蓝牙重采样/EQ）、`boot_scan`（32KB；播放列表搬 SD 后扫描不再关外部缓存，见 `PLDATA_ON_SDCARD.md`）。**必须留内部 RAM**：`LVGL`、`button_svc`、`player_ctrl`、`deep_worker`、`sleep_timer`。
 - **栈预算**：`LVGL` **12KB**（v9 绘制管线很深：6KB 时"首次渲染设置页"必爆栈；凡可能同步渲染 LVGL 的任务都按 ≥12KB 算）、`deep_worker` **12KB**、主任务 8KB（`CONFIG_ESP_MAIN_TASK_STACK_SIZE`）、button_svc 4KB、power_svc 3KB、sleep_timer 4KB、cover_load 8KB、mp3_play **80KB**、player_ctrl 4KB。
   - ⚠⚠ **`MEM: stk:` 打印的是"剩余"字节，不是"已用"**：`uxTaskGetStackHighWaterMark()` 从栈底数**没被触碰过的 0xA5 填充**，返回该任务创建以来的**最小剩余**（FreeRTOS `prvTaskCheckFreeStackSpace()`；本 port `StackType_t=uint8_t`，返回值即字节）。**数值越小越危险**，换算公式是 `已用 = 栈大小 − 打印值`。
     例（2026-11-15 实测）：WAV 播放时 `mp3_play=80320`，即 80KB 栈里还剩 80,320 B → 峰值只用了约 **1.6KB**；单曲循环 5 轮读数不变（无泄漏）。
   - 历史备注修正：早期"64KB 时 48kHz OGG + 10 段 EQ + 蓝牙流的高水位已到 61,016 B、只剩 4.5KB"是把这个读数当成了**已用**；按上面的语义 61,016 是**剩余**，实际只用了约 4.5KB。所以 `mp3_play` 的 80KB 属于**刻意留宽**（栈在 PSRAM，不占内部 RAM），**不要因为读数富余就随手缩栈**；真要缩必须先覆盖 OGG + 蓝牙 + EQ + WAV 全路径复测。
   - 调栈前看每 20s 那一行 `MEM: stk:`，且**必须覆盖目标路径实测**（如息屏/亮屏后才打印的读数、WAV/OGG + 蓝牙 + EQ 叠加），别只信亮屏态。
-- **deep_worker**：息屏/亮屏、关机、以及**需要内部栈的关缓存段**（如重扫的 munmap/擦头）唯一执行者，业务任务用 `deep_worker_call(fn, arg)` 投递。约定：fn 内禁止再投递；**调用方禁止持 LVGL 锁投递**。⚠ **必须在 `app_main` 早期创建**（config_store 之后、硬件初始化之前）——内部 RAM 在开机末期碎片化，晚创建会静默失败（曾导致每次深调用等满 5s 超时）；创建处必须检查返回值。
+- **deep_worker**：息屏/亮屏、关机等"深链"的唯一执行者，业务任务用 `deep_worker_call(fn, arg)` 投递。约定：fn 内禁止再投递；**调用方禁止持 LVGL 锁投递**。⚠ **必须在 `app_main` 早期创建**（config_store 之后、硬件初始化之前）——内部 RAM 在开机末期碎片化，晚创建会静默失败（曾导致每次深调用等满 5s 超时）；创建处必须检查返回值。（2026-11-16 起设置菜单「重新扫描」不再委托它：那条流程已简化成"停播放 → 删 `/sdcard/.ecov/pldata.bin` → 重启"，不关外部缓存。）
 
 **3. 内部 RAM / IRAM / DMA 的三条硬规则**
 
@@ -197,7 +199,7 @@ patches/                  # lvgl_fast_mem_decl / esp_lcd_touch_deps（托管组�
 
 **4. 关缓存 / PSRAM 栈（硬约束）**
 
-- `esp_partition_mmap/munmap`、`esp_flash_erase/write`、`pldata_write/erase` 都会冻结外部缓存 → 此时 **PSRAM 栈任务不许执行**（IDF 有 `s_task_stack_is_sane_when_cache_frozen` 断言）。这类代码要么让任务栈留内部 RAM，要么 `deep_worker_call()` 投递。
+- `esp_partition_mmap/munmap`、`esp_flash_erase/write` 都会冻结外部缓存 → 此时 **PSRAM 栈任务不许执行**（IDF 有 `s_task_stack_is_sane_when_cache_frozen` 断言）。这类代码要么让任务栈留内部 RAM，要么 `deep_worker_call()` 投递。⚠ **`pldata_write/erase/munmap` 已于 2026-11-16 从这份清单里划掉**：播放列表搬 SD 后它们只是内存/文件操作（见 `PLDATA_ON_SDCARD.md`），扫描任务因此可以放 PSRAM 栈。
 - **写 flash 期间不要持有 IRAM ISR 会碰的 PSRAM 数据**：IRAM ISR 不许碰任何 PSRAM 数据、`lv_*`、播放列表/字体 mmap（无断言，靠纪律；LVGL 对象进 PSRAM 后这条从"不规范"升级为"必崩"）。
 - 全项目 NVS 写入口唯一（`config_store.c`），高频拖动必须走 `*_deferred` + `config_store_flush_pending()`（一次 nvs_commit 会停核 5~20ms）。详见 `FLASH_WRITE_VS_PSRAM.md`、`NVS_WRITE_BUDGET.md`。
 

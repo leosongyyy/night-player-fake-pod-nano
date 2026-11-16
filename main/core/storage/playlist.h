@@ -12,10 +12,11 @@ extern "C" {
 #endif
 
 /**
- * @brief 播放列表读取/解析 API（基于 pldata 分区内存映射，省 RAM）
+ * @brief 播放列表读取/解析 API（基于 pldata 缓冲的只读指针访问）
  *
- * 将 pldata 分区中已保存的播放列表数据内存映射后，按 PLST 格式解析，
- * 提供目录 / 歌曲 / 字符串的只读访问。数据始终留在 Flash，不占堆 RAM。
+ * 2026-11-16 起播放列表数据存于 SD 卡缓存文件 `/sdcard/.ecov/pldata.bin`，
+ * 开机由 pldata_init() 整块读进 PSRAM；这里拿到基址后按 PLST 格式解析，
+ * 提供目录 / 歌曲 / 字符串的只读访问（不复制数据，只算指针偏移）。
  *
  * 典型用法：
  * @code

@@ -106,7 +106,7 @@ BaseType_t task_create_psram_stack(TaskFunction_t fn, const char *name,
 | `mp3_play` / `mp3_out` | 实时解码/输出，卡顿直接可闻 |
 | `button_svc` | 按键中断触发，要求低延迟响应 |
 | `player_ctrl` / `deep_worker` / `sleep_timer` | 交互与深链主路径 |
-| `boot_scan` | **32KB，扫描过程会擦写播放列表分区（pldata_write/erase → pldata_unmap_if_mapped → munmap 关缓存），PSRAM 栈会 assert**；开机早期内部 RAM 尚有约 130KB，32KB 内部栈可正常分配 |
+| `boot_scan` | ~~32KB，扫描要擦写 pldata 分区（关缓存），PSRAM 栈会 assert~~ → **2026-11-16 起已改放 PSRAM**（32KB）：播放列表搬 SD 卡文件后扫描不再关外部缓存，见 `PLDATA_ON_SDCARD.md` §14 |
 
 ### 2.4 关缓存陷阱：栈在 PSRAM 的硬性禁区
 
@@ -124,12 +124,17 @@ assert(s_task_stack_is_sane_when_cache_frozen());   // 要求 sp 落在 DRAM
 
 **踩坑记录（重新扫描）**：`rescan` 最初迁到 PSRAM 后，点"重新扫描"立刻崩溃
 （`pldata_munmap → esp_partition_munmap → esp_mmu_unmap → 关缓存断言`）。
+> ⚠ 2026-11-16 更新：播放列表数据搬到 SD 卡缓存文件后，`pldata_munmap` 是**空操作**、
+> `playlist_store_invalidate()` 只是删卡上的文件，这条崩溃路径已不存在（见
+> `PLDATA_ON_SDCARD.md` §14）。下面的 `deep_worker` 委托保留原样（行为已经验过），
+> 但不再是"必须"。
 
-**最终方案**：`rescan` 任务栈仍放 PSRAM（内部 RAM 已无 8KB 连续块——实测
+**当时的方案**：`rescan` 任务栈仍放 PSRAM（内部 RAM 已无 8KB 连续块——实测
 最大连续块只有 **8180 B < 8192 B**，即使先释放 cover/sleep 任务也腾不出），
 把**关缓存的那一段**用 `deep_worker_call()` 投递到 deep_worker（内部栈）执行：
 
 ```c
+/* ⚠ 2026-11-16 起这段委托已删除（见下），保留仅作历史记录 */
 static void rescan_do_deinit(void *arg) {   /* 在 deep_worker 内部栈上跑 */
     player_controller_deinit();             /* 停播放 + playlist_deinit → munmap */
     playlist_store_invalidate();            /* 擦列表头（pldata 层同样会 unmap） */
@@ -137,6 +142,12 @@ static void rescan_do_deinit(void *arg) {   /* 在 deep_worker 内部栈上跑 *
 ...
 if (!deep_worker_call(rescan_do_deinit, NULL)) { rescan_do_deinit(NULL); }  /* 兜底 */
 ```
+
+> **2026-11-16 现状**：播放列表搬到 SD 卡缓存文件后，`rescan_task` 直接在 PSRAM 栈上
+> 执行「挂起 LVGL → `player_controller_deinit()` → `playlist_store_invalidate()`
+> （= **删除 `/sdcard/.ecov/pldata.bin`**）→ 重启」，**不再委托 deep_worker**；
+> 删除失败（写保护卡等）则恢复 LVGL 并 Toast 提示、不重启。真机已验证删除 + 重扫
+> + 写回闭环（`PLDATA_ON_SDCARD.md` §14）。
 
 deep_worker 栈**现为 12KB**（`deep_worker.c` 的 `DEEP_WORKER_TASK_STACK = 12*1024`；2026-10 TTF
 迁移由 8KB 上调，见 `FontSystem.md` §5，实测 HWM 余约 11.5KB）。⚠ 历史上曾试图把它加到 12KB
@@ -151,8 +162,8 @@ deep_worker 栈**现为 12KB**（`deep_worker.c` 的 `DEEP_WORKER_TASK_STACK = 1
 状态（`uxTaskGetSystemState`）便于定位。
 
 **判据（放 PSRAM 前必查）**：任务调用链里是否有 `esp_partition_mmap/munmap`、
-`esp_flash_erase/write`、`pldata_write`/`pldata_erase_range`（内部会 unmap）。
-有 → 栈必须内部 RAM，或把这段委托给内部栈任务（deep_worker）。
+`esp_flash_erase/write`。有 → 栈必须内部 RAM，或把这段委托给内部栈任务（deep_worker）。
+（`pldata_write` / `pldata_erase_range` / `pldata_munmap` 自 2026-11-16 起已不在判据里。）
 
 ### 2.5 关缓存的第二个禁区：**中断回调的代码**也必须在 IRAM
 

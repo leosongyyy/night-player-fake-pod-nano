@@ -2,6 +2,12 @@
 
 > 本文档汇总 FakePodNanoNightPlayer 中**播放列表（PLST）扫描与存储系统**的设计、实现、调试与验证结果。
 > 这是 NightPlayer 的核心设计之一：用户通过**目录 + `.pl` 播放列表文本文件**组织全部音乐，无歌手/流派/专辑等元数据习惯，纯目录和列表。
+>
+> ⚠ **2026-11-16 存储介质变更**：数据不再存 flash 的 `pldata` 分区，改存 **SD 卡文件
+> `/sdcard/.ecov/pldata.bin`**（开机整块读进 PSRAM，扫描末尾 tmp+rename 原子写回；
+> 实测写 620KB 只要 **95ms**，原来 flash 擦写 6.14s）。**PLST 格式与本文的扫描/字符串池
+> 设计完全没变**，只换了后端；下文凡"写入 flash 分区/mmap"的说法请对照
+> `PLDATA_ON_SDCARD.md` §14 阅读。
 
 ---
 

@@ -256,12 +256,6 @@ static void player_app_main(void)
     bt_service_init();
     mem_trace_log("08b-bt_service");
 
-    ESP_LOGI(TAG, "Initialize pldata partition (播放列表数据)");
-    if (pldata_init() != ESP_OK) {
-        ESP_LOGW(TAG, "pldata partition unavailable (播放列表持久化不可用)");
-    }
-    mem_trace_log("09-pldata");
-
     ESP_LOGI(TAG, "Initialize button service (single key=GPIO61)");
     button_service_init();
     mem_trace_log("10-button");
@@ -270,6 +264,17 @@ static void player_app_main(void)
     ESP_LOGI(TAG, "Initialize SD card (SDMMC)");
     sd_card_init();   // 挂载失败不阻塞，由 boot_flow 依据 sd_card_is_mounted() 决定流程
     mem_trace_log("11-sd");
+
+    /* 播放列表数据（pldata）现在存在 **SD 卡上的缓存文件** `/sdcard/.ecov/pldata.bin`，
+       必须在 sd_card_init() 之后、并且在下面 lvgl_port_lock() 之前载入：
+       整块读约 30~150ms，卡在 LVGL 锁里会冻住 UI 任务。
+       没有缓存文件（首次开机/刚换卡）是正常情况，boot_flow 会扫描后生成。 */
+    ESP_LOGI(TAG, "Initialize pldata (SD card cache file)");
+    esp_err_t pldata_ret = pldata_init();
+    if (pldata_ret != ESP_OK && pldata_ret != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "pldata unavailable: %s", esp_err_to_name(pldata_ret));
+    }
+    mem_trace_log("11b-pldata");
 
     // 开机流程：电池电压 / SD 卡 / 播放列表数据检查，决定进入哪个界面。
     // （LVGL API 非线程安全，需持锁操作；本函数只创建首屏并启动后台任务，不阻塞；

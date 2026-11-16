@@ -15,7 +15,6 @@
 #include "core/system/fw_switch.h"
 #include "core/ui/click_wheel.h"
 #include "core/ui/lvgl_port.h"
-#include "core/utils/deep_worker.h"
 #include "core/utils/sleep_timer.h"
 #include "core/utils/task_psram.h"
 #include "ui/bt_settings.h"
@@ -748,20 +747,14 @@ static void back_btn_cb(lv_event_t *e)
 }
 
 /* ------------------------------------------------------------------ */
-/* 重新扫描：停止播放 → 使播放列表数据无效 → 重启（boot_flow 重新扫描）   */
+/* 重新扫描：删除卡上缓存文件 `/sdcard/.ecov/pldata.bin` → 重启           */
 /* ------------------------------------------------------------------ */
 
 /* 重新扫描任务参数：流程含 mp3_player_stop 的等待（解码任务退出、释放
    文件句柄/I2S，最多 1s），放独立任务执行，避免阻塞 LVGL/按键任务。
    ⚠ 栈放 **PSRAM**（task_create_psram_stack）：触发时内部 RAM 已被 LVGL
    堆吃满（实测仅剩约 22KB，而**最大连续块只有 8180 B < 8KB 栈需求**，
-   内部分配必然失败——历史症状"无法分配栈内存/点了没反应"）。
-   ⚠ 但"关缓存"的那段必须跑在**内部栈**上：本流程要 unmap pldata 分区
-   （player_controller_deinit → playlist_deinit → pldata_munmap →
-   esp_partition_munmap → esp_mmu_unmap），关缓存期间 PSRAM 不可访问，
-   栈在 PSRAM 会命中 esp_cache_freeze_caches_disable_interrupts 的断言
-   s_task_stack_is_sane_when_cache_frozen() 直接崩溃。故这段委托给
-   deep_worker（内部大栈，见 rescan_do_deinit）。 */
+   内部分配必然失败——历史症状"无法分配栈内存/点了没反应"）。 */
 #define RESCAN_TASK_STACK  (4 * 1024)
 #define RESCAN_TASK_PRIO   6
 #define RESCAN_TASK_CORE   1
@@ -777,46 +770,51 @@ static void rescan_release_tasks(void)
     sleep_timer_release_task();
 }
 
-/* 关缓存段（在 deep_worker 内部栈上执行）：停止播放控制器 → 卸载播放列表
-   mmap → 擦除列表头使数据失效。
-   ⚠ 必须在内部栈执行（见 RESCAN_TASK_STACK 注释）；fn 内禁止再调
-   deep_worker_call（会持锁等自身死锁）。 */
-static void rescan_do_deinit(void *arg)
-{
-    (void)arg;
-    player_controller_deinit();
-    esp_err_t ret = playlist_store_invalidate();
-    ESP_LOGI(TAG, "playlist invalidated (%s)", esp_err_to_name(ret));
-}
+/* 重新扫描任务（PSRAM 栈）：挂起 LVGL → 停播放/清 playlist 指针 → **删除缓存文件**
+   → 重启。重启后 boot_flow 发现卡上没有缓存，自动进入扫描界面并重建曲库
+   （不需要用户再点按钮）。
 
-/* 重新扫描任务（PSRAM 栈）：挂起 LVGL → 委托 deep_worker 停播放/卸载映射/
-   使数据失效 → 重启。重启后 boot_flow 检测到分区无效，自动进入扫描界面
-   并重建曲库（无需用户再点按钮）。
-
-   ⚠ 顺序不可颠倒（内存安全关键）：
+   ⚠ 顺序不可颠倒：
    1. 先挂起 LVGL：player_ticker/列表刷新/正在播放页等都在 LVGL 任务上下文
-      读 playlist 指针，不先挂起的话，playlist 卸载后它们会访问失效映射；
-   2. rescan_do_deinit（deep_worker）：停播放 → 停控制器任务 → 删队列 →
-      playlist_deinit()（munmap + 清空 playlist 指针）→ 擦头使数据失效。 */
+      读 playlist 指针，不先挂起的话，playlist 指针被清空后它们会访问空指针；
+   2. player_controller_deinit()：停解码 → 挂起 controller 任务 → playlist_deinit
+      清空指针（`pldata_munmap` 现在是空操作，不再关外部缓存，PSRAM 栈安全）；
+   3. playlist_store_invalidate() = **删除 `/sdcard/.ecov/pldata.bin`**，只删这一个
+      文件，不碰卡上其它内容；
+   4. 删除失败（写保护卡/文件系统异常）**不重启**：重启后缓存依然有效，用户会以为
+      "点了没反应"。改为恢复界面 + Toast 提示。
+   2026-11-16 起这条流程不再有任何关外部缓存的步骤，所以去掉了原来"必须委托
+   deep_worker（内部栈）"的约束，直接在 PSRAM 栈任务里做。 */
 static void rescan_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "=== rescan: stop playback, invalidate playlist, restart ===");
+    ESP_LOGI(TAG, "=== rescan: delete playlist cache file, then restart ===");
 
     /* 1. 挂起 LVGL：停止 player_ticker/列表刷新/播放页刷新等所有读
           playlist 数据的 UI 活动（菜单画面定格，马上重启无影响） */
     lvgl_port_suspend();
     ESP_LOGI(TAG, "LVGL suspended");
 
-    /* 2. 停播放 + 卸载播放列表映射 + 使数据失效：必须跑在内部栈
-          （deep_worker），本任务是 PSRAM 栈，直接做 munmap 会触发关缓存断言 */
-    if (!deep_worker_call(rescan_do_deinit, NULL)) {
-        ESP_LOGW(TAG, "deep_worker unavailable, run deinit on this task "
-                      "(PSRAM stack: munmap may assert)");
-        rescan_do_deinit(NULL);
+    /* 2. 停播放 + 清空播放列表指针 */
+    player_controller_deinit();
+
+    /* 3. 删除卡上缓存文件 */
+    esp_err_t ret = playlist_store_invalidate();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "delete cache file failed: %s (写保护卡/卡满?)",
+                 esp_err_to_name(ret));
+        /* 恢复界面并提示（Toast 需要 LVGL 锁） */
+        lvgl_port_resume();
+        if (lvgl_port_lock(1000)) {
+            ui_toast_show_ms("删除缓存失败，请检查存储卡", 3000);
+            lvgl_port_unlock();
+        }
+        vTaskDelete(NULL);
+        return;
     }
 
-    /* 3. 等待日志刷出后重启 */
+    /* 4. 等日志刷出后重启，由 boot_flow 重新扫描并生成新的缓存文件 */
+    ESP_LOGI(TAG, "cache file deleted, restarting to rescan");
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
     vTaskDelete(NULL);   /* 理论不可达 */
@@ -826,11 +824,10 @@ static void rescan_task(void *arg)
 static void rescan_confirm_cb(lv_event_t *e)
 {
     (void)e;
-    ESP_LOGI(TAG, "rescan confirmed, start rescan task");
+    ESP_LOGI(TAG, "rescan confirmed, delete cache file then restart");
     rescan_release_tasks();
 
-    /* ⚠ 栈放 PSRAM（内部 RAM 最大连续块不足 8KB，见 RESCAN_TASK_STACK
-       注释）；关缓存段由 rescan_task 内部委托 deep_worker 执行 */
+    /* ⚠ 栈放 PSRAM（内部 RAM 最大连续块不足 8KB，见 RESCAN_TASK_STACK 注释） */
     if (task_create_psram_stack(rescan_task, "rescan",
                                 RESCAN_TASK_STACK, NULL,
                                 RESCAN_TASK_PRIO, NULL,

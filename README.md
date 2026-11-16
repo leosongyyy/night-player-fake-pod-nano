@@ -250,7 +250,8 @@ idfc flash -p COMx               # 烧录（COMx 换成实际串口号）
 idfc run -t release --monitor-wait-for "App started"   # 构建+体积+烧录+监视一条龙
 idfc help --all                  # 全部命令与参数
 
-# 生成"全量固件"（bootloader + 分区表 + app + 字体，单文件烧 0x0，清 nvs/pldata）
+# 生成"全量固件"（bootloader + 分区表 + app + 字体，单文件烧 0x0，清 nvs；pldata 分区也填 0xFF，
+# 但播放列表已改存 SD 卡 /sdcard/.ecov/pldata.bin，不再受影响）
 python tools/make_full_firmware.py -t release
 ```
 

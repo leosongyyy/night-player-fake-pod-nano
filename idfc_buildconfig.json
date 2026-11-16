@@ -42,6 +42,10 @@
 		{
 			"Name":"INNER_USB_AUTOSTART",
 			"Description":"【调试】里世界开机后自动进入 USB 传歌模式（验证 USB MSC 栈用，没有触摸输入时也能跑）。由 idfc build -o role=inner -qc INNER_USB_AUTOSTART 临时启用。"
+		},
+		{
+			"Name":"FORCE_RESCAN",
+			"Description":"【调试】表世界开机强制重扫曲库（忽略卡上缓存，用来验证\"扫描 → 写 SD 缓存文件\"整条路径，不需要点设置菜单）。由 idfc build -qc FORCE_RESCAN 临时启用，验证完普通 build 一次即可恢复。"
 		}
 	]
 }

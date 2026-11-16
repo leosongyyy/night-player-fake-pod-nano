@@ -4,6 +4,12 @@
 > **（里世界固件）** + **空白 otadata** + `spiffs/system.npf` 按分区表偏移拼成一个
 > **16 MiB** 的 bin，整片烧到 **0x0** 即可完成更新，并**顺带清空 nvs 与 pldata**
 > （配置和播放列表都不保留）。字体（NPF1 位图全字库）已包含，不需要再单独刷 `font` 分区。
+>
+> ⚠ **2026-11-16 变更**：播放列表缓存已从 flash 的 `pldata` 分区搬到 SD 卡文件
+> `/sdcard/.ecov/pldata.bin`（见 `PLDATA_ON_SDCARD.md`）。所以现在整片烧 0x0 只清
+> **nvs（用户配置）**，播放列表**不会**再被清；要强制重扫曲库就删掉卡上那个文件
+> （或用设置菜单「重新扫描」）。`pldata` 分区暂时保留（仅为老固件升级时一次性导入），
+> 下文凡"清空 pldata = 播放列表丢失"的说法**已过期**，等 P3 删分区后脚本也会去掉那一段。
 
 产物示例：`dist/FakePodNanoNightPlayer_release_full.bin`（16,777,216 B）。
 

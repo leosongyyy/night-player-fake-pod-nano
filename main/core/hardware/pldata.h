@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -10,118 +11,152 @@ extern "C" {
 #endif
 
 /**
- * @brief 播放列表数据结构分区（pldata）驱动
+ * @brief 播放列表数据（pldata）后端驱动：SD 卡上的缓存文件 + PSRAM 常驻缓冲
  *
- * 负责访问 Flash 中一个独立的 4MB 数据分区，用于持久化播放列表等
- * 结构化的播放器数据（见 partitions.csv 的 `pldata` 分区）。
+ * 2026-11-16 起，播放列表数据**不再放在 flash 的 pldata 分区**，而是卡上一个
+ * 普通文件（`/sdcard/.ecov/pldata.bin`），开机整块读进 PSRAM，运行时按指针访问。
+ * 设计动机与收益见 ideas_and_exps/PLDATA_ON_SDCARD.md。
  *
- * 设计要点（省 RAM）：
- *  - 读取通过 esp_partition_mmap() 把整个分区**内存映射**到地址空间，
- *    直接以指针访问，数据仍留在 Flash，**不占用堆 RAM**；
- *    mmap 只占用少量 MMU 表项 / Flash cache。
- *  - Flash 只支持"整扇区擦除 + 按字节/页写"，因此：
- *      * 写入前目标区域必须是**已擦除**状态（全 0xFF）；
- *      * 推荐"整体保存"模型：pldata_erase_all() 擦除整个分区后，
- *        再把整份播放列表数据从 offset 0 顺序写入。
- *      * 对同一扇区重复写入（未先擦除）会得到错误结果，调用方需自行管理布局。
- *  - mmap 期间写 Flash 会造成缓存不一致，因此 write/erase 前会自动解除映射，
- *    写入完成后如需读取需重新 pldata_mmap()。
+ * 文件内容与旧的 flash 分区镜像**逐字节相同**（4KB 头扇区 + PLST 数据本体），
+ * 所以 playlist_store / playlist_format 的格式定义一行都不用改，也能直接拿 PC
+ * 工具或 `dump` 出来的旧分区镜像做比对。
  *
- * 典型用法：
- * @code
- *   pldata_init();
- *   pldata_erase_all();                 // 整体重写前擦除
- *   pldata_write(0, &pl_header, sizeof(pl_header));   // 写入需已擦除
- *   const void *p;
- *   pldata_mmap(&p, &size);             // 内存映射只读访问（省 RAM）
- *   const my_header_t *h = p;           // 直接当指针用
- *   pldata_munmap();                    // 用完解除映射
- * @endcode
+ * 访问模型：
+ *  - **读**：pldata_init() 一次性 fopen + 整块 fread 到 PSRAM（9042 首 ≈ 620KB），
+ *    之后 pldata_read / pldata_mmap 都是纯内存操作；
+ *  - **写**：pldata_write / pldata_erase_range **只改内存缓冲**，不碰 flash；
+ *    一次扫描结束时由 playlist_store 调一次 pldata_commit() 落盘，
+ *    走 "写同级 tmp → fsync → rename" 的原子替换；
+ *  - pldata_mmap() 的名字沿用（上层语义是"拿到整份镜像的只读基址"），
+ *    现在返回的是 PSRAM 地址，pldata_munmap() 是空操作。
+ *
+ * 为什么值得换（对比 flash 后端）：
+ *  - 写盘不再关闭外部内存缓存（只有 flash 擦写才关）→ 扫描期间不必冻结 LVGL，
+ *    也不会让 PSRAM 栈任务命中 `esp_cache_freeze_caches_disable_interrupts` 断言；
+ *  - 620KB 写卡约 0.15~0.5s（flash 擦写实测 6.14s）；
+ *  - 代价：常驻约 620KB PSRAM（16MB 富余），以及"固件会写用户的音乐卡"这类新风险。
+ *
+ * ⚠ 写卡纪律（必须遵守，见 PLDATA_ON_SDCARD.md §6.1）：
+ *   1. **只写自己这一个文件**（+ 同级 tmp），绝不碰其它路径、绝不 format/mkfs；
+ *   2. 只在扫描末尾整份写一次，不做增量/高频写（会顶到音频读卡）；
+ *   3. 写失败保留旧文件（tmp + rename），最坏情况只是"卡上没缓存 → 下次重扫"。
  */
 
-/** pldata 分区大小（4MB） */
-#define PLDATA_PART_SIZE (4U * 1024U * 1024U)
+/**
+ * @brief pldata 镜像上限（字节）= 4KB 头 + 4MB 数据本体
+ *
+ * 4MB 数据本体 = 构建缓冲上限（playlist_format.h 的 `PLS_STR_MAX_OFFSET`）。
+ * 之所以不再是 4MB（旧的 pldata 分区大小）：数据搬到卡上以后，容量不再受
+ * flash 分区限制，取"构建器能产出的最大镜像"即可。
+ */
+#define PLDATA_MAX_IMAGE (0x1000U + 4U * 1024U * 1024U)
 
-/** Flash 扇区大小（擦除最小单位） */
+/** 镜像内部分块粒度（与 FatFs 扇区 CONFIG_FATFS_SECTOR_4096 一致；擦除/对齐单位） */
 #define PLDATA_SECTOR_SIZE 0x1000
 
 /**
- * @brief 查找 pldata 分区并缓存句柄（可重复调用）
+ * @brief 打开卡上的缓存文件并整块载入 PSRAM（可重复调用，只生效一次）
  *
- * @return ESP_OK 成功；ESP_ERR_NOT_FOUND 分区不存在（检查 partitions.csv）
+ * ⚠ 必须在 sd_card_init() **之后**、`lvgl_port_lock()` **之前**调用
+ * （整块读约 30~150ms，持 LVGL 锁调用会冻住 UI 任务）。
+ *
+ * @return ESP_OK 载入成功；ESP_ERR_INVALID_STATE SD 未挂载；
+ *         ESP_ERR_NOT_FOUND 没有缓存文件（正常，上层会扫描后 commit 生成）；
+ *         ESP_ERR_NO_MEM PSRAM 分配失败
  */
 esp_err_t pldata_init(void);
 
 /**
- * @brief 获取 pldata 分区大小（字节）
+ * @brief 缓冲是否已载入有效镜像（false = 还没有缓存数据，需要扫描）
+ */
+bool pldata_has_data(void);
+
+/**
+ * @brief 获取当前缓冲容量（字节；0 = 尚未分配）
  *
- * @return 分区大小；未 init 时为 0
+ * 注意语义已变：过去返回 flash 分区大小（固定 4MB），现在是"按需增长到的
+ * 缓冲容量"。当前无调用者，保留是为兼容旧接口。
  */
 size_t pldata_get_size(void);
 
 /**
- * @brief 擦除整个 pldata 分区（写新数据前先整体擦除，比较耗时，一次性）
+ * @brief 擦除整份镜像覆盖的范围（无数据时为空操作）
  *
- * @return ESP_OK 成功
+ * ⚠ 只改内存缓冲，需要在扫描末尾由 pldata_commit() 才落盘。
  */
 esp_err_t pldata_erase_all(void);
 
 /**
- * @brief 擦除分区的指定扇区范围
+ * @brief 擦除缓冲内的指定范围（按 0xFF 填充，语义等价于 flash 扇区擦除）
  *
- * @param offset 起始偏移，需按 PLDATA_SECTOR_SIZE 对齐
- * @param size   擦除长度，需按 PLDATA_SECTOR_SIZE 对齐
- * @return ESP_OK 成功；参数未对齐返回 ESP_ERR_INVALID_ARG
+ * 入参契约与 flash 时代一致：offset / size 必须按 PLDATA_SECTOR_SIZE 对齐
+ * （playlist_store 一直这么传）。容量不足时按需增长缓冲。
+ *
+ * @return ESP_OK 成功；ESP_ERR_INVALID_ARG 未对齐；ESP_ERR_INVALID_SIZE 越界
  */
 esp_err_t pldata_erase_range(uint32_t offset, size_t size);
 
 /**
- * @brief 向分区写入数据（⚠ 目标区域必须是已擦除状态，通常先 erase_all 再整体写）
+ * @brief 向缓冲写入数据（纯 memcpy，不需要"先擦除"）
  *
- * 📝 2026-10-21 实验记录（**未采用，代码已回滚**；本函数仍是直接写）：
- *    曾在这里对 PSRAM 源做"4KB 内部 RAM 缓冲分块 + esp_partition_write"，
- *    以绕开 esp_flash_write 对非 DRAM 源的 32B 栈弹跳（每 32B 要关/开一次
- *    外部缓存）。实测同一份 618,622 字节播放列表：写入阶段 6.14 s → 5.17 s，
- *    只快 ~16%（~0.97 s）。省下的只是窗口固定开销（~51 µs × 19,180 次），
- *    剩余时间主要是擦除（~2.3 s）与 flash 编程（~2.8 s，随字节数走），
- *    所以 4KB→8KB 也不会再快。结论：除非先减少写入字节（该表 604 KB 中有
- *    188 KB 是未初始化填充区），否则收益不足，已回滚为直接写。
+ * 写入会延长镜像长度（s_len = max(s_len, offset + len)），并在 pldata_commit()
+ * 时整份落盘。
  *
  * @param offset 起始偏移
  * @param data   数据源
  * @param len    数据长度
- * @return ESP_OK 成功；越界返回 ESP_ERR_INVALID_SIZE
+ * @return ESP_OK 成功；ESP_ERR_INVALID_SIZE 超出镜像上限
  */
 esp_err_t pldata_write(uint32_t offset, const void *data, size_t len);
 
 /**
- * @brief 从分区读取数据
- *
- * 若当前已映射则直接从映射地址 memcpy（省一次 Flash 事务）；否则走普通读。
+ * @brief 从缓冲读取数据
  *
  * @param offset 起始偏移
  * @param dst    目标缓冲
  * @param len    读取长度
- * @return ESP_OK 成功
+ * @return ESP_OK 成功；ESP_ERR_INVALID_SIZE 超出已载入的镜像长度（含"无数据"）
  */
 esp_err_t pldata_read(uint32_t offset, void *dst, size_t len);
 
 /**
- * @brief 把整个分区内存映射到地址空间，只读访问（省 RAM）
+ * @brief 拿到整份镜像的只读基址（名字沿用 flash 时代的 mmap，实际是 PSRAM 指针）
  *
- * 返回的指针直接指向 Flash（只读），播放列表可整体当作在 RAM 中访问，
- * 但不占用堆 RAM。同一时刻只允许一份映射，重复调用返回已有映射。
- *
- * @param[out] out_ptr  返回映射基址
- * @param[out] out_size 返回映射大小（= 分区大小）
- * @return ESP_OK 成功
+ * @param[out] out_ptr  镜像基址（offset 0 = 头部扇区起点）
+ * @param[out] out_size 镜像有效长度（= 文件大小）
+ * @return ESP_OK 成功；ESP_ERR_INVALID_STATE 无数据
  */
 esp_err_t pldata_mmap(const void **out_ptr, size_t *out_size);
 
 /**
- * @brief 解除 pldata 内存映射（写入前会自动调用本函数）
+ * @brief 空操作（数据在 PSRAM，无需解除映射；保留是为了上层代码零改动）
  */
 void pldata_munmap(void);
+
+/**
+ * @brief 把缓冲整份写回卡上文件（tmp → fsync → rename 原子替换）
+ *
+ * 只在扫描末尾调用一次。可在任意任务上下文执行（**不会关闭外部缓存**，
+ * 因此 PSRAM 栈任务也安全）。
+ *
+ * @return ESP_OK 成功；ESP_ERR_INVALID_STATE 无数据；其余为文件系统错误
+ */
+esp_err_t pldata_commit(void);
+
+/**
+ * @brief 删除卡上的缓存文件 `/sdcard/.ecov/pldata.bin`（并让缓冲失效）
+ *
+ * 这是"立刻失效"的唯一实现：设置菜单「重新扫描」就是**删这个文件再重启**
+ * （重启后 boot_flow 发现没有缓存 → 自动重扫）。旧 flash 后端靠"擦头部扇区"
+ * 实现同样语义。
+ *
+ * ⚠ 只删自己那一个文件（+ 同级残留 tmp），绝不碰卡上其它内容。
+ * ⚠ 缓冲不释放（马上重启/重扫，留着可复用），只把有效长度清零。
+ *
+ * @return ESP_OK 成功（文件本来就不存在也算成功）；ESP_FAIL 删除失败
+ *         （写保护卡/文件系统异常，调用方应提示用户而不是静默重启）
+ */
+esp_err_t pldata_delete_cache_file(void);
 
 #ifdef __cplusplus
 }
