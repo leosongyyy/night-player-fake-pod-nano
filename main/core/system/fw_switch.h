@@ -19,7 +19,7 @@ extern "C" {
  * | 角色 | 分区 | 偏移 | 谁启动它 |
  * |---|---|---|---|
  * | 表世界（播放器，完整功能，无 WiFi/USB 栈） | `factory` | 0x10000 | RTC 分区位 `0b00`（默认） |
- * | 里世界（WiFi对时 + USB传歌，最小流程） | `ota_0` | 0x310000 | 表世界写 RTC 分区位 `0b01` 后启动 |
+ * | 里世界（WiFi对时 + USB传歌，最小流程） | `ota_0` | 0xC00000 | 表世界写 RTC 分区位 `0b01` 后启动 |
  *
  * **2026-11-16 起全面迁移到 RTC 字节**（`bootloader_components/main` 是必备件）：
  * - 启动分区**只**由 PCF85063A 的 `RAM_byte(0x03)` 决定，otadata 完全不参与；
@@ -31,7 +31,7 @@ extern "C" {
  *   换开机速度），所以 bootloader **不会**替我们回退坏镜像——安全完全依赖
  *   `fw_switch_to_sync()` 里的全量 `esp_image_verify()`，不要绕过本模块直接改
  *   RTC 字节。
- * ⚠ otadata 分区（`otadata`@0x590000）仍保留在分区表里，但**不再被读写**；
+ * ⚠ otadata 分区（`otadata`@0x5FE000）仍保留在分区表里，但**不再被读写**；
  *   IDF 的 OTA API 也不再用（`esp_ota_set_boot_partition` 已从本模块移除）。
  */
 

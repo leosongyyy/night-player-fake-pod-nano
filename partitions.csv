@@ -5,20 +5,33 @@
 #                               分区表自身占用到 0x9000，故下方 nvs 从 0x9000 起
 #   nvs      @ 0x9000   (0x6000 = 24KB)        配置/用户数据
 #   phy_init @ 0xF000   (0x1000 = 4KB)         射频校准数据
-#   factory  @ 0x10000  (0x300000 = 3MB)       应用固件：**主播放器**（日常跑的就是它）
-#   ota_0    @ 0x310000 (0x280000 = 2.5MB)     应用固件：**里世界固件**（WiFi对时 + USB传歌，双固件方案）
-#   otadata  @ 0x590000 (0x2000 = 8KB)         OTA 启动选择（bootloader 据此决定启动哪个 app）
+#   factory  @ 0x10000  (0x5EE000 = 5.93MB)    应用固件：**主播放器**（日常跑的就是它）
+#   otadata  @ 0x5FE000 (0x2000 = 8KB)         OTA 启动选择（**本项目不再使用**，见下）
 #   font     @ 0x600000 (6MB)                  NPF1 位图全字库镜像 system.npf，**裸二进制、无文件系统**
-#   pldata   @ 0xC00000 (4MB)                  播放列表数据结构分区（锚定在**最尾部**）
+#   ota_0    @ 0xC00000 (4MB)                  应用固件：**里世界固件**（WiFi对时 + USB传歌）
 #
-# ---------- 布局原则（2026-10-25 重排确立，务必遵守） ----------
-# 1) **pldata 必须留在分区表最末尾**：它是"整体重写 + 头部 commit"的只读 mmap 数据，
-#    偏移一旦变动旧播放列表就作废、首次开机必须重扫（见 main/core/storage/playlist_store.c）。
-#    锚定尾部后，今后调整 font / app 分区的大小与边界都只动它们之间那几条线，pldata 纹丝不动。
-# 2) font 与 pldata 的偏移都要按 64KB（SPI_FLASH_MMU_PAGE_SIZE）对齐，否则无法整体内存映射。
-# 3) **app 分区的偏移必须按 64KB 对齐**（gen_esp32part.py 会检查），所以 otadata 放在两个
-#    app 之后而不是紧跟 phy_init —— 0x10000 放 otadata 会逼着 factory 挪到 0x20000，白丢 64KB。
-# 4) nvs / phy_init / font / pldata 的偏移**不要动**：动了就丢用户配置/字体/播放列表。
+# ---------- 布局原则（2026-11-16 第六次重排确立，务必遵守） ----------
+# 1) **nvs / phy_init / font 的偏移不要动**：动了就丢用户配置 / 字体数据。
+# 2) font 与 app 分区的偏移都要按 64KB（SPI_FLASH_MMU_PAGE_SIZE）对齐：
+#    font 要整段 mmap；app 分区偏移 gen_esp32part.py 也会检查。
+# 3) **app 分区偏移按 64KB 对齐**，所以 otadata 放在 factory 之后、font 之前，
+#    而不是紧跟 phy_init —— 0x10000 放 otadata 会逼着 factory 挪到 0x20000，白丢 64KB。
+# 4) ota_0 放在 font 之后（0xC00000），把 16MB 的尾部 4MB 全给里世界固件；
+#    以后要扩里世界、或换更大的字体，只需要动 font 与 ota_0 之间那一条线。
+#
+# ---------- 为什么删掉了 pldata 分区（2026-11-16） ----------
+# 播放列表数据已从 flash 分区搬到 **SD 卡文件** `/sdcard/.ecov/pldata.bin`
+# （开机整块读进 PSRAM，扫描末尾原子写回；详见 ideas_and_exps/PLDATA_ON_SDCARD.md）。
+# 固件完全不读写 flash 里的旧 pldata 分区，于是把这块 4MB 让给了里世界固件（ota_0）。
+# 副作用：**旧 pldata 分区里遗留的播放列表数据直接作废**，第一次开机走一次
+# 自动扫描（9047 首约 2.3s）并生成卡上的缓存文件。本版尚未发布、用户首次是全量
+# 刷入，所以这次重排不需要任何升级兼容代码。
+#
+# ---------- otadata 为什么还留着 ----------
+# 「表世界 / 里世界」的启动选择**完全由 PCF85063A RAM_byte(0x03) 的 bit1:0 决定**
+# （自定义 bootloader，见 RTC_BOOT_PARTITION.md），otadata 不参与选择。但 IDF 的
+# bootloader/ota 基础设施仍然要求分区表里**存在** otadata 分区（否则 ota_0 相关的
+# 分区查找会报错），所以保留这 8KB，内容恒为空（0xFF）。
 #
 # ---------- 双固件（2026-11）：为什么有 factory + ota_0 两个 app 分区 ----------
 # 目标：WiFi 对时的协议栈（esp_wifi/lwip/wpa_supplicant）与 USB 传歌的设备栈
@@ -27,32 +40,28 @@
 # 主要挤压来源。
 # 方案：主播放器（表世界）留在 factory（日常启动），另做一个**里世界固件**放
 # ota_0：界面是「WiFi对时 / USB传歌」功能列表 + 「回到表世界」。表世界里点这两
-# 个功能时写 otadata 切过去，里世界启动第一件事就是**把 otadata 擦掉**
+# 个功能时写 RTC 分区位切过去，里世界启动第一件事就是**清掉分区位**
 # （= 任何意外复位都回 factory），然后等用户选功能，最后点「回到表世界」重启。
-#   · 启动选择：自定义 bootloader（bootloader_components/main）优先读 PCF85063A
-#     RAM_byte(0x03) 选 ota_0；RTC 不可用时才回退 IDF 标准 OTA 槽 + otadata
-#     （详见 ideas_and_exps/RTC_BOOT_PARTITION.md）；
+#   · 启动选择：自定义 bootloader（bootloader_components/main）读 PCF85063A
+#     RAM_byte(0x03) 选 ota_0（详见 ideas_and_exps/RTC_BOOT_PARTITION.md）；
 #   · 两个固件必须用**同一份分区表**，各自把自己烧到对应槽（表世界 `idfc flash`
-#     到 factory，里世界固件手工 `esptool write_flash 0x310000`，见 INNER_WORLD.md §5）；
+#     到 factory，里世界固件手工 `esptool write_flash 0xC00000`，见 INNER_WORLD.md §5）；
 #   · RTC 是外置芯片（PCF85063A），天然跨固件共享；SD 卡是同一张卡（USB 传歌
 #     时由里世界独占）；
-#   · 代价：只多一个 OTA 槽，所以里世界固件必须**手工**烧到 0x310000（idf.py flash 不会写它）。
+#   · 代价：里世界固件必须**手工**烧到 0xC00000（idf.py flash 不会写它）。
 # 完整调研、切换流程、风险与验证清单见 ideas_and_exps/INNER_WORLD.md。
 #
-# 尺寸核算：播放器镜像（debug）2,454,848 B，槽 3MB（3,145,728 B）→ 余约 690KB；
-#           里世界固件按"WiFi 栈 ~650KB + TinyUSB ~100KB + LVGL 270KB +
-#           应用/驱动 ~400KB"估算约 1.5~1.9MB，槽 2.5MB（2,621,440 B）。
+# 尺寸核算（2026-11-16 实测）：
+#   播放器（release）2,949,216 B，槽 0x5EE000（6,217,728 B）→ 余约 3.11MB；
+#   里世界固件（debug）1,778,048 B，槽 4MB（4,194,304 B）→ 余约 2.3MB；
+#   字体镜像 4,653,106 B（4.44MiB），槽 6MiB → 余约 1.34MiB。
 #
 # ---------- 构建时的体积检查（看到 "1/2 app partitions are too small" 别慌） ----------
 # IDF 的 check_sizes 把**当前构建的 app 镜像**与分区表里**所有** app 分区逐一比较：
 #   · 全部都装不下 → 构建**直接报错**（Exit 1）；
 #   · 只有一部分装不下 → 只打 Warning，构建继续。
-# 所以：
-#   · 播放器（release 约 2.66MB）超出 ota_0 的 2.5MB 时会出现
-#     "Warning: 1/2 app partitions are too small ... Part 'ota_0' (overflow …)"
-#     ——**这是预期现象**，播放器只烧 factory（3MB），永远不进 ota_0；
-#   · 里世界固件（*只*烧 ota_0）必须 ≤ 2.5MB：超了同样只是 Warning，但真烧到
-#     0x310000 会溢出到 otadata（踩坏启动选择），所以每次构建 sync 后要看一眼体积。
+# 本布局两个槽都很宽（factory 5.93MB / ota_0 4MB），正常情况下两份固件都能装进
+# 两个槽，不会再出现这条 Warning。
 #
 # ---------- font 分区（NPF1 全字库，2026-11 起） ----------
 # 分区里是 spiffs/system.npf（Droid Sans Fallback 的 24px 全字库预烘焙镜像，
@@ -67,43 +76,33 @@
 # font-flash 目标代劳，该目标已移除）。刷字体就用**装固件时手边的 esptool**，一条命令：
 #   esptool.exe --chip esp32s31 --port COMx write_flash 0x600000 spiffs/system.npf
 # 完整刷入文档（何时必须刷、怎么校验、出错表现、换字体流程）：ideas_and_exps/FONT_FLASH.md
-# ⚠ 普通 `idfc flash` **不含字体**（有意为之：字体 4.44MiB，每轮多烧 30~40 秒不值）。
+# ⚠ 普通 `idfc flash` **不含字体**（有意为之：字体 4.44MiB，每轮多烧 30~40 秒不值）；
+#   整片全量固件（tools/make_full_firmware.py）含字体。
+# ⚠ 换字体/改字号前先确认镜像仍在 6MiB 以内；超了就调大 font 并等量缩小 ota_0
+#   或把 font 往后挪（nvs/phy_init 不要动）。
 #
-# 当前字体：Droid Sans Fallback（AOSP，Apache-2.0）经 lv_font_conv 24px/bpp2 栅格化，
-#          再预烘焙成 NPF1：4,653,106 B = 4.44MiB → 6MiB 分区余约 1.34MiB。
-# ⚠ 换字体/改字号前先确认镜像仍在 6MiB 以内；超了就调大 font 并等量缩小 app 分区
-#   （**不必动 pldata**）。
-#
-# ---------- 分区重排记录（四次边界调整，别再踩第五遍） ----------
-# 2026-10 第一次（字体 TTF 化）：迁移前 factory = 6M、pldata @ 0x610000，尾部空闲只有 5.94MiB，
-#   装不下 7.82MiB 的 MiSans，因此从 factory 割出 2MiB 给 font（font 8M @0x800000、
-#   factory 3.9375M、pldata @0x400000）。副作用：pldata 偏移 0x610000 → 0x400000，
-#   **旧播放列表数据作废、首次开机要走一次"重新扫描"**；nvs 偏移未动，用户配置不丢。
-# 2026-10 第二次：字体换成 Droid Sans Fallback 后 8MiB 明显浪费，于是 font 8M→4M、
-#   factory 3.9375M→7.9375M，并把 pldata 从中间挪到最尾部锚定（0x400000 → 0xC00000）。
-#   · font 起始偏移仍是 0x800000 → **字体数据不受影响、不需要重烧**（前半段字节完全一致）；
-#   · pldata 偏移又变了一次 → **旧播放列表数据再次作废，首次开机再重扫一次**（这次是最后一次）；
-#   · nvs 依旧未动，用户配置不丢。
-#   · 旧 pldata 区 0x400000~0x800000 现归属 factory，但烧录只写 app 镜像长度内的数据
-#     （实测 debug 1.78MiB / release 2.19MiB，远小于 0x400000），不会擦到那里。
-# 2026-11 第三次（改用 NPF1 位图全字库）：font 4M→6M、起始 0x800000→0x600000，
-#   factory 7.9375M→5.9375M；**pldata 不动（0xC00000）→ 播放列表与配置都不丢**。
-#   · font 内容整体换成 .npf，**必须重刷字体**（旧 TTF 所在 0x800000 现在落在 font 分区里，
-#     会被新镜像覆盖）；
-#   · 分区表变了 → 必须重刷分区表（idfc flash 会一并写入 0x8000），app 仍从 0x10000 开始。
-# 2026-11 第四次（双固件，本布局）：factory 5.9375M→3M，新增 ota_0（2.5M @0x310000）
-#   与 otadata（8KB @0x590000）；**font / pldata / nvs 全部不动** → 字体、播放列表、
-#   用户配置都不受影响，也不需要重刷字体。
-#   · 分区表变了 → **必须重刷一次分区表**（`idfc flash` 会写 0x8000）；
-#   · 播放器 app 仍从 0x10000 开始，所以"分区表 + 播放器"一起烧即可，行为不变；
-#   · ⚠ ota_0 里的里世界固件**不在固件包里**，要单独 `esptool write_flash 0x310000`。
-# 2026-11 第五次（WiFi对时 → 里世界：加 USB 传歌）：**分区边界一律不动**，只改
-#   ota_0 里的内容（里世界固件多了 TinyUSB MSC）。里世界镜像仍在 2.5MB 内。
+# ---------- 分区重排记录（六次边界调整，别再踩第七遍） ----------
+# 2026-10 第一次（字体 TTF 化）：factory 6M、pldata @0x610000，从 factory 割 2MiB 给 font
+#   （font 8M @0x800000、factory 3.9375M、pldata @0x400000）。
+# 2026-10 第二次：font 8M→4M、factory 3.9375M→7.9375M，pldata 挪到最尾部 0xC00000。
+# 2026-11 第三次（NPF1 位图全字库）：font 4M→6M、起始 0x800000→0x600000，
+#   factory 7.9375M→5.9375M；pldata 不动。
+# 2026-11 第四次（双固件）：factory 5.9375M→3M，新增 ota_0（2.5M @0x310000）与
+#   otadata（8KB @0x590000）；font / pldata / nvs 不动。
+# 2026-11 第五次（WiFi对时 → 里世界）：边界一律不动，只改 ota_0 的内容。
+# 2026-11 第六次（**删除 pldata，本次**）：播放列表搬 SD 卡后 pldata 分区已无用途，
+#   把它 4MB 全部让给里世界固件：
+#     · factory 3M → 0x5EE000（5.93MB），吃满到 otadata 之前；
+#     · otadata 0x590000 → 0x5FE000（仍在 factory 与 font 之间）；
+#     · font **原地不动**（0x600000 6M）→ **不需要重刷字体**；
+#     · ota_0 0x310000(2.5M) → 0xC00000(4M)（原 pldata 的位置）→ 里世界烧录地址
+#       从 0x310000 改为 **0xC00000**；
+#     · 影响：旧 pldata 里的播放列表作废（本版未发布，用户首次全量刷入，无兼容代价）；
+#       分区表变了必须重刷分区表；表世界仍从 0x10000 烧，里世界烧 0xC00000。
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xF000,   0x1000,
-factory,  app,  factory, 0x10000,  0x300000,
-ota_0,    app,  ota_0,   0x310000, 0x280000,
-otadata,  data, ota,     0x590000, 0x2000,
+factory,  app,  factory, 0x10000,  0x5EE000,
+otadata,  data, ota,     0x5FE000, 0x2000,
 font,     data, 0x41,    0x600000, 6M,
-pldata,   data, 0x40,    0xC00000, 4M,
+ota_0,    app,  ota_0,   0xC00000, 4M,

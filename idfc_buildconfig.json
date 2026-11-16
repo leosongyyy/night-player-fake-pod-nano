@@ -19,7 +19,7 @@
 		{
 			"OverlayName":"role",
 			"DefaultType":"player",
-			"Description":"固件角色：player=表世界（播放器，烧 factory @0x10000）；inner=里世界（WiFi对时 + USB传歌，手工烧 ota_0 @0x310000）。",
+			"Description":"固件角色：player=表世界（播放器，烧 factory @0x10000）；inner=里世界（WiFi对时 + USB传歌，手工烧 ota_0 @0xC00000）。",
 			"OverlayTypes":[
 				{
 					"Name":"player",
@@ -29,7 +29,7 @@
 				{
 					"Name":"inner",
 					"ConfigFile":"sdkconfig.role.inner",
-					"Description":"里世界：标题 + 功能列表（WiFi对时 / USB传歌）+ 回到表世界；开机擦 otadata。⚠ 绝不能用 idfc flash -o role=inner 烧录（会写到 factory 覆盖表世界），只能 esptool write_flash 0x310000。"
+					"Description":"里世界：标题 + 功能列表（WiFi对时 / USB传歌）+ 回到表世界；开机清 RTC 分区位。⚠ 绝不能用 idfc flash -o role=inner 烧录（会写到 factory 覆盖表世界），只能 esptool write_flash 0xC00000。"
 				}
 			]
 		}

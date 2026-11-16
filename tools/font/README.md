@@ -68,5 +68,5 @@ python tools/font/npf_verify.py spiffs\system.npf --ttf tempdir\system.ttf
 
 - `tempdir/` 是中间产物的家（已 gitignore）；`spiffs/system.npf` **入库**，`spiffs/` 下还有
   `DroidSansFallback-LICENSE.txt`（字体许可，必须随发布包一起给）；
-- 生成后先确认镜像 < 6 MiB（超了就调大 `font` 分区并等量缩小 `factory`，**不要动 `pldata`**），
+- 生成后先确认镜像 < 6 MiB（超了就调大 `font` 分区并等量缩小 `ota_0`，**`nvs`/`phy_init` 不要动**），
   再按 `ideas_and_exps/FONT_FLASH.md` 刷到 `0x600000`。

@@ -69,12 +69,12 @@ idfc build --reconfigure        # 改了 sdkconfig.defaults* / Kconfig / idfc_bu
 # release（调试全关 + 极速版封面）
 idfc build -t release ; idfc flash -t release -p COMn
 
-# 「里世界」固件（role=inner：WiFi对时 + USB传歌，烧 ota_0 @0x310000；见 INNER_WORLD.md）
+# 「里世界」固件（role=inner：WiFi对时 + USB传歌，烧 ota_0 @0xC00000；见 INNER_WORLD.md）
 idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightPlayer.bin，必须 ≤2.5MB
 # idfc build -t release -o role=inner # 正式版（无 LVGL FPS 指示器/日志）
 # 🚨 绝不能用 idfc flash -o role=inner（会把里世界写到 factory 覆盖表世界）！只能：
 & 'C:\Espressif\tools\python\v6.1\venv\Scripts\esptool.exe' --chip esp32s31 -p COM3 `
-    --before default-reset --after hard-reset write-flash 0x310000 `
+    --before default-reset --after hard-reset write-flash 0xC00000 `
     build\inner.debug\FakePodNanoNightPlayer.bin
 ```
 
@@ -91,9 +91,9 @@ idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightP
 - `sdkconfig.defaults`（+ `.debug` / `.release`）：esp32s31、QIO 16MB、自定义分区表、16MB Octal PSRAM 200MHz（含 XIP/RODATA）、320MHz、64B 缓存线、FreeRTOS 1000Hz、FATFS cp936+UTF-8、`CONFIG_UI_COVER_FLASH=y`（release 的极速封面）。**`sdkconfig.role.inner`** 是矩阵 `role=inner` 的 overlay（角色差异：FIRMWARE_ROLE_SYNC / BT 关 / 封面裁剪 / 主任务栈 / TinyUSB MSC），配置链在 variant 之后合并。
 - **LVGL 不可改的关键项**：`LV_USE_CUSTOM_MALLOC=y`（对象堆进 PSRAM，`core/ui/lvgl_mem.c`；改回 CLIB 会因内部 RAM 不足直接崩，理由见 `LVGL9_MIGRATION.md` §10）、`LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`、`LV_FONT_FMT_TXT_LARGE=y`（NPF 的 glyph_dsc 是 LARGE 布局）、`LV_DEF_REFR_PERIOD=16`、`LV_USE_SYSMON=y` + `LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下）、裁掉 6 种用不到的颜色格式（只留 RGB565/ARGB8888/RGB565A8/RGB888）、关 `LV_BUILD_EXAMPLES`/`LV_BUILD_DEMOS`、`CONFIG_LV_USE_PPA=n`（改为自定义 SW blend handler `core/ui/lvgl_ppa_accel.c`，见 `PPA_ACCEL.md`）。逐项理由与实测数据见 `BUILD_CONFIG.md`、`IRAM_AUDIT_LVGL9.md` §5、`PPA_ACCEL.md`。
 - **配置矩阵是二维**：`variant`（debug / release）× `role`（player / inner，默认 player），构建目录 `build/<role>.<variant>`（`build/player.debug` / `build/inner.debug` …），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>[;sdkconfig.role.<role>]`（player 无 overlay 文件）。`variant` 管调试设施（LVGL FPS/日志、性能监视、封面版本），`role` 管固件角色（表世界 / 里世界）。⚠ 里世界**必须显式 `-o role=inner`**，不要持久化到 `.idfc`。
-- ⚠ **分区表（`partitions.csv`，偏移写死）**：`nvs`@0x9000(0x6000) / `phy_init`@0xF000(0x1000) / `factory`@**0x10000(3M)**（播放器）/ `ota_0`@**0x310000(2.5M)**（里世界固件）/ `otadata`@**0x590000(8K)** / `font`@0x600000(6M) / `pldata`@0xC00000(4M)。bootloader@0x2000 与分区表@0x8000 由 sdkconfig 控制（不在 CSV 里）。
-  - ⚠⚠ **2026-11-16 起播放列表数据已不在 `pldata` 分区**：改存 SD 卡文件 `/sdcard/.ecov/pldata.bin`（开机整块读进 PSRAM，见 `PLDATA_ON_SDCARD.md`）。**固件完全不读这个分区**（早期做过"一次性迁移到卡上"，已删除——它会让设置菜单「重新扫描」被旧数据瞬间填回来、扫描根本不执行，见该文 §14.5）；分区里现在是死数据，**P3 删分区 + 重排布局**时一起清掉（那时才需要重刷分区表 + 字体）。在那之前分区表仍按下面的四条原则维护。
-  - **四条原则**：① **`pldata` 必须留最末尾**——偏移一变旧播放列表作废、首次开机会重扫（锚定尾部后调 font/app 都不动它）；② `font`/`pldata` 偏移按 64KB 对齐（才能整段 mmap）；③ **app 分区偏移也必须 64KB 对齐**（所以 otadata 放两个 app 之后，否则白丢 64KB）；④ **播放器必须装进 factory(3MB)、里世界固件必须装进 ota_0(2.5MB)**——`check_sizes` 只在"所有 app 分区都装不下"时报错，部分装不下只打 Warning（release 播放器 2.66MB 超出 ota_0 属预期）。**nvs/phy_init/font/pldata 的偏移不要再动**；改过 pldata 偏移的两次重排都导致播放列表重扫（历史见 `partitions.csv` 头部注释）。
+- ⚠ **分区表（`partitions.csv`，偏移写死）**：`nvs`@0x9000(0x6000) / `phy_init`@0xF000(0x1000) / `factory`@**0x10000(0x5EE000≈5.93M)**（播放器）/ `otadata`@**0x5FE000(8K)** / `font`@0x600000(6M) / `ota_0`@**0xC00000(4M)**（里世界固件）。bootloader@0x2000 与分区表@0x8000 由 sdkconfig 控制（不在 CSV 里）。
+  - ⚠⚠ **2026-11-16 第六次重排：`pldata` 分区已删除**。播放列表改存 SD 卡文件 `/sdcard/.ecov/pldata.bin`（开机整块读进 PSRAM，见 `PLDATA_ON_SDCARD.md`），腾出的 4MB 全部给了里世界固件：**`ota_0` 从 0x310000 挪到 0xC00000（里世界烧录地址也变成 0xC00000）**，factory 3MB→5.93MB，otadata 挪到 0x5FE000（仍夹在 factory 与 font 之间，自定义 bootloader 需要它存在，但启动选择只看 RTC 字节）。**font 原地不动 → 不需要重刷字体**；分区表变了必须重刷分区表。旧 pldata 里的播放列表作废（本版未发布、首次全量刷入，无兼容代价）。
+  - **四条原则**：① **`nvs`/`phy_init`/`font` 的偏移不要动**（动了丢配置/字体）；② `font` 与 app 分区偏移按 64KB 对齐（font 要整段 mmap，app 偏移 gen_esp32part 会检查）；③ otadata 放 factory 之后、font 之前，避免把 factory 逼到 0x20000 白丢 64KB；④ **播放器必须装进 factory(5.93MB)、里世界固件必须装进 ota_0(4MB)**——两者现在都很宽裕（release 2.81MB / 里世界 1.65MB），正常情况下 `check_sizes` 不再报 Warning。
 - 字体与构建类型无关（都读同一份 `spiffs/system.npf`）。
 
 ### 项目内容

@@ -12,7 +12,7 @@
 #
 # ⚠ 里世界必须**手工**烧到 ota_0（不能用 idfc flash！那条命令按当前分区表把 app
 #   写到 factory @0x10000，会把表世界覆盖成里世界）：
-#       esptool --chip esp32s31 -p COMx write-flash 0x310000 `
+#       esptool --chip esp32s31 -p COMx write-flash 0xC00000 `
 #           build/inner.<variant>/FakePodNanoNightPlayer.bin
 #
 # ⚠ 本文件在配置链**最后**：sdkconfig.defaults → sdkconfig.defaults.<variant> →

@@ -7,12 +7,16 @@
     0x002000  bootloader.bin            （S31 的 bootloader 偏移是 0x2000，取自 flasher_args.json）
     0x008000  partition-table.bin
     0x010000  <项目名>.bin              （**播放器**固件，烧 factory，不含字体）
-    0x310000  build/inner.<variant>/<项目名>.bin  （**里世界固件**，role=inner，烧 ota_0；缺省自动找，可 --no-sync 跳过）
-    0x590000  ota_data_initial.bin      （**空白 otadata** → 启动 factory 里的播放器）
+    0x5FE000  ota_data_initial.bin      （空白 otadata；本项目启动选择走 RTC 字节，这 8KB 只是占位）
     0x600000  spiffs/system.npf         （NPF1 全字库，4.44MiB）
+    0xC00000  build/inner.<variant>/<项目名>.bin  （**里世界固件**，role=inner，烧 ota_0；缺省自动找，可 --no-sync 跳过）
 
-因为 nvs(0x9000)、phy_init(0xF000)、pldata(0xC00000) 都在镜像范围内且为 0xFF，
-把它烧到 0x0 就等于"整片擦除后重刷"：配置(nvs)和播放列表(pldata)都会被清掉。
+因为 nvs(0x9000)、phy_init(0xF000) 都在镜像范围内且为 0xFF，把它烧到 0x0
+就等于"整片擦除后重刷"：**用户配置（nvs）会被清掉**。
+
+⚠ 2026-11-16 起**没有 pldata 分区了**：播放列表已改存 SD 卡文件
+`/sdcard/.ecov/pldata.bin`（见 ideas_and_exps/PLDATA_ON_SDCARD.md），整片重刷
+**不会**再影响播放列表；要强制重扫就删卡上那个文件（或用设置菜单「立即重新扫描」）。
 
 ⚠ 2026-11 起是**双固件**方案（见 ideas_and_exps/INNER_WORLD.md）：
 播放器（表世界）在 `factory`、里世界固件（WiFi对时 + USB传歌）在 `ota_0`，
@@ -148,13 +152,9 @@ def verify_image(buf: bytearray, segments: list[tuple[int, str, bytes]], partiti
         (f"bootloader magic 0xE9 @0x{boot_off:X}", buf[boot_off] == 0xE9),
         (f"分区表 magic AA 50 @0x{ptab_off:X}", buf[ptab_off:ptab_off + 2] == b"\xAA\x50"),
         (f"播放器镜像 magic 0xE9 @0x{app_off:X}", buf[app_off] == 0xE9),
-        # nvs / phy_init / pldata 必须是 0xFF，否则"清数据"不成立
+        # nvs / phy_init 必须是 0xFF，否则"清配置"不成立
         ("nvs 区为 0xFF", all(b == 0xFF for b in buf[0x9000:0xF000])),
         ("phy_init 区为 0xFF", all(b == 0xFF for b in buf[0xF000:0x10000])),
-        (
-            "pldata 区为 0xFF",
-            all(b == 0xFF for b in buf[partitions["pldata"]["offset"]:partitions["pldata"]["offset"] + partitions["pldata"]["size"]]),
-        ),
     ]
 
     # 双固件：ota_0 里要么是合并进来的里世界固件，要么必须是空的
@@ -222,7 +222,11 @@ def main() -> int:
                   file=sys.stderr)
             return 1
 
-    build_dir = args.build_dir or ROOT / "build" / args.variant
+    # 构建目录：本项目矩阵是 build/<role>.<variant>，优先用 player.<variant>，
+    # 退回老的 build/<variant>（脚本历史默认值）
+    player_dir = ROOT / "build" / f"player.{args.variant}"
+    build_dir = args.build_dir or (player_dir if player_dir.is_dir()
+                                   else ROOT / "build" / args.variant)
     flasher_path = build_dir / "flasher_args.json"
     if not flasher_path.is_file():
         print(f"错误：找不到 {flasher_path}\n请先执行：idfc build -t {args.variant}", file=sys.stderr)
@@ -284,7 +288,7 @@ def main() -> int:
 
     print(f"\n已生成: {output}  ({fmt_bytes(len(buf))})")
     print(f"SHA256: {digest}")
-    print("\n烧录（整片，含清空 nvs/pldata；换机器/首次安装都用这一条）:")
+    print("\n烧录（整片，会清空 nvs=用户配置；播放列表在 SD 卡上不受影响）:")
     print(f"  esptool --chip esp32s31 -p COMx write-flash 0x0 \"{output.name}\"")
     return 0
 

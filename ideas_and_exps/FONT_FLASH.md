@@ -171,7 +171,7 @@ Format-Hex head.bin
 1. 准备新 TTF 或改 `--size` / `--bpp`（bpp 必须是 **2**，见 NPF_FONT.md §7）；
 2. 按 [NPF_FONT.md](NPF_FONT.md) §4 的四条命令生成 `spiffs/system.npf`；
 3. `python tools/font/npf_verify.py spiffs/system.npf --ttf <ttf>` 交叉校验通过；
-4. 确认镜像长度 < 6 MiB（超了就调大 `font` 并等量缩小 `factory`，**不要动 `pldata`**）；
+4. 确认镜像长度 < 6 MiB（超了就调大 `font` 并等量缩小 `ota_0`，**`nvs`/`phy_init` 不要动**）；
 5. 刷 `0x600000`（§二），看 §四 的日志。
 
 > 只改 `24px` 的字形来源而不改 bpp 时，`glyph_dsc` 布局不变，**固件不用重编**——

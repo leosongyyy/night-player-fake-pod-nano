@@ -21,7 +21,7 @@
 >
 > 做法：flash 里放**两个 app**。
 > - **表世界**（`factory` @0x10000）= 日常播放器，不含 WiFi 协议栈、不含 USB 栈；
-> - **里世界**（`ota_0` @0x310000）= 一个"停下来做维护"的最小固件：
+> - **里世界**（`ota_0` @0xC00000）= 一个"停下来做维护"的最小固件：
 >   标题 + 功能列表（**WiFi对时 / USB传歌**）+ 底部「回到表世界」。
 >
 > 表世界里需要网络或需要独占 SD 卡的功能，统一弹同一个确认窗：
@@ -65,28 +65,26 @@ otadata 兜底路径仍由 `esp_ota_set_boot_partition()` 校验。**不要绕�
 
 ## 2. 最终分区布局
 
-原则不变（见 `partitions.csv` 顶部注释）：**pldata 留在最末尾、font/pldata 按 64KB
-对齐、nvs/phy_init/font/pldata 的偏移一律不动**——这次改动**不影响**播放列表、
-字体镜像与用户配置（不需要重刷字体、不需要重扫列表）。
+> ⚠ **2026-11-16 第六次重排已改布局**：`pldata` 分区整个删掉（播放列表搬 SD 卡，
+> 见 `PLDATA_ON_SDCARD.md`），腾出的 4MiB 全给里世界固件——**里世界烧录地址现在是
+> `0xC00000`**（原来是 `0x310000`）。下面是**当前**布局：
 
 ```
 nvs       data nvs      0x9000   0x6000     （不动）
 phy_init  data phy      0xF000   0x1000     （不动）
-factory   app  factory  0x10000  0x300000   # 3MB    表世界（播放器）
-ota_0     app  ota_0    0x310000 0x280000   # 2.5MB  里世界（WiFi对时 + USB传歌）
-otadata   data ota      0x590000 0x2000     # 8KB    启动选择
+factory   app  factory  0x10000  0x5EE000   # 5.93MB 表世界（播放器）
+otadata   data ota      0x5FE000 0x2000     # 8KB    占位（启动选择实际走 RTC 字节）
 font      data 0x41     0x600000 6M         （不动，4.44MiB 的 NPF1 字库）
-pldata    data 0x40     0xC00000 4M         （不动，锚定最尾部）
+ota_0     app  ota_0    0xC00000 4M         # 4MB    里世界（WiFi对时 + USB传歌，顶到 16MB 末尾）
 ```
 
-- app 分区必须 64KB 对齐，所以 otadata 放在两个 app **之后**：0x10000 处放 otadata
+- app 分区必须 64KB 对齐，所以 otadata 放在 factory **之后**：0x10000 处放 otadata
   会逼着 factory 挪到 0x20000，白丢 64KB。
-- 0x592000~0x600000 还剩 0x6E000（约 440KB）没用，留给将来（factory 涨过 3MB 时把
-  这块划给它，并等量缩小 ota_0）。
 - **为什么 factory = 表世界**：① 播放器保持 0x10000 起始、保持 `factory` 语义 →
   日常 `idfc flash` 的落点不变；② factory 是 bootloader 的最终兜底；③ 从里世界
-  切回来 = 擦 otadata（一个动作，无序号逻辑）；④ 代价只是里世界必须手工烧到
-  0x310000。
+  切回来 = 清 RTC 分区位（一个动作，无序号逻辑）；④ 代价只是里世界必须手工烧到
+  0xC00000。
+- 历史（2026-11 双固件首次落地时）里世界在 `0x310000`(2.5MB)；那次布局已作废。
 
 ### 2.1 构建时的体积检查（看到 Warning 别慌）
 
@@ -218,8 +216,8 @@ else { ui_toast_show("里世界固件未烧录"); } /* ESP_ERR_OTA_VALIDATE_FAIL
 |---|---|---|---|
 | player.debug（默认） | `idfc build` | `build/player.debug/` | factory @0x10000（`idfc flash`） |
 | player.release | `idfc build -t release` | `build/player.release/` | factory @0x10000（`idfc flash -t release`） |
-| inner.debug | `idfc build -o role=inner` | `build/inner.debug/` | **ota_0 @0x310000（手工 esptool）** |
-| inner.release | `idfc build -t release -o role=inner` | `build/inner.release/` | **ota_0 @0x310000（手工 esptool）** |
+| inner.debug | `idfc build -o role=inner` | `build/inner.debug/` | **ota_0 @0xC00000（手工 esptool）** |
+| inner.release | `idfc build -t release -o role=inner` | `build/inner.release/` | **ota_0 @0xC00000（手工 esptool）** |
 
 > `role=inner` 的差异配置在 `sdkconfig.role.inner`（overlay，在配置链最后）：
 > `FIRMWARE_ROLE_SYNC=y`、`BT_ENABLED=n`、`UI_COVER_FLASH=n`、主任务栈 16KB、
@@ -237,7 +235,7 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 
 # ③ 把里世界固件烧到 ota_0（⚠ 不能用 idfc flash -o role=inner！）
 & 'C:\Espressif\tools\python\v6.1\venv\Scripts\esptool.exe' --chip esp32s31 -p COM3 `
-    --before default-reset --after hard-reset write-flash 0x310000 `
+    --before default-reset --after hard-reset write-flash 0xC00000 `
     build\inner.debug\FakePodNanoNightPlayer.bin
 ```
 
@@ -248,13 +246,13 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 - ⚠ 不要用 `idfc set-overlay role inner` 把它持久化：那样之后普通 `idfc build` /
   `idfc flash` 都会指向里世界，很容易把里世界刷进 factory。**每次显式 `-o role=inner`**，
   默认（不写 `-o`）永远是 player。
-- `idfc flash` 会额外写 `ota_data_initial.bin`（**空白 otadata**）到 0x590000，
+- `idfc flash` 会额外写 `ota_data_initial.bin`（**空白 otadata**）到 0x5FE000，
   所以"重烧表世界"总是安全地落回 factory。
-- `idfc flash` 只写 0x10000 起的 app 区段（表世界最坏 2.79MB，结束于 0x2B9400），
-  **不会碰 0x310000 的里世界固件**——重烧表世界不需要重烧里世界。
-- 镜像顺序：bootloader(0x0) + 分区表(0x8000) + factory(0x10000) + ota_0(0x310000)
-  + otadata(0x590000) + font(0x600000，手动) + pldata(0xC00000，运行时生成)。
-  换机器/全新板子时**桌面顺序**：`idfc flash` → 刷里世界固件 → 刷字体。
+- `idfc flash` 只写 0x10000 起的 app 区段（表世界最坏 2.95MB，结束于 0x2E0000 以内），
+  **不会碰 0xC00000 的里世界固件**——重烧表世界不需要重烧里世界。
+- 镜像顺序：bootloader(0x0) + 分区表(0x8000) + factory(0x10000) + otadata(0x5FE000)
+  + font(0x600000，手动) + ota_0(0xC00000，手动)。
+  换机器/全新板子时**桌面顺序**：`idfc flash` → 刷里世界固件 → 刷字体（或用全量固件一次搞定）。
 
 ### 5.1 无人值守验证（没有触摸输入时）
 
@@ -289,7 +287,7 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 |---|---|
 | RTC（PCF85063A @ I2C0） | 外置芯片，天然共享。里世界写完直接留在列表，表世界下次启动读到的就是新时间 |
 | NVS | 两固件共用同一分区。里世界**只读**配置（时区 `tz`、亮度），不写任何键（对时结果只显示在里世界列表，**不再**写 `tsync/res`） |
-| font / pldata | 共用只读。里世界读 font 分区（NPF 字体），**完全不碰 pldata** |
+| font 分区 | 共用只读。两个固件都读 font 分区（NPF 字体）。播放列表缓存是 **SD 卡上的文件**，两个固件都不碰 |
 | SD 卡 | 里世界先挂 FATFS（对时要读 `wifi.txt`）；进 USB 传歌时卸载 FATFS、切原始块设备，交电脑独占 |
 | 分区表 | 两个 build 用**同一份 `partitions.csv`**；bootloader 只认 flash 里那张表 |
 | SPI flash 驱动 fork | `components/spi_flash` 的 S31 分支预测补丁两个固件都要（都由依赖图带入） |
@@ -350,7 +348,7 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 
 ```
 [表世界] App started
-[调试 quickconfig SYNC_AUTOSTART] fw_switch: switch next boot -> ota_0 @0x310000
+[调试 quickconfig SYNC_AUTOSTART] fw_switch: switch next boot -> ota_0 @0xC00000
 [表世界] fw_switch: RTC boot request 0xA5 written; otadata untouched (no flash erase)
 [重启]
 [boot] rtc03=0xa5 -> ota_0 (inner)
@@ -390,7 +388,7 @@ idfc build -qc SYNC_AUTOSTART ; idfc flash
 
 # 里世界开机后自动进入 USB 传歌（配合上面的 autostart 可全自动跑到 U 盘模式）
 idfc build -o role=inner -qc INNER_USB_AUTOSTART
-# 然后按 §5 ③ 烧到 0x310000
+# 然后按 §5 ③ 烧到 0xC00000
 ```
 
 验证完用**不带 `-qc`** 的普通构建重烧即可恢复（quickconfig 头 `main/idfc_quickconfig.h`
@@ -406,7 +404,7 @@ idfc build -o role=inner -qc INNER_USB_AUTOSTART
 | 里世界卡住/死机 | 长按电源键关机再开 → 因为 otadata 已被擦，一定回表世界 |
 | 想临时关闭这个功能 | 不烧 ota_0 即可（点入口只会提示未烧录）；要彻底删代码见下面的"移除" |
 | 误开了 `FIRMWARE_SYNC_AUTOSTART` / quickconfig `SYNC_AUTOSTART` | 设备停在里世界 → 点「回到表世界」，或重新 `idfc flash`（不带 `-qc`） |
-| 想清空里世界槽 | `esptool erase-region 0x310000 0x280000` |
+| 想清空里世界槽 | `esptool erase-region 0xC00000 0x400000` |
 | USB 传歌电脑看不到盘 | ① 插头翻面（OTG 那一面）；② 看串口 `usb_msc` 日志；③ 确认烧的是新里世界固件 |
 
 **完全移除本方案**（回到单固件）：把 `partitions.csv` 的 factory 改回 0x5F0000、
