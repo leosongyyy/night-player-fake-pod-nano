@@ -301,7 +301,7 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 
 ## 6.1 里世界的电源行为（2026-11-16 新增）
 
-里世界以前是"屏一直亮、不关机"，整夜插着电做对时/传歌会把电池充到 4.2V（4.08V
+里世界以前是"屏一直亮、不关机"，整夜插着电做对时/传歌会把电池充到 4.2V（电池
 软件限充只在表世界执行）。现在里世界也跑与表世界同一套电源框架：
 
 - **自动息屏**：`power_service`，无操作 `screen_off_s`（默认 30s）→ AMOLED SLEEP IN +
@@ -313,7 +313,7 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
   充电界面"（和表世界一致），没插电才真断电。⚠ USB 传歌期间忽略该请求（SD 已被
   TinyUSB 接管）。
 - **限充继续生效**：`power_service` 的 1s 守护任务同样调用
-  `battery_health_protection_tick()`，所以里世界插着电也不会充过 4.08V。
+  `battery_health_protection_tick()`，所以里世界插着电也保持电池健康保护生效。
 - **不抑制息屏的例外**：WiFi 对时期间 `power_service_set_hold_awake(true)`；
   USB 传歌启动后同样一直保持亮屏（USB 模式不能退出，息屏会被误当成空闲）。
 - **双键**：手动息屏/亮屏（与表世界一致）。

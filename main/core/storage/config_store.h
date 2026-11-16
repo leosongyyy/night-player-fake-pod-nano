@@ -72,8 +72,8 @@ extern "C" {
  *     第 8 格切换并持久化；控制器轮询到变化后重新应用到音频链路（见
  *     player_controller 的开关同步），设置页底部文字随之显示"关闭"
  *   - 电池健康保护 batt_care（bool，默认**关**）：设置菜单 →「电源选项」切换。
- *     开启时充电到约 **4.08V** 由 battery 模块软件停充（CV 仍 4.2V，≈85%
- *     电量，减少满电存放对电芯的损耗），关闭则恢复充电到 4.2V 满电。
+ *     开启时由 battery 模块在充到限充上限（`BATTERY_CARE_STOP_MV`）时软件停充
+ *     （CV 仍 4.2V，约 80~90% 电量，减少满电存放对电芯的损耗），关闭则恢复充满。
  *     真正操作 PMU 由 battery_set_health_protection() 完成（本模块只存储）；
  *     PMU 每次上电都会回默认，故 main.c 开机时按本配置重新下发。全局键，
  *     不进配置槽位。
@@ -343,7 +343,7 @@ bool config_store_get_touch_left_handed(void);
 bool config_store_get_replay_gain(void);
 
 /**
- * @brief 电池健康保护开关（true=充电到约 4.08V 软件停充，≈85% 电量；默认关）
+ * @brief 电池健康保护开关（true=充到限充上限后软件停充，约 80~90% 电量；默认关）
  *
  * 读取后由 main.c 在开机时调用 battery_set_health_protection() 下发到 PMU；
  * 设置菜单切换时也由页面回调立即下发。PMU 每次上电都会回 4.2V，故不能只

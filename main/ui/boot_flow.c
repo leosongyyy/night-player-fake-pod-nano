@@ -506,9 +506,8 @@ static void charging_ui_update(const battery_info_t *info)
         return;
     }
 
-    /* 电池健康保护开启且已到停充上限（BATTERY_CARE_STOP_MV）时：大环画成
-       **完整一圈**表示"充电已停止"，不再按实际电量画弧；环中心仍显示实际电量
-       （信息不丢）。 */
+    /* 电池健康保护生效（正在抑制充电）时：大环画成**完整一圈**表示"充电已停止"，
+       不再按实际电量画弧；环中心仍显示实际电量（信息不丢）。 */
     const bool care_stopped = battery_health_protection_is_stopped();
     lv_arc_set_value(s_chg_arc, care_stopped ? 100 : info->percent);
     if (s_chg_percent != NULL) {
@@ -518,11 +517,10 @@ static void charging_ui_update(const battery_info_t *info)
     }
 
     /* 状态文案：
-       · 保护性停充 = "充电已停止"（到限充上限，不是真的充满）；
+       · 电池健康保护生效（充电被抑制）= "充电已停止"，不是真的充满；
        · 阶段 DONE = PMU 判定充满；
-       · 电池健康保护开启时，PMU 在约 4.08V 被软件停充（阶段=not charging 但
-         VBUS 在位、电压已到上限）——对用户来说就是"已充满"，不能显示成
-         "未在充电"让人以为没在充。 */
+       · 保护生效时阶段是 not charging 但 VBUS 在位、电压已到上限——对用户来说
+         就是"已充满"，不能显示成"未在充电"让人以为没在充。 */
     const bool full = care_stopped
                       || (info->charge_stage == AXP2101_CHG_DONE)
                       || (!info->charging && info->vbat_mv >= BATTERY_CARE_STOP_MV);

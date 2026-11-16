@@ -147,9 +147,9 @@ static bool     s_was_playing = true;
    设置页第 5 格切换并持久化；控制器轮询到变化后重新应用（见
    player_controller 的开关同步），故通知回调让设置页立即刷新文本 */
 static bool     s_replay_gain = (CONFIG_STORE_REPLAY_GAIN_DEFAULT != 0);
-/* 电池健康保护（默认关）：true=充电到约 4.08V 就软件停充（≈85% 电量，
-   停充点见 BATTERY_CARE_STOP_MV），false=标准 4.2V 满电。全局键，不进配置
-   槽位；设置菜单「电源选项」切换。 */
+/* 电池健康保护（默认关）：true=充到限充上限（battery.h 的 BATTERY_CARE_STOP_MV）
+   就软件停充（约 80~90% 电量），false=标准满电。全局键，不进配置槽位；
+   设置菜单「电源选项」切换。 */
 static bool     s_batt_care = (CONFIG_STORE_BATT_CARE_DEFAULT != 0);
 /* ---------- 延迟落盘（NVS 写预算，见 ideas_and_exps/NVS_WRITE_BUDGET.md） ----------
  *

@@ -218,8 +218,8 @@ static void power_service_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SVC_CHECK_MS));
 
-        /* 电池健康保护（软件限充，阈值见 BATTERY_CARE_STOP_MV）：每秒检查一次，
-           达到停充上限停充、降到恢复点恢复；保护关闭时几乎零开销（快速返回）。 */
+        /* 电池健康保护（限充）：每秒调一次，**保持保护生效**（阈值在 battery.h，
+           本处不复述）；保护关闭时几乎零开销（快速返回）。 */
         battery_health_protection_tick();
 
         /* 低电自动关机：电量 < 5% 且未充电**持续** 60s → PMU 真关机。

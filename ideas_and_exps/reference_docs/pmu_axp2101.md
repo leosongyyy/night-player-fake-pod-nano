@@ -655,13 +655,12 @@ void pmu_charge_limit_tick(const axp2101_status_t *st)
 > 的瞬间 VSYS 没有电池来源 → DCDC 欠压保护直接断电**（`0x21=0x20`）。
 > 所以"降 CV 做保养"只适合电池本来就低于目标电压的场合，正常使用会被坑；
 > 先把电放到 4.0V 以下再开保护也只能把问题推迟到下一次充满（到 4.0V 又会断 BATFET）。
-> 本项目最终采用 **CV 保持 4.2V + 软件 `0x18[1]=0` 停充**（阈值见 `battery.h` 的
-> `BATTERY_CARE_STOP_MV` / `BATTERY_CARE_RESUME_MV`，当前 4.08V 停 / 3.98V 恢复；
-> 早期版本是 4.0V / 3.9V），
+> 本项目最终采用 **CV 保持 4.2V + 软件 `0x18[1]=0` 抑制充电**（阈值见 `battery.h` 的
+> `BATTERY_CARE_STOP_MV` / `BATTERY_CARE_RESUME_MV`，数值只在那一处维护），
 > 避免进入"完成"态、BATFET 保持导通；实现见
 > [`../POWER_OPTIONS_AND_CHARGE_BOOT.md`](../POWER_OPTIONS_AND_CHARGE_BOOT.md) §3。
 
-- **已实现**：`axp2101_set_charge_voltage(axp2101_cv_t)`（CV 档位枚举）与 `axp2101_set_charge_enable(bool)`（读-改-写 `0x18` bit1，**保留 bit3=1、bit0=0**）都在 `main/core/hardware/axp2101.h` 里；电池健康保护就是"CV 保持 4.2 V + 到限充上限（当前 4.08 V）写 `0x18[1]=0` 停充 / 3.98 V 恢复"，见 `POWER_OPTIONS_AND_CHARGE_BOOT.md` §3；
+- **已实现**：`axp2101_set_charge_voltage(axp2101_cv_t)`（CV 档位枚举）与 `axp2101_set_charge_enable(bool)`（读-改-写 `0x18` bit1，**保留 bit3=1、bit0=0**）都在 `main/core/hardware/axp2101.h` 里；电池健康保护 = "CV 保持 4.2 V + 保护生效时写 `0x18[1]=0` 抑制充电"，阈值见 `battery.h`，行为说明见 `POWER_OPTIONS_AND_CHARGE_BOOT.md` §3；
 - Kconfig 建议：`CONFIG_PMU_CHARGE_CV`（choice：4.0 / 4.1 / 4.2 V）与 `CONFIG_PMU_CHARGE_LIMIT_PERCENT`（0=关 / 80 / 90），默认都取"关/4.2 V"，避免改变现有行为。
 
 #### 10.5.6 明确走不通的思路

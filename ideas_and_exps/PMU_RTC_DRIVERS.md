@@ -230,8 +230,8 @@ I hwst: [PASS] rtc_auto_init_project_epoch
       按键亮屏、短按上键重启进系统、拔电显示关机提示后断电），见
       [`POWER_OPTIONS_AND_CHARGE_BOOT.md`](POWER_OPTIONS_AND_CHARGE_BOOT.md) §7。
 - [x] 电池健康保护：**软件限充**（CV 保持 4.2V，`0x18[1]=0` 停充）。
-      当前阈值 **4.08V 停 / 3.98V 恢复**（`battery.h` 的 `BATTERY_CARE_STOP_MV` /
-      `BATTERY_CARE_RESUME_MV`；2026-11-16 由 4.0/3.9 上调）。
+      当前阈值见 `battery.h` 的 `BATTERY_CARE_STOP_MV` / `BATTERY_CARE_RESUME_MV`
+      （2026-11-16 两次上调，现对应电量计的 80%~90%）。
       ⚠ 一开始试过把 CV 降到 4.0V，真机发现电池高于 CV 时 PMU 会断开 BATFET，
       正常使用拔充电器会 DCDC 欠压硬断电（`0x21=0x20`），已改掉，见
       [`POWER_OPTIONS_AND_CHARGE_BOOT.md`](POWER_OPTIONS_AND_CHARGE_BOOT.md) §3。

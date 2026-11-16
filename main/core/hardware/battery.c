@@ -15,9 +15,9 @@ static const char *TAG = "battery";
    用户以为已经充满（充到 100% 后还有一段恒压涓流），只有阶段 DONE 才给 100 */
 #define BATT_CHG_MAX_DISPLAY 99
 
-/* 电池健康保护（软件限充）阈值：充到 4.08V 停、放电到 3.98V 恢复（数值在
-   battery.h，充电专用界面也要用它判定"已到上限"，避免两处写死不同数字）。
-   ⚠ 为什么不用 CV=4.08V：PMU 在 VBAT **高于** CV 时会断开 BATFET（充电完成保护），
+/* 电池健康保护（限充）：本文件负责让它**生效/撤销**，阈值只在 battery.h 定义
+   （充电专用界面也用同一组宏判定"保护已生效"）。
+   ⚠ 为什么不用 CV=限充点：PMU 在 VBAT **高于** CV 时会断开 BATFET（充电完成保护），
      此时拔掉充电器 VSYS 没有来源 → DCDC 欠压保护硬断电（真机 0x21=0x20 已证实）。
      保持 CV=4.2V + 软件停充（0x18[1]=0），PMU 不会进入"完成"态，BATFET 常闭，
      正常使用拔电不会关机。 */
@@ -100,7 +100,7 @@ esp_err_t battery_read_info(battery_info_t *info)
     return ESP_OK;
 }
 
-/* 设置/取消软件停充；成功才更新缓存状态 */
+/* 维持/撤销"保护生效"（= 抑制充电）；成功才更新缓存状态 */
 static esp_err_t care_set_stopped(bool stop)
 {
     esp_err_t err = axp2101_set_charge_enable(!stop);
@@ -122,7 +122,7 @@ esp_err_t battery_set_health_protection(bool on)
 
     s_care_on = on;
     /* CV 始终保持在 4.2V：PMU 的充电目标电压不能低于当前电池电压，
-       限充由软件写 0x18[1]=0 完成（见 BATTERY_CARE_STOP_MV 注释）。 */
+       保护靠"抑制充电"实现（见 BATTERY_CARE_STOP_MV 注释）。 */
     esp_err_t err = axp2101_set_charge_voltage(AXP2101_CV_4V2);
     uint16_t mv = 0;
     if (err == ESP_OK && axp2101_read_vbat_mv(&mv) == ESP_OK) {
@@ -154,7 +154,7 @@ void battery_health_protection_tick(void)
     if (!axp2101_is_ready() || s_care_mux == NULL) {
         return;
     }
-    /* 快速路径：保护关闭且没有被停充过，就不用每秒读 I²C */
+    /* 快速路径：保护关闭且当前没有在抑制充电，就不用每秒读 I²C */
     if (!s_care_on && !s_charge_stopped) {
         return;
     }
@@ -175,7 +175,7 @@ void battery_health_protection_tick(void)
                 care_set_stopped(false);
             }
         } else if (s_charge_stopped) {
-            /* 保护已关闭但充电仍停着（并发/异常）：恢复充电 */
+            /* 保护已关闭但充电仍被抑制（并发/异常）：恢复充电 */
             care_set_stopped(false);
         }
     }

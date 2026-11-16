@@ -80,30 +80,32 @@ esp_err_t battery_read_info(battery_info_t *info);
 /* ⚠ 不提供电池温度：本板 TS 脚是固定电阻（无 NTC），读数恒定无意义，
    设置页已移除「电池温度」一项（见 axp2101_read_ts_mv 的说明）。 */
 
-/* 电池健康保护（软件限充）阈值，单位 mV。
-   停充点 4.08V（比 4.0V 多约 5~10% 电量，仍在"不满电存放"的安全区）；
-   恢复点 3.98V 与停充点保持 100mV 回差，防止在阈值附近反复开关充电。
-   ⚠ 这里只是**软件停充**的电平，不是 PMU 的恒压目标：CV 永远是 4.2V，
+/* 电池健康保护（限充）阈值，单位 mV —— **全项目唯一的数值来源**。
+   上限 / 恢复点（两者之间留回差，防止在阈值附近反复开关充电），工作窗口落在
+   本板电量计的 80%~90%（设置页文案"约80%-90%"就是说它）。
+   历史：4.0/3.9 → 4.08/3.98 → 4.12/4.02 → 当前 4.1/4.0（用户要求收回 4.0~4.1 区间）。
+   ⚠ 其它文件（代码注释、日志、文档）**一律按功能表述**（"保持电池健康保护生效"）
+     并引用宏名，不要复述电压数字或"充到多少停"的行为——否则又多一处要同步的
+     事实源，改阈值时到处都要动。
+   ⚠ 这里只是**软件抑制充电**的电平，不是 PMU 的恒压目标：CV 永远是 4.2V，
      原因见下方 battery_set_health_protection() 的警告。
-   ⚠ 充电专用界面（boot_flow）也用 BATTERY_CARE_STOP_MV 判定"已到上限"，
-     改这里两边一起生效，不要在别处写死数字。 */
-#define BATTERY_CARE_STOP_MV    4080u
-#define BATTERY_CARE_RESUME_MV  3980u
+   ⚠ 充电专用界面（boot_flow）也用 BATTERY_CARE_STOP_MV 判定"保护已生效"。 */
+#define BATTERY_CARE_STOP_MV    4100u
+#define BATTERY_CARE_RESUME_MV  4000u
 
 /**
- * @brief 应用/取消"电池健康保护"（充电到约 4.08V 后软件停充）
+ * @brief 应用/取消"电池健康保护"（限充）
  *
- * 开启：CV 保持 **4.2V**，但在 VBAT ≥ 4.08V 时写 `0x18[1]=0` 停充；
- *       放电到 VBAT ≤ 3.98V 时自动恢复充电（见 battery_health_protection_tick）。
- *       ≈ 85% 电量，充电/恢复仍由本模块与 PMU 配合完成。
- * 关闭：恢复充电，CV 4.2V，标准满电。
+ * 开启：保持 CV **4.2V**，并让电池健康保护生效（电池到上限后由本模块抑制充电，
+ *       回落到恢复点再允许充电——两个阈值见上方的宏，不在这里复述）。
+ * 关闭：撤销保护，恢复正常满电。
  *
  * ⚠ **不能改成"把 CV 降到限充电压"**：当电池电压高于 CV 时 PMU 会断开 BATFET
  *   （充电完成保护），此时拔掉充电器 VSYS 无来源 → DCDC 欠压保护硬断电。
  *   真机已复现（电池 4.17V、CV 4.0V，拔电后 0x21=0x20 DCDC_UV）。
  * ⚠ PMU 每次上电都会恢复 EFUSE 默认，所以开机时必须按 NVS 配置重新下发一次。
  *
- * @param on true=限充（BATTERY_CARE_STOP_MV）；false=标准满电
+ * @param on true=开启；false=关闭（标准满电）
  * @return ESP_OK / PMU 错误
  */
 esp_err_t battery_set_health_protection(bool on);
@@ -111,19 +113,19 @@ esp_err_t battery_set_health_protection(bool on);
 /**
  * @brief 电池健康保护的周期检查（建议 1s 调一次）
  *
- * 开通时：≥4.08V 停充、≤3.98V 恢复（BATTERY_CARE_STOP_MV / RESUME_MV）；
- * 关闭时兜底确保充电已恢复。
- * 只在保护开启/停充状态下才读 I²C，其余时候几乎零开销。
+ * 目的是**保持电池健康保护生效**：保护开启时按当前 VBAT 维持/撤销"抑制充电"
+ * 的状态（阈值见上方两个宏）；保护关闭时兜底确保充电已恢复。
+ * 只在保护开启/抑制中才读 I²C，其余时候几乎零开销。
  * ⚠ 可从任意任务调用（内部互斥 + I²C 不写 flash）；正常使用时由
  *   `power_service` 的 1s 守护任务调用，充电界面由 `chg_mon` 调用。
  */
 void battery_health_protection_tick(void);
 
 /**
- * @brief 当前是否处于"保护性停止充电"状态（保护开启 且 已到停充上限）
+ * @brief 电池健康保护当前是否生效（= 正在抑制充电）
  *
  * 充电专用界面用它把大环画成**完整一圈**表示"充电已停止"（而不是按实际
- * 电量画弧），同时环中心仍显示实际电量。保护关闭/未停充时返回 false。
+ * 电量画弧），同时环中心仍显示实际电量。保护关闭/未生效时返回 false。
  */
 bool battery_health_protection_is_stopped(void);
 

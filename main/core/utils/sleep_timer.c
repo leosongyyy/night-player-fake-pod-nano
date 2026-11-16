@@ -113,7 +113,7 @@ static void sleep_timer_task(void *arg)
             }
 
             /* 睡眠定时到点 = 用户意图关机：插着充电器时改为"保存现场 + 重启进
-               充电界面"（不断电，保证 4.08V 限充与电量检测继续生效），没插电才
+               充电界面"（不断电，保证软件限充与电量检测继续生效），没插电才
                走 PMU 真断电。分流逻辑在 fake_shutdown_user_off 里。 */
             fake_shutdown_user_off();
 

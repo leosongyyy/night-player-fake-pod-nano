@@ -1600,7 +1600,9 @@ static lv_obj_t *power_page_build(void)
     lv_obj_add_flag(care_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(care_row, batt_care_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 只保留一条说明（用户指定文案，不要拆成多段/不要加温度说明） */
+    /* 只保留一条说明（用户指定文案，不要拆成多段/不要加温度说明）。
+       限充点（battery.h 的 BATTERY_CARE_STOP_MV）对应 80~90% 电量，与下面这句
+       "约80%-90%"是同一件事；**不复述具体电压**，数值只维护在一个地方。 */
     menu_note_row_create(page,
         "开启电池健康保护后，充电会限制在约80%-90%左右，以延长电池寿命。"
         "建议定期充满一次来校准电量显示。");

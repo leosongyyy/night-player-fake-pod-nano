@@ -15,7 +15,7 @@
 
 ESP32-S31（rev v0.0，320MHz 双核 + LP core，512KB SRAM）+ **16MB Flash** + **16MB Octal PSRAM（200MHz）**；CO5300 AMOLED 460×460 QSPI（窗口 X 偏移 10，**VCI_EN=GPIO44 必须先拉高**）；CST820 触摸（I²C0）；AXP2101 PMU（I²C0 0x34，电源键也接它）+ PCF85063 RTC（0x51）+ QMI8658 IMU（0x6b，未接）；CS43131 耳放（I²C1 0x30 + I²S1，24.576MHz 板载晶振）；SD 4-bit SDMMC。
 
-- **PMU/RTC 已接入**：电压/电量/充电状态/温度、电源键 IRQ、RTC 读时间与首次校时、**软关机（真断电）**、**开机原因与插电开机的充电专用界面**、**电池健康保护（4.08V 软件限充，`BATTERY_CARE_STOP_MV`）**、**低电保护按电量百分比**（开机 <2% 且未充电 → 5 秒后关机；使用中 <5% 未充电持续 60s → 自动关机）。见 `PMU_RTC_DRIVERS.md`、`POWER_OPTIONS_AND_CHARGE_BOOT.md`。
+- **PMU/RTC 已接入**：电压/电量/充电状态/温度、电源键 IRQ、RTC 读时间与首次校时、**软关机（真断电）**、**开机原因与插电开机的充电专用界面**、**电池健康保护（软件限充，阈值只在 `battery.h` 的 `BATTERY_CARE_STOP_MV`）**、**低电保护按电量百分比**（开机 <2% 且未充电 → 5 秒后关机；使用中 <5% 未充电持续 60s → 自动关机）。见 `PMU_RTC_DRIVERS.md`、`POWER_OPTIONS_AND_CHARGE_BOOT.md`。
 - **按键**：上键 = AXP2101 PWRON（无主控 GPIO，经 GPIO49 中断维护按下/抬起）+ 下键 = GPIO61。`button_service` 生成"上/下键短按、长按、双键"五类事件，`key_handler` 做应用映射（详见 `ui/key_handler.c` 注释）。
 
 **2. 开发环境**
@@ -108,7 +108,7 @@ idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightP
 - 开机流程：开机封面 → 低电拒启 → 未插卡 / 列表无效则一键扫描 → 主界面；**设置菜单懒加载**，不占开机路径。
 - UI：四页滑动 tab（目录/歌曲/正在播放/播放设置）、顶部状态栏（时间/页面名/电量+充电图标）、下拉控制中心（亮度/音量竖条、蓝牙、睡眠定时、设置入口）。
 - **表世界 / 里世界（双固件）**：表世界是日常播放器（不含 WiFi 协议栈、不含 USB 栈）。表世界里需要网络或需要独占 SD 卡的功能，统一弹「该功能需要前往「里世界」完成，点击确认重启到里世界。」→ 写 PCF85063A `RAM_byte(0x03)` 的**分区位**（`bit1:0 = 0b01`，读-改-写）→ 重启。**启动分区只由该字节决定，otadata 完全不参与**（2026-11-16 全面迁移）：自定义 bootloader（`bootloader_components/main`，**必备件**，16,720 B / 余 32%）读该字节 → `0b01` 进 `ota_0`、`0b00` 回 `factory`、RTC 读失败也回 `factory`；「回到表世界」只需清分区位，**0 次 flash 擦写**（otadata 分区仍在表里但不再读写）。该字节是位域：**bit1:0 分区 / bit2 本次启动进充电界面（表世界开机消费后立刻清）/ bit7:3 保留**。里世界界面 = 标题 + 功能列表（**WiFi对时 / USB传歌**）+ 底部「回到表世界」；**里世界也跑 power_service + deep_worker + button_service**（无操作 30s 自动息屏、息屏且未充电 10 分钟自动 PMU 关机、上键长按关机、1s 一次限充 tick），行为与表世界一致。WiFi对时：连 AP + SNTP → 写 PCF85063A → 回列表显示结果；USB传歌：把 SD 卡以原始块设备交给 TinyUSB MSC，电脑上是可移动磁盘，退出靠重启。**表世界不再在开机时 Toast 对时结果**。见 `INNER_WORLD.md` 与 `RTC_BOOT_PARTITION.md`。
-- **关机分两种出口**（`fake_shutdown`）：**用户意图关机**（上键长按 / 睡眠定时到点）走 `fake_shutdown_user_off()` —— 插着充电器时**不断电**，保存现场 + 停解码 + 关 CS43131 后置 RTC `bit2` 并重启进充电界面（PMU 断电会让 4.08V 限充、电量计检测全部失效）；没插电 / 读数不可用才 PMU 真断电。**自动策略关机**（低电 <5% 60s、息屏未播放超时、充电界面拔电）一律真断电。
+- **关机分两种出口**（`fake_shutdown`）：**用户意图关机**（上键长按 / 睡眠定时到点）走 `fake_shutdown_user_off()` —— 插着充电器时**不断电**，保存现场 + 停解码 + 关 CS43131 后置 RTC `bit2` 并重启进充电界面（PMU 断电会让电池健康保护、电量计检测全部失效）；没插电 / 读数不可用才 PMU 真断电。**自动策略关机**（低电 <5% 60s、息屏未播放超时、充电界面拔电）一律真断电。
 - 工具：双核性能监视（串口每 2s）、开发者选项（触摸测试白点，NVS 运行时开关）、全局 Toast。
 
 > `FUTURE_PLAN.md` / `DONE_PLANS.md` 只记较大型需求与修复；只有 `FUTURE_PLAN.md` 里出现过的内容才能移进 `DONE_PLANS.md`。日常小改动不必记录；踩坑变大研究的单开文件（如 `IRAM_DMA_AUDIT.md`）。

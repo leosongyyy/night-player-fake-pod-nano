@@ -16,7 +16,7 @@ extern "C" {
  *    写 AXP2101 `0x10[0]=1`。
  * 2) **重启进充电界面**（`fake_shutdown_user_off` 且正插着充电器）：
  *    「正在进入充电界面...」→ 保存现场/NVS → 停播放 + 关 CS43131 →
- *    置 RTC 启动标志 bit2 → `esp_restart()`；**PMU 不断电**，因为 4.08V 软件
+ *    置 RTC 启动标志 bit2 → `esp_restart()`；**PMU 不断电**，因为软件
  *    限充与电量计检测都依赖固件常驻。
  *
  * ⚠ 提示界面按"最少可见 0.5s"处理（见 fake_shutdown.c 的 FS_UI_MIN_SHOW_MS）：

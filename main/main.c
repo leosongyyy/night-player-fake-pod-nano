@@ -188,7 +188,7 @@ static void player_app_main(void)
     mem_trace_log("07b-rtc");
 
     /* 启动标志：表世界"插着充电器关机"时不是 PMU 断电（断电后固件消失，
-       4.08V 限充与电量计检测都会失效），而是保存现场后置 bit2 再重启。
+       软件限充与电量计检测都会失效），而是保存现场后置 bit2 再重启。
        这里读出并**立刻清零**（一次性），然后兜底清掉分区位等陈旧标志。 */
     const bool charge_flag = fw_switch_charge_ui_requested();
     if (charge_flag) {
