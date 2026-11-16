@@ -107,6 +107,7 @@ static lv_obj_t *s_rotation_status     = NULL;   /* 显示设置 → 屏幕旋�
 static lv_obj_t *s_hand_status         = NULL;   /* 显示设置 → 触屏校准（右/左撇子） */
 static lv_obj_t *s_rescan_count_status = NULL;   /* 重新扫描（当前歌曲总数，
                                                     不含 .pl 歌单目录；进入菜单时统计一次） */
+static lv_obj_t *s_auto_rescan_status  = NULL;   /* 重新扫描子页 → 自动重扫 开/关 */
 /* 「时间与日期」页右侧状态：当前日期 / 当前时间 / 时区 / 时间制式 */
 static lv_obj_t *s_date_status         = NULL;
 static lv_obj_t *s_time_status         = NULL;
@@ -159,7 +160,8 @@ static lv_obj_t *s_power_page      = NULL;   /* 电源选项（占位） */
 static lv_obj_t *s_help_page       = NULL;   /* 按键帮助 */
 static lv_obj_t *s_about_page      = NULL;   /* 关于 */
 static lv_obj_t *s_dev_page        = NULL;   /* 开发者选项（关于页的子页） */
-static lv_obj_t *s_rescan_page     = NULL;   /* 重新扫描 */
+static lv_obj_t *s_rescan_page     = NULL;   /* 重新扫描（子菜单：自动重扫/立即重扫） */
+static lv_obj_t *s_rescan_confirm_page = NULL;   /* 立即重新扫描的确认页（子菜单的子页） */
 
 /* ------------------------------------------------------------------ */
 /* 暗色主题应用                                                         */
@@ -485,6 +487,11 @@ static void menu_refresh_root(void)
     if (s_awake_status != NULL) {
         lv_label_set_text(s_awake_status,
                           config_store_get_sleep_awake() ? "开" : "关");
+    }
+    /* 「重新扫描」子页：自动重扫开/关 */
+    if (s_auto_rescan_status != NULL) {
+        lv_label_set_text(s_auto_rescan_status,
+                          config_store_get_auto_rescan() ? "开" : "关");
     }
     if (s_screen_off_status != NULL) {
         char buf[16];
@@ -838,13 +845,40 @@ static void rescan_confirm_cb(lv_event_t *e)
     }
 }
 
-/* 重新扫描取消（"否"）：返回根页面（等同点击返回按钮回到上一级） */
+/* 重新扫描取消（"否"）：返回上一级（"重新扫描"子菜单） */
 static void rescan_cancel_cb(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "rescan cancelled");
-    lv_menu_clear_history(s_menu);
-    lv_menu_set_page(s_menu, s_root_page);
+    if (s_rescan_page != NULL) {
+        lv_menu_set_page(s_menu, s_rescan_page);
+    } else {
+        lv_menu_clear_history(s_menu);
+        lv_menu_set_page(s_menu, s_root_page);
+    }
+}
+
+/* "自动重扫"行：点击切换开/关（默认开）。关闭后开机只校验缓存文件有效，
+   跳过曲库指纹探针（省 ~1.3s）；需要发现增删时用下一行的「立即重新扫描」。 */
+static void auto_rescan_row_cb(lv_event_t *e)
+{
+    (void)e;
+    bool on = !config_store_get_auto_rescan();
+    config_store_set_auto_rescan(on);
+    if (s_auto_rescan_status != NULL) {
+        lv_label_set_text(s_auto_rescan_status, on ? "开" : "关");
+    }
+    ESP_LOGI(TAG, "auto rescan -> %s (开机%s遍历曲库)", on ? "开" : "关",
+             on ? "会" : "不再");
+}
+
+/* "立即重新扫描"行：进入确认页（确认后删缓存文件并重启，由 boot_flow 重扫） */
+static void rescan_now_row_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_rescan_confirm_page != NULL) {
+        lv_menu_set_page(s_menu, s_rescan_confirm_page);
+    }
 }
 
 /* 点击是否落在菜单面板内部（含面板区域）。边缘点击 = 面板外区域 */
@@ -1005,6 +1039,7 @@ static lv_obj_t *help_page_build(void);
 static lv_obj_t *about_page_build(void);
 static lv_obj_t *dev_page_build(void);
 static lv_obj_t *rescan_page_build(void);
+static lv_obj_t *rescan_confirm_page_build(void);
 
 /* 懒加载入口表：行的事件 user_data 传**下标**（C 不允许函数指针与 void*
    互转，故不走"指针塞 user_data"那条路）。
@@ -1660,29 +1695,66 @@ static lv_obj_t *about_page_build(void)
     return about_page;
 }
 
-/* 8. 重新扫描子页：确认（是=停止播放+数据无效化+重启重新扫描；否=返回上一级） */
+/* 8. 重新扫描（子菜单，2026-11-16 起）：自动重扫开关 + 立即重新扫描 + 说明。
+   原来这一项点进去就是一个"是/否"确认页；现在改成子菜单，确认页降级成
+   「立即重新扫描」的子页（见 rescan_confirm_page_build）。 */
 static lv_obj_t *rescan_page_build(void)
 {
     if (s_rescan_page != NULL) {
         return s_rescan_page;
     }
-    lv_obj_t *rescan_page = lv_menu_page_create(s_menu, (char *)"重新扫描");
-    page_style_apply(rescan_page);
-    menu_note_row_create(rescan_page,
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"重新扫描");
+    page_style_apply(page);
+
+    /* 1) 自动重扫开关（默认开）：开机时是否遍历曲库算指纹 */
+    lv_obj_t *auto_row = menu_row_create(page, NULL, "自动重扫",
+                                         &s_auto_rescan_status);
+    lv_obj_set_style_text_color(s_auto_rescan_status, TEXT_DIM_COLOR, 0);
+    lv_label_set_text(s_auto_rescan_status,
+                      config_store_get_auto_rescan() ? "开" : "关");
+    lv_obj_add_flag(auto_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(auto_row, auto_rescan_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 2) 立即重新扫描：删除卡上缓存文件并重启，开机重新扫描 */
+    lv_obj_t *now_row = menu_row_create(page, LV_SYMBOL_REFRESH,
+                                        "立即重新扫描", NULL);
+    lv_obj_add_flag(now_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(now_row, rescan_now_row_cb, LV_EVENT_CLICKED, NULL);
+
+    /* 3) 说明（一段一卡，见 sleep_page_build 的性能注释） */
+    menu_note_row_create(page,
+        "开启自动重扫可能会减慢开机速度。");
+
+    /* 确认页也一并建好（同页的隐藏子页，避免每次点击再创建）；
+       ⚠ 不在这里 set_page，只有用户点「立即重新扫描」才进入 */
+    rescan_confirm_page_build();
+
+    s_rescan_page = page;
+    ESP_LOGI(TAG, "rescan page built (auto=%d)", (int)config_store_get_auto_rescan());
+    return page;
+}
+
+/* 8.1 「立即重新扫描」确认页：是 = 删缓存文件 + 重启重扫；否 = 回子菜单 */
+static lv_obj_t *rescan_confirm_page_build(void)
+{
+    if (s_rescan_confirm_page != NULL) {
+        return s_rescan_confirm_page;
+    }
+    lv_obj_t *page = lv_menu_page_create(s_menu, (char *)"立即重新扫描");
+    page_style_apply(page);
+    menu_note_row_create(page,
         "将重新扫描 SD 卡中的音乐：停止播放、"
-        "使已存播放列表数据无效并重启，"
+        "删除已存的播放列表缓存文件并重启，"
         "开机后会自动重新扫描。是否继续？");
-    lv_obj_t *rescan_yes = menu_row_create(rescan_page, LV_SYMBOL_OK,
-                                           "是，重新扫描", NULL);
-    lv_obj_add_flag(rescan_yes, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(rescan_yes, rescan_confirm_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *rescan_no = menu_row_create(rescan_page, LV_SYMBOL_CLOSE,
-                                          "否，取消", NULL);
-    lv_obj_add_flag(rescan_no, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(rescan_no, rescan_cancel_cb, LV_EVENT_CLICKED, NULL);
-    s_rescan_page = rescan_page;
-    ESP_LOGI(TAG, "rescan page built");
-    return rescan_page;
+    lv_obj_t *yes = menu_row_create(page, LV_SYMBOL_OK, "是，重新扫描", NULL);
+    lv_obj_add_flag(yes, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(yes, rescan_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *no = menu_row_create(page, LV_SYMBOL_CLOSE, "否，取消", NULL);
+    lv_obj_add_flag(no, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(no, rescan_cancel_cb, LV_EVENT_CLICKED, NULL);
+    s_rescan_confirm_page = page;
+    ESP_LOGI(TAG, "rescan confirm page built");
+    return page;
 }
 
 /* ------------------------------------------------------------------ */

@@ -45,6 +45,7 @@ static const char *TAG = "config_store";
 #define KEY_EQ_DATA          "eqdata"
 #define KEY_REPLAY_GAIN      "replaygain"   /* 回放增益总开关：0=关，1=开 */
 #define KEY_BATT_CARE        "battcare"     /* 电池健康保护：1=软件限充，0=标准 4.2V 满电 */
+#define KEY_AUTO_RESCAN      "autorescan"   /* 自动重扫：1=开机遍历曲库判断增删，0=只校验缓存文件 */
 
 /* ---------- 配置槽位（SAVE1~SAVE4，见 config_store.h 文件头"配置槽位"） ----------
    ⚠ 上面那批"可切换字段"的旧全局键**保留不删**：活跃槽位从未保存过时仍读写
@@ -119,6 +120,9 @@ static uint8_t  s_sleep_range_end   = CONFIG_STORE_SLEEP_RANGE_END_DEFAULT;
 static bool     s_sleep_awake = CONFIG_STORE_SLEEP_AWAKE_DEFAULT;
 static uint32_t s_screen_off  = CONFIG_STORE_SCREEN_OFF_DEFAULT;   /* 息屏超时：全局键
                                                                      screenoff，与配置槽位无关 */
+/* 自动重扫：全局键 autorescan，与配置槽位无关（设备级行为，不是"场景配置"）。
+   关闭后开机只校验卡上缓存文件有效，跳过曲库指纹探针（见 boot_flow_run）。 */
+static bool     s_auto_rescan = (CONFIG_STORE_AUTO_RESCAN_DEFAULT != 0);
 /* 时区（UTC 偏移分钟）：全局键 tzoff，与配置槽位无关。RTC 存本地墙钟时间，
    网络对时按 UTC + 本偏移写入（见 settings_menu / time_date_popup）。
    NVS 里以 (offset + 1440) 存成 u32，避免负数的有符号读写分支。 */
@@ -779,6 +783,13 @@ void config_store_init(void)
     } else {
         s_batt_care = (batt_care != 0);
     }
+    /* 自动重扫：无记录（首次烧录/升级）时默认开启（与旧行为一致：开机查曲库变化） */
+    uint8_t auto_rescan = 1;
+    if (nvs_get_u8(s_nvs, KEY_AUTO_RESCAN, &auto_rescan) != ESP_OK) {
+        s_auto_rescan = (CONFIG_STORE_AUTO_RESCAN_DEFAULT != 0);
+    } else {
+        s_auto_rescan = (auto_rescan != 0);
+    }
     /* 关机前播放状态：无记录（首次烧录/升级）时保持默认 true（自动播放） */
     uint8_t was_play = 1;
     if (nvs_get_u8(s_nvs, KEY_WAS_PLAYING, &was_play) != ESP_OK) {
@@ -1112,6 +1123,11 @@ bool config_store_get_replay_gain(void)
 bool config_store_get_batt_care(void)
 {
     return s_batt_care;
+}
+
+bool config_store_get_auto_rescan(void)
+{
+    return s_auto_rescan;
 }
 
 bool config_store_get_touch_test(void)
@@ -1451,6 +1467,18 @@ void config_store_set_batt_care(bool on)
     }
     s_batt_care = on;
     cfg_write_u8(KEY_BATT_CARE, on ? 1 : 0);
+}
+
+/* 自动重扫开关：只影响**下次开机**的判定（boot_flow），运行期无需通知 UI，
+   但设置页要刷新右侧状态文字，故仍走通知（UI 侧 menu_refresh_root 读它）。 */
+void config_store_set_auto_rescan(bool on)
+{
+    if (on == s_auto_rescan) {
+        return;
+    }
+    s_auto_rescan = on;
+    cfg_write_u8(KEY_AUTO_RESCAN, on ? 1 : 0);
+    config_notify();
 }
 
 /* 虚拟 ClickWheel 开关：立即生效（UI 侧回调隐藏/显示速滑按钮），故通知回调 */

@@ -1002,6 +1002,16 @@ void boot_flow_run(void)
     if (!playlist_store_is_valid()) {
         need_scan = true;
         reason = "no valid cache";
+    } else if (!config_store_get_auto_rescan()) {
+        /* 自动重扫关闭（设置菜单 →「重新扫描」子页）：**只认"卡上缓存文件有效"**
+           （is_valid 里已校验 magic / 版本 / 长度 / 整块 CRC32），直接进主界面。
+           这里刻意**不再遍历曲库算指纹**（5838 个文件实测 ~1.3s，是开机最大的
+           单项），也不再比对卡身份——缓存文件跟着卡走，换卡就是"新卡上没有
+           这个文件"，is_valid 会失败并自然走重扫，不需要额外的卡 ID 检查。
+           ⚠ 代价：卡上曲库增删/改名/换歌单后不会自动发现，需要用户点
+             「立即重新扫描」（或临时把自动重扫打开一次）。 */
+        ESP_LOGI(TAG, "auto rescan OFF: cache valid, skip library probe "
+                      "(settings -> 重新扫描 可改)");
     } else {
         playlist_store_meta_t meta;
         if (!playlist_store_get_meta(&meta)) {

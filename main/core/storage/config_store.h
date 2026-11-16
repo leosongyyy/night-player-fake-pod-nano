@@ -77,6 +77,12 @@ extern "C" {
  *     真正操作 PMU 由 battery_set_health_protection() 完成（本模块只存储）；
  *     PMU 每次上电都会回默认，故 main.c 开机时按本配置重新下发。全局键，
  *     不进配置槽位。
+ *   - 自动重扫 auto_rescan（bool，默认**开**，2026-11-16 新增）：设置菜单 →
+ *     「重新扫描」子页切换。开机时若卡上缓存文件有效（magic/版本/长度/CRC），
+ *     开启则再**遍历曲库算指纹**判断有没有增删/改名/换歌单（5838 个文件实测
+ *     ~1.3s），关闭则只认"缓存文件有效"直接进主界面、**跳过指针探针**（换卡
+ *     也不额外检查——缓存文件跟着卡走，换卡就是没文件、自然重扫）。
+ *     全局键，不进配置槽位。
  *   - 关机前播放状态 was_playing（bool，默认 true）：关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
@@ -186,6 +192,7 @@ typedef enum {
 #define CONFIG_STORE_ROTATION_DEFAULT     90u /* 画面旋转默认 90°（PPA 实验，开发者选项可切 0/90/180/270） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
 #define CONFIG_STORE_BATT_CARE_DEFAULT    0u  /* 电池健康保护默认关（标准 4.2V 满电） */
+#define CONFIG_STORE_AUTO_RESCAN_DEFAULT  1u  /* 自动重扫默认开（开机遍历曲库判断增删） */
 #define CONFIG_STORE_TIME_24H_DEFAULT     1u  /* 时间显示默认 24 小时制 */
 
 /* ------------------------------------------------------------------ */
@@ -294,6 +301,16 @@ uint8_t config_store_get_sleep_range_end_hour(void);
 
 /** @brief 睡眠定时清醒感知开关（true=切歌/调音量等动作按 NightPlayer 算法加时） */
 bool config_store_get_sleep_awake(void);
+
+/**
+ * @brief 自动重扫开关（默认开）
+ *
+ * true  = 开机在缓存有效时仍遍历曲库算指纹，判断有没有增删/改名/换歌单；
+ * false = 只校验缓存文件本身有效（magic/版本/长度/CRC）就进主界面，
+ *         **跳过拓扑探针**（5838 文件约 1.3s，是开机最大单项）。缓存文件跟着
+ *         卡走，所以换卡天然"没文件 → 重扫"，不需要额外的卡身份比对。
+ */
+bool config_store_get_auto_rescan(void);
 
 /** @brief 自动息屏超时（秒，0=不自动息屏；默认 30） */
 uint32_t config_store_get_screen_off_s(void);
@@ -484,6 +501,9 @@ void config_store_set_sleep_range_hours(uint8_t start_hour, uint8_t end_hour);
 
 /** @brief 设置睡眠清醒感知开关并持久化 */
 void config_store_set_sleep_awake(bool on);
+
+/** @brief 设置自动重扫开关并持久化（下次开机生效） */
+void config_store_set_auto_rescan(bool on);
 
 /** @brief 设置自动息屏超时并持久化（秒，自动收敛到 5~3600，0=不自动息屏） */
 void config_store_set_screen_off_s(uint32_t seconds);
