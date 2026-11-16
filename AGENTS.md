@@ -26,7 +26,7 @@ ESP32-S31（rev v0.0，320MHz 双核 + LP core，512KB SRAM）+ **16MB Flash** +
 - ⚠ **构建只编 `COMPONENTS` 白名单里的组件**（根 `CMakeLists.txt`，约 90 个，IDF 全量是 155 个）。规则：**新增任何 `#include` 的组件必须加进白名单**，否则报找不到头文件；4 个本地组件（AMOLED + 3 个触摸驱动）必须显式列着。**白名单在 `include(project.cmake)` 之前执行、拿不到 `CONFIG_*`，所以不能按固件角色裁剪**——`esp_wifi/esp_netif/esp_event/lwip/wpa_supplicant`（只给里世界固件）、`esp_tinyusb`（只给里世界固件）只能无条件列着，靠"没被引用就不进镜像"来保证播放器零成本（实测 0 个 `.obj`，见 `INNER_WORLD.md` §7）。完整说明见 `MBEDTLS_BUILD_AUDIT.md` §9。
 - ⚠ **`components/spi_flash/` 是 IDF 组件的本地 fork**，唯一改动 `cache_utils.c` 在 flash 操作窗口关/恢复分支预测，修 S31 的双核 cache 竞态（IDFGH-18107 / espressif/esp-idf#18948）。**不要删除**；上游修好后才能删。详见 `S31_FLASH_CACHE_RACE.md`。
 - LVGL **9.4.0**（托管组件 `lvgl/lvgl`）；2026-10 由 8.4 升级，**碰 LVGL 前先读 `LVGL9_MIGRATION.md`**（历史文档里的 API/内存结论多为 8.4 时代）。
-- 字体 = font 分区里的 `spiffs/system.npf`（NPF1 位图全字库，4.44MiB，运行时 mmap）。**字体不在固件里**：刷完固件要手动 `esptool write-flash 0x600000 spiffs/system.npf`（见 `FONT_FLASH.md`）；换字体用 `tools/font` 重新烘焙。发版可用 `tools/make_full_firmware.py` 生成含字体（+里世界固件）的全量固件（见 `FULL_FIRMWARE.md`）。
+- 字体 = font 分区里的 `spiffs/system.npf`（NPF1 位图全字库，4.44MiB；XIP 构建下开机拷入 PSRAM 并解除 flash mmap，非 XIP 构建走 mmap，见 `XIP_FROM_PSRAM.md`）。**字体不在固件里**：刷完固件要手动 `esptool write-flash 0x600000 spiffs/system.npf`（见 `FONT_FLASH.md`）；换字体用 `tools/font` 重新烘焙。发版可用 `tools/make_full_firmware.py` 生成含字体（+里世界固件）的全量固件（见 `FULL_FIRMWARE.md`）。
 
 **3. 参考文档**（都在 `ideas_and_exps/`）
 
@@ -88,7 +88,7 @@ idfc build -o role=inner            # 输出 build\inner.debug\FakePodNanoNightP
 **6. 构建配置**
 
 - 事实源只有三处（都入库）：`sdkconfig.defaults*` + `sdkconfig.role.*` + `idfc_buildconfig.json` + `main/Kconfig.projbuild`。生成的根 `sdkconfig`、`build/<cell>/sdkconfig` 被 gitignore。
-- `sdkconfig.defaults`（+ `.debug` / `.release`）：esp32s31、QIO 16MB、自定义分区表、16MB Octal PSRAM 200MHz（含 XIP/RODATA）、320MHz、64B 缓存线、FreeRTOS 1000Hz、FATFS cp936+UTF-8、`CONFIG_UI_COVER_FLASH=y`（release 的极速封面）。**`sdkconfig.role.inner`** 是矩阵 `role=inner` 的 overlay（角色差异：FIRMWARE_ROLE_SYNC / BT 关 / 封面裁剪 / 主任务栈 / TinyUSB MSC），配置链在 variant 之后合并。
+- `sdkconfig.defaults`（+ `.debug` / `.release`）：esp32s31、QIO 16MB、自定义分区表、16MB Octal PSRAM 200MHz（**XIP from PSRAM：`.text`/`.rodata` 启动时拷进 PSRAM 执行**，见 `XIP_FROM_PSRAM.md`）、320MHz、64B 缓存线、FreeRTOS 1000Hz、FATFS cp936+UTF-8、`CONFIG_UI_COVER_FLASH=y`（release 的极速封面）。**`sdkconfig.role.inner`** 是矩阵 `role=inner` 的 overlay（角色差异：FIRMWARE_ROLE_SYNC / BT 关 / 封面裁剪 / 主任务栈 / TinyUSB MSC），配置链在 variant 之后合并。
 - **LVGL 不可改的关键项**：`LV_USE_CUSTOM_MALLOC=y`（对象堆进 PSRAM，`core/ui/lvgl_mem.c`；改回 CLIB 会因内部 RAM 不足直接崩，理由见 `LVGL9_MIGRATION.md` §10）、`LV_ATTRIBUTE_FAST_MEM_USE_IRAM=n`、`LV_FONT_FMT_TXT_LARGE=y`（NPF 的 glyph_dsc 是 LARGE 布局）、`LV_DEF_REFR_PERIOD=16`、`LV_USE_SYSMON=y` + `LV_USE_PERF_MONITOR=y`（v9 起性能监视器挂在 SYSMON 下）、裁掉 6 种用不到的颜色格式（只留 RGB565/ARGB8888/RGB565A8/RGB888）、关 `LV_BUILD_EXAMPLES`/`LV_BUILD_DEMOS`、`CONFIG_LV_USE_PPA=n`（改为自定义 SW blend handler `core/ui/lvgl_ppa_accel.c`，见 `PPA_ACCEL.md`）。逐项理由与实测数据见 `BUILD_CONFIG.md`、`IRAM_AUDIT_LVGL9.md` §5、`PPA_ACCEL.md`。
 - **配置矩阵是二维**：`variant`（debug / release）× `role`（player / inner，默认 player），构建目录 `build/<role>.<variant>`（`build/player.debug` / `build/inner.debug` …），配置链 `sdkconfig.defaults;sdkconfig.defaults.<variant>[;sdkconfig.role.<role>]`（player 无 overlay 文件）。`variant` 管调试设施（LVGL FPS/日志、性能监视、封面版本），`role` 管固件角色（表世界 / 里世界）。⚠ 里世界**必须显式 `-o role=inner`**，不要持久化到 `.idfc`。
 - ⚠ **分区表（`partitions.csv`，偏移写死）**：`nvs`@0x9000(0x6000) / `phy_init`@0xF000(0x1000) / `factory`@**0x10000(0x5EE000≈5.93M)**（播放器）/ `otadata`@**0x5FE000(8K)** / `font`@0x600000(6M) / `ota_0`@**0xC00000(4M)**（里世界固件）。bootloader@0x2000 与分区表@0x8000 由 sdkconfig 控制（不在 CSV 里）。
@@ -133,7 +133,7 @@ main/
   core/image/             # cover_jpeg(硬件/软件 JPEG) + default_cover(_flash)
   core/audio_decoders/    # 多格式流式解码（minimp3 / dr_flac / libogg + Tremor / 自研 wav_decoder；统一 audio_decoder 接口）
   core/network/           # wifi_time_sync（只编进里世界固件）
-  core/fonts/             # system_font / font_npf（mmap 全字库）/ system_global_font_lite / system_smaller_font
+  core/fonts/             # system_font / font_npf（XIP 下拷进 PSRAM，否则 mmap）/ system_global_font_lite / system_smaller_font
   core/ui/                # lvgl_port lvgl_mem lvgl_ppa_accel lvgl_ppa_rotate touch_test virtual_list click_wheel global_style
   core/utils/             # performance_monitor fake_shutdown sleep_timer power_service quiet_mode deep_worker task_psram
   ui/                     # app main_ui boot_flow dir_list playlist_page now_playing settings_page settings_menu

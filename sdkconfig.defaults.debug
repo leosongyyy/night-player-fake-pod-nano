@@ -39,6 +39,12 @@ CONFIG_LV_USE_PERF_MONITOR=y
 #   变卡，**不要**在测性能时打开。要看数据时临时打开，看完立刻关。
 # CONFIG_UI_PPA_STATS is not set
 
+# 实验（2026-11-16 第二轮）：LVGL 绘制缓冲放 PSRAM，省约 83KB 内部 RAM。
+# ⚠ 第二轮结论（2026-11-16 下午）：**默认关闭**。叠加 XIP from PSRAM 后两者
+#   都能跑：内部缓冲 40fps / PSRAM 缓冲 34fps（列表快速滚动最差，0°），用户
+#   选择留内部缓冲保流畅度。开关保留，需要 83KB 内部 RAM 时再打开。
+# CONFIG_UI_DRAW_BUF_IN_PSRAM=y
+
 # 堆毒化：**默认关闭**（2026-09 实测开关对比结论，见 PSRAM_TASK_STACK.md）
 # Comprehensive 模式给每个分配加带调用栈的元数据头、且禁止空闲块合并，
 # 实测多占约 26KB 内部 RAM 并把最大连续块从 31.7KB 压到 14.8KB——这是

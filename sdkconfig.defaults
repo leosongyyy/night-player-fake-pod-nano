@@ -37,8 +37,16 @@ CONFIG_ESP_NETIF_LOOPBACK=y
 CONFIG_PM_ENABLE=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
-CONFIG_SPIRAM_RODATA=y
+# 【实验 2026-11-16】把整个 Flash 代码/只读数据搬到 PSRAM 执行（XIP from PSRAM）：
+# 启动时 bootloader 把 .flash.text（约 1.45MB）+ .flash.rodata（约 0.94MB）
+# 拷进 PSRAM 再映射执行，代价是 PSRAM 多占约 2.4MB（16MB 里很宽裕）。
+# ⚠ IDF 6.1 起 FETCH_INSTRUCTIONS / RODATA 已经变成"无 prompt 的隐藏符号"，
+#   在 sdkconfig.defaults 里写 =y **不生效**（只能被本项 select）。之前那两行
+#   是死配置：实测启动后 PSRAM 只用了 2.5KB，说明 .text/.rodata 一直没搬。
+# 作用：LVGL 的 blend/mask 等热点代码（FAST_MEM=n 时在 .flash.text）也会跟着
+#   进 PSRAM，从"Flash 80MHz XIP"变成"PSRAM 200MHz XIP"。
+# 回退：删掉下面这行（或改 n）即可，build 会自动重配。
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 # S31 的 PSRAM 时钟档位是 40/100/200/250MHz（Kconfig.spiram 里没有 80M 档）；
 # 模组为 16MB Octal PSRAM，取 200MHz（默认档，稳定优先）。
 CONFIG_SPIRAM_SPEED_200M=y

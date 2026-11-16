@@ -78,6 +78,23 @@ static esp_lcd_touch_handle_t s_touch_handle = NULL;
    同时把分配改成**逐级回退**（/10 → /12 → /16），万一连续块不够也不会 assert
    挂启动，只会降档并打印实际档位。 回退档位见下方 k_buf_divs。 */
 #define EXAMPLE_LVGL_BUF_HEIGHT        (EXAMPLE_LCD_V_RES / 10)
+
+/* 绘制缓冲的内存属性（2026-11-16 第二轮实验：CONFIG_UI_DRAW_BUF_IN_PSRAM）。
+   默认 MALLOC_CAP_DMA（内部 RAM，SPI 可直发）；
+   实验开关打开时改 MALLOC_CAP_SPIRAM（省约 83KB 内部 RAM，代价见 Kconfig 与
+   ideas_and_exps/PSRAM_DRAW_BUF_EXPERIMENT.md）。
+   ⚠ 仍然要 64B 对齐（PPA 的 in/out buffer 与 buffer_size 都按 cache line 对齐，
+     否则驱动内部 msync 会越过缓冲尾部）；PSRAM 版的 buffer_size 由 LVGL 按
+     分配字节数记录（我们本来就向上取整到 64B），所以对齐要求自动满足。
+   ⚠ 旋转输出缓冲 s_tile（lvgl_ppa_rotate.c）**不跟着搬**：它必须是内部 DMA，
+     否则 90° 路径每块都要走 SPI bounce，等于把 0° 的问题搬到 90° 上。 */
+#if CONFIG_UI_DRAW_BUF_IN_PSRAM
+#define EXAMPLE_LVGL_DRAW_BUF_CAPS     (MALLOC_CAP_SPIRAM)
+#define EXAMPLE_LVGL_DRAW_BUF_CAPS_TXT "PSRAM"
+#else
+#define EXAMPLE_LVGL_DRAW_BUF_CAPS     (MALLOC_CAP_DMA)
+#define EXAMPLE_LVGL_DRAW_BUF_CAPS_TXT "DMA 内部 RAM"
+#endif
 /* ⚠ 本移植层已没有"tick 周期"这个概念：tick 由 lv_tick_set_cb() 直接读硬件时间，
    原来是"esp_timer 每 2 ms 回调一次 lv_tick_inc(2)"，那套正是整屏定格的根因
    （见 lvgl_port_tick_cb 上方注释）。保留这行注释只为提醒后来者别再引回来。 */
@@ -503,13 +520,16 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
 
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
-    /* ⚠ 必须 MALLOC_CAP_DMA：SPI 主机发送时若缓冲不是 DMA 能力，会为每次传输
+    /* ⚠ 默认必须 MALLOC_CAP_DMA：SPI 主机发送时若缓冲不是 DMA 能力，会为每次传输
        分配一块 DMA "bounce" 缓冲并拷贝（setup_dma_priv_buffer），而 DMA 内存池
        本就很小——曾实测分配失败 → panel_io_spi_tx_color 失败 → 刷屏阻塞 → 任务
        看门狗复位。缓冲高度见 EXAMPLE_LVGL_BUF_HEIGHT 注释（当前 V_RES/10：
        460×46×2B ≈ 41KB/块，双缓冲共约 83KB）；该值直接决定留给 SD 卡读操作的
        DMA 余量（sdmmc_cmd: allocate_dma_buf: not enough mem 曾导致"切歌随机
-       报坏曲"）；调这个值必须同时看帧率与 heap_caps_get_free_size(MALLOC_CAP_DMA)。 */
+       报坏曲"）；调这个值必须同时看帧率与 heap_caps_get_free_size(MALLOC_CAP_DMA)。
+       【实验 CONFIG_UI_DRAW_BUF_IN_PSRAM】改成 PSRAM 后就**没有** DMA 这层保证：
+       0° 直发路径每块都会触发上面那条 bounce 分配（见实验文档 §4.4），所以
+       这个开关只在 90° PPA 旋转路径下才划算。 */
     /* v9 的绘制缓冲是裸内存块（uint8_t*），大小按字节传给 lv_display_set_buffers；
        LVGL 内部会就地包装成 lv_draw_buf_t（partial 模式下高度 = 缓冲字节数 / 行字节数）。
        ⚠ 必须满足 lv_draw_buf_align 的对齐要求（LV_DRAW_BUF_ALIGN，ESP-IDF 下为 4），
@@ -532,26 +552,27 @@ void lvgl_port_init(esp_lcd_panel_handle_t panel_handle, esp_lcd_touch_handle_t 
              * LV_COLOR_FORMAT_GET_SIZE(LV_COLOR_FORMAT_RGB565) + 63u)
             & ~(size_t)63u;
         s_draw_buf1 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, bytes,
-                                              MALLOC_CAP_DMA);
+                                              EXAMPLE_LVGL_DRAW_BUF_CAPS);
         if (s_draw_buf1 == NULL) {
-            ESP_LOGW(TAG, "draw buf1 分配失败（V_RES/%u，%u B），降档重试",
-                     (unsigned)k_buf_divs[i], (unsigned)bytes);
+            ESP_LOGW(TAG, "draw buf1 分配失败（V_RES/%u，%u B，%s），降档重试",
+                     (unsigned)k_buf_divs[i], (unsigned)bytes,
+                     EXAMPLE_LVGL_DRAW_BUF_CAPS_TXT);
             continue;
         }
         s_draw_buf2 = heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN, bytes,
-                                              MALLOC_CAP_DMA);
+                                              EXAMPLE_LVGL_DRAW_BUF_CAPS);
         if (s_draw_buf2 == NULL) {
-            ESP_LOGW(TAG, "draw buf2 分配失败（V_RES/%u），降档重试",
-                     (unsigned)k_buf_divs[i]);
+            ESP_LOGW(TAG, "draw buf2 分配失败（V_RES/%u，%s），降档重试",
+                     (unsigned)k_buf_divs[i], EXAMPLE_LVGL_DRAW_BUF_CAPS_TXT);
             heap_caps_free(s_draw_buf1);
             s_draw_buf1 = NULL;
             continue;
         }
         s_draw_buf_bytes = bytes;
-        ESP_LOGI(TAG, "draw buffers: V_RES/%u (%u B/块, 双缓冲 %u B, "
+        ESP_LOGI(TAG, "draw buffers: V_RES/%u (%u B/块, 双缓冲 %u B, %s, "
                       "DMA 余量 %u B, 最大连续块 %u B)",
                  (unsigned)k_buf_divs[i], (unsigned)bytes,
-                 (unsigned)(bytes * 2),
+                 (unsigned)(bytes * 2), EXAMPLE_LVGL_DRAW_BUF_CAPS_TXT,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
         break;

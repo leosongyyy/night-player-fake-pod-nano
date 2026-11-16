@@ -1,10 +1,14 @@
-# LVGL 绘制缓冲放 PSRAM 实验（2026-11-15，结论：不保留）
+# LVGL 绘制缓冲放 PSRAM 实验（2026-11-15 首轮：不保留；2026-11-16 第二轮：已重新启用，见 §9）
 
-> 一次性实验记录，代码改动**已全部回滚**（Kconfig 开关、`lvgl_port.c` 分配、
-> `lvgl_ppa_accel.c` 的外部 RAM 输出限制、debug 默认值均恢复原状）。
+> 一次性实验记录。**首轮（2026-11-15）的代码改动已全部回滚**（Kconfig 开关、
+> `lvgl_port.c` 分配、`lvgl_ppa_accel.c` 的外部 RAM 输出限制、debug 默认值均恢复原状）。
 > 结论：**能跑，但帧率掉回 S3 时代**；省下的约 83KB 内部 RAM 足以让 WiFi 与蓝牙
 > 在同一固件里共存，但项目选择保留内部 RAM 绘制缓冲 + 双固件对时方案
 > （见 `DUAL_APP_TIME_SYNC.md`）。
+>
+> **第二轮（2026-11-16）**：按用户要求在首轮方案基础上重新启用，作为后续实验的
+> 基线。开关是 Kconfig `UI_DRAW_BUF_IN_PSRAM`（默认 n，`sdkconfig.defaults.debug`
+> 里置 y）。改动与真机启动数据见 §9。
 
 ## 1. 动机
 
@@ -129,3 +133,91 @@ cache line（64B）对齐才能 msync，而 `460×46×2 = 42320` 不是 64 的�
 
 **能跑，但帧率掉回 S3 时代（0° 列表 30→24fps，90° 19~27fps）；省下的 83KB
 足够 WiFi + 蓝牙共存，项目选择保留内部 RAM 绘制缓冲与双固件对时方案。**
+
+---
+
+## 9. 第二轮（2026-11-16）：按开关重新启用，作为后续实验基线
+
+首轮结论没变，但用户要在"绘制缓冲在 PSRAM"这个状态下继续做实验，所以这次把
+它做成**可长期保留的 Kconfig 开关**（不再是一次性手改），默认只在 debug 打开。
+
+### 9.1 改动点（与首轮 §3 的差异）
+
+| 位置 | 改动 |
+|---|---|
+| `main/Kconfig.projbuild` | 新增 `UI_DRAW_BUF_IN_PSRAM`（bool，默认 n），help 里写清动因、代价与"旋转 tile 必须留内部 RAM" |
+| `main/core/ui/lvgl_port.c` | `EXAMPLE_LVGL_DRAW_BUF_CAPS` 二选一：`MALLOC_CAP_SPIRAM` / `MALLOC_CAP_DMA`；仍 64B 对齐、仍 `/10 → /12 → /16` 逐级回退；启动日志打印实际属性（`PSRAM` / `DMA 内部 RAM`） |
+| `main/core/ui/lvgl_ppa_accel.c` | 打开开关时允许 PPA 混合目标在 PSRAM，但逐个校验 `data_size >= PPA_ALIGN_UP(w*h*2)`（LVGL 临时图层不够就回退 CPU，防 msync 越界） |
+| `sdkconfig.defaults.debug` | `CONFIG_UI_DRAW_BUF_IN_PSRAM=y`（release 不改，保持内部 DMA 缓冲）；⚠ 第二轮结束时**已改回关闭**（见 §9.7） |
+
+与首轮的关键差异：旋转输出已独立成 `core/ui/lvgl_ppa_rotate.c`，`s_tile` **仍然
+是内部 DMA 缓冲**——这是 90° 路径不让 SPI 碰 PSRAM 的关键，不要跟着搬。
+
+### 9.2 真机启动证据（debug / player.debug，COM11，2026-11-16）
+
+```
+I (1010) lvgl_port: draw buffers: V_RES/10 (42368 B/块, 双缓冲 84736 B, PSRAM,
+                   DMA 余量 303951 B, 最大连续块 270336 B)
+I (1044) ppa_rotate: PPA 旋转已就绪：当前 0°（顺时针），输出缓冲 42368 B，触摸跟随旋转
+I (1189) MEMTRACE: 05-boot_splash        int 275719/167936(136) | dma 243727/167936 | psram 16680468
+I (2298) MEMTRACE: 12-boot_flow+first_frame int 158283/ 75776(371) | dma 126291/ 75776 | psram 15111112
+I (2302) app_main: App started
+```
+
+- `App started` 2.30s，与首轮一致（无退化）。
+- 05-boot_splash 的内部 RAM 空闲 275,719 B / 最大连续块 167,936 B；把双缓冲
+  83KB 算回去，等价"内部缓冲版"约 191KB / 84KB 量级（与首轮的 83KB 收益吻合）。
+- `MEM: stk` 里 LVGL=6456、deep_worker=11948，栈余量正常。
+
+### 9.3 观察：这台机器的 NVS 旋转是 **0°**，正踩在首轮 §4.4 的坑上
+
+日志里 `ppa_rotate` 显示"当前 0°"，所以现在走的是 **0° 直发 + SPI bounce**：
+
+- 空闲（正在播放、跑马灯持续重绘）`fps=28~29`、`cpu0=98%`；
+- `MEM: iram` 每 2s 采样在 `120815 ↔ 160755` 之间来回 ±39940 B —— 就是
+  §4.4 那次"每帧分配 42KB 内部 bounce → memcpy → 释放"的瞬时峰值（非泄漏）。
+
+也就是说：**这套 PSRAM 缓冲只有在 90° PPA 旋转路径下才划算**（SPI 发的是内部
+`s_tile`）。要继续测帧率，建议先把显示旋转切到 90°（设置 → 显示设置 →
+屏幕旋转方向），或清掉 NVS 的 `rotation` 让默认值 90° 生效。
+
+### 9.4 怎么关掉
+
+- 把 `sdkconfig.defaults.debug` 里 `CONFIG_UI_DRAW_BUF_IN_PSRAM=y` 注释掉
+  （或 `menuconfig` 里关），`idfc build` 会自动检测并重配；
+- release 构建本来就没有打开它，无需处理。
+
+### 9.5 还没做的（留给后续实验）
+
+- 0° 的"常驻一块内部 bounce"（§7）尚未实现：现在每帧仍会 malloc/memcpy/free
+  42KB，低内存时有碎片/失败风险。
+- PPA 混合写到 PSRAM 的收益/代价未复测（首轮 §4.2 的 1209µs 是旧数据）。
+- WiFi + 蓝牙同固件的真实内存账未验证（首轮只做了理论推算）。
+
+### 9.6 【2026-11-16 下午】叠加 XIP from PSRAM 后的新基线
+
+当天下午打开了 `CONFIG_SPIRAM_XIP_FROM_PSRAM`（.text/.rodata 搬 PSRAM，
+详见 `XIP_FROM_PSRAM.md`），并顺带解决了一个必须同时做的改动：**font 分区不能再
+长期 flash mmap**（否则每次 flash 写关 cache，XIP 下另一核直接 fault 重启），
+改成"mmap → 拷进 PSRAM → munmap"。新基线（debug，0°）：
+
+| 组合 | 列表快速滚动最差 |
+|---|---|
+| 旧基线（Flash XIP + 内部缓冲） | 24~30 fps |
+| XIP + 内部绘制缓冲 | **40 fps** |
+| XIP + PSRAM 绘制缓冲（本节开关） | **34 fps** |
+
+结论：XIP 让"绘制缓冲放 PSRAM"的代价从 30→24 收敛到 40→34，两者都远好于旧基线；
+`UI_DRAW_BUF_IN_PSRAM` 现在是"用 6 帧换 83KB 内部 RAM"的可选项，不再是"流畅度
+退回 S3 时代"的坑。
+
+### 9.7 第二轮最终结论（2026-11-16 傍晚）
+
+- **绘制缓冲切回内部 DMA RAM**：用户实测内部 40fps / PSRAM 34fps，选择留流畅度；
+  `sdkconfig.defaults.debug` 里 `CONFIG_UI_DRAW_BUF_IN_PSRAM` 已注释回**关闭**。
+- **保留本次实验的"意外收获"**：`CONFIG_SPIRAM_XIP_FROM_PSRAM`（代码/只读数据搬
+  PSRAM 执行）+ font 分区改"拷进 PSRAM 并解除 mmap"，见 `XIP_FROM_PSRAM.md`。
+  这一项才是这次的最大收益：列表滚动从 24~30fps 提到 40fps，同时 PSRAM 还有
+  约 8MB 余量。
+- 最终 debug 基线：`App started` 2.55s；0° 静态 62fps、列表滚动最差 40fps；
+  内部 RAM 余量约 62KB（最大连续块 31.7KB）；NVS 写已验证安全（反复切配置槽位）。

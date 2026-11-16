@@ -26,10 +26,14 @@
  * ⚠ 回退路径必须与 lv_draw_sw_blend.c 的默认实现逐行一致（含与 src_area /
  *   mask_area 的二次求交），否则会出现"文字/图标位置偏移"这类隐蔽错误。
  *
- * ⚠ 输出缓冲限定在**内部 RAM**：PPA 要求 out.buffer 与 buffer_size 都按
+ * ⚠ 输出缓冲默认限定在**内部 RAM**：PPA 要求 out.buffer 与 buffer_size 都按
  *   cache line 对齐，而 PSRAM 图层的 data_size 无法保证 64B 整数倍，
  *   驱动内部 msync 会越界几十字节。本项目的主绘制缓冲本来就是内部 DMA 内存，
  *   临时图层走 CPU 即可。
+ *   【实验 CONFIG_UI_DRAW_BUF_IN_PSRAM】主绘制缓冲改到 PSRAM 后，这里放开
+ *   外部 RAM 输出，但仍按 `data_size >= PPA_ALIGN_UP(w*h*2)` 逐个校验：
+ *   只有"整块缓冲区"（主绘制缓冲）才满足，LVGL 的临时图层依旧回退 CPU。
+ *   见 ideas_and_exps/PSRAM_DRAW_BUF_EXPERIMENT.md §3/§7。
  */
 #include "core/ui/lvgl_ppa_accel.h"
 
@@ -345,12 +349,35 @@ static void ppa_blend_handler(lv_draw_task_t *t, const lv_draw_sw_blend_dsc_t *d
     uint8_t *dst = (uint8_t *)layer->draw_buf->data;
     int32_t buf_w = lv_area_get_width(buf_area);
 
-    if(dst == NULL || !esp_ptr_internal(dst) ||
+    if(dst == NULL ||
        ((uintptr_t)dst & (PPA_ALIGN_SIZE - 1)) != 0 ||
        layer->draw_buf->header.stride != (uint32_t)buf_w * 2) {
         ppa_sw_fallback(t, dsc);
         return;
     }
+
+    /* 目标缓冲必须在"PPA 能安全写"的内存里：
+       · 内部 RAM：一直允许（默认配置，主绘制缓冲就在这里）。
+       · PSRAM：仅当 CONFIG_UI_DRAW_BUF_IN_PSRAM（实验）打开时允许——驱动对
+         外部 RAM 输出会做 M2C cache 同步，同步长度取
+         PPA_ALIGN_UP(buf_w * buf_h * 2)，所以必须先确认图层**真的有这么多
+         字节**，否则会越过缓冲尾部几十字节（LVGL 的临时图层 data_size 就
+         可能不够，那种情况继续走 CPU）。 */
+#if CONFIG_UI_DRAW_BUF_IN_PSRAM
+    if(!esp_ptr_internal(dst)) {
+        const size_t out_bytes =
+            PPA_ALIGN_UP((size_t)buf_w * (size_t)lv_area_get_height(buf_area) * 2u);
+        if((size_t)layer->draw_buf->data_size < out_bytes) {
+            ppa_sw_fallback(t, dsc);
+            return;
+        }
+    }
+#else
+    if(!esp_ptr_internal(dst)) {
+        ppa_sw_fallback(t, dsc);
+        return;
+    }
+#endif
 
     if(area.x1 < buf_area->x1 || area.y1 < buf_area->y1 ||
        area.x2 > buf_area->x2 || area.y2 > buf_area->y2) {

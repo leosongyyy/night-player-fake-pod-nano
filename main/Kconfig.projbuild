@@ -170,6 +170,30 @@ menu "FakePodNanoNightPlayer 应用配置"
             累计前 500 次旋转的耗时/像素数，打印一条平均耗时与吞吐后停止
             统计（不会持续刷日志）。仅用于评估旋转本身的开销。
 
+    config UI_DRAW_BUF_IN_PSRAM
+        bool "LVGL 绘制缓冲放 PSRAM（实验，2026-11-16 第二轮）"
+        default n
+        help
+            把 LVGL 的两块绘制缓冲（V_RES/10，2×42368B ≈ 83KB）从内部
+            DMA RAM 改到 PSRAM（MALLOC_CAP_SPIRAM，仍 64B 对齐）。
+
+            动因：内部 RAM 与 IRAM 同一块 SRAM，是 S31 最紧缺的资源
+            （WiFi 常驻约 27KB 静态 + 65KB 运行时峰值、蓝牙控制器约 13KB
+            DMA）。省下 83KB 足以让 WiFi 与蓝牙同处一个固件。
+
+            代价（2026-11-15 第一轮实测，见
+            ideas_and_exps/PSRAM_DRAW_BUF_EXPERIMENT.md）：
+              · 0° 直发路径列表快速滚动 30 → 24fps（SPI 驱动还要为每块
+                41KB 分配内部 bounce 并 memcpy，低内存时有失败风险）；
+              · 90° PPA 旋转路径 24 → 23fps 左右（PPA 读 PSRAM 慢约 22%，
+                但输出仍在内部 s_tile，SPI 不碰 PSRAM）；
+              · 静止/跑马灯 61~63fps 不掉，开机到首帧不变。
+            旋转输出缓冲（s_tile）**始终留内部 DMA RAM**，这是 90° 路径
+            能保持帧率的关键，不要跟着搬到 PSRAM。
+
+            默认关。开着时 lvgl_ppa_accel 会放开"混合目标必须在内部 RAM"
+            的限制（按 data_size 校验防 msync 越界）。
+
     config UI_LVGL_PIN_HOT_OBJECTS
         bool "把滚动列表的热点 LVGL 对象钉在内部 RAM（路径B）"
         default n

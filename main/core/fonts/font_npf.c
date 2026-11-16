@@ -20,8 +20,13 @@
  * 20,902，安全）。本文件的字段偏移与镜像格式一一对应。
  *
  * ── 内存账 ────────────────────────────────────────────────────────────────
- * 常驻 RAM ≈ sizeof(lv_font_t) + sizeof(lv_font_fmt_txt_dsc_t) + 4.4KB cmap 数组；
- * 4.4MB 位图与 538KB glyph_dsc 全在 Flash（只占 71 个 64KB MMU 页）。
+ * 非 XIP 构建：常驻 RAM ≈ sizeof(lv_font_t) + sizeof(lv_font_fmt_txt_dsc_t)
+ *   + 4.4KB cmap 数组；4.4MB 位图与 538KB glyph_dsc 全在 Flash（只占 72 个
+ *   64KB MMU 页）。
+ * XIP-from-PSRAM 构建（CONFIG_SPIRAM_XIP_FROM_PSRAM）：镜像整块拷到 PSRAM
+ *   （4.65MB），mmap 立刻解除——原因是有 flash mmap 时每次 flash 写都要关外部
+ *   cache，而 .text/.rodata 已在 PSRAM，会让另一核直接 fault。详见
+ *   ideas_and_exps/XIP_FROM_PSRAM.md。
  ******************************************************************************/
 
 #include "font_npf.h"
@@ -34,6 +39,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
 #include "lvgl.h"
 
 static const char *TAG = "font_npf";
@@ -81,6 +87,9 @@ static lv_font_fmt_txt_cmap_t *s_cmaps;
 static const esp_partition_t *s_part;
 static esp_partition_mmap_handle_t s_mmap_handle;
 static const uint8_t *s_base;
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM
+static uint8_t *s_copy;            /* XIP 构建：镜像的 PSRAM 副本（mmap 已解除） */
+#endif
 static uint32_t s_glyph_count;
 static bool s_ready;
 static esp_err_t s_last_err = ESP_ERR_INVALID_STATE;
@@ -142,14 +151,47 @@ esp_err_t font_npf_init(void)
         return s_last_err;
     }
 
-    /* 只映射镜像实际长度（4.65MB → 71 个 64KB MMU 页），不要整个 6MB 分区 */
+    /* 【2026-11-16，XIP-from-PSRAM 适配】不能长期保留 font 分区的 flash mmap：
+       1) 只要还有 flash mmap，每次 flash 写都要关掉外部 cache
+          （spi_flash_os_func_app.c 的 flash_mmap_remain() 分支）。XIP 模式下
+          .text/.rodata 已经在 PSRAM，一关 cache，另一颗核的 MP3 解码就会
+          access fault（2026-11-16 实测：开机几秒内 Core1 随机崩溃）；
+       2) 4.65MB 的 mmap 还要占 71 个 MMU 页，和 XIP 映射、PSRAM 堆抢页表。
+       做法：先用 mmap 快速读（走 cache，比逐块 esp_partition_read 快），
+       整块 memcpy 到 PSRAM，再 munmap 把页表还回去。运行时字形直接从 PSRAM
+       读——既不受 flash 写窗口影响，也比 cache 映射的 flash 读更快。
+       代价：PSRAM 多占 total 字节（约 4.4MB），开机多一次 memcpy（~20ms 量级）。
+       非 XIP 构建保持 mmap（省 4.4MB PSRAM，且没有上述问题）。 */
+    const uint8_t *mapped = NULL;
     err = esp_partition_mmap(s_part, 0, total, ESP_PARTITION_MMAP_DATA,
-                             (const void **)&s_base, &s_mmap_handle);
+                             (const void **)&mapped, &s_mmap_handle);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "font 分区 mmap 失败: %s", esp_err_to_name(err));
         s_last_err = err;
         return err;
     }
+
+#if CONFIG_SPIRAM_XIP_FROM_PSRAM
+    uint8_t *copy = heap_caps_aligned_alloc(64, total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (copy != NULL) {
+        const int64_t t0 = esp_timer_get_time();
+        memcpy(copy, mapped, total);
+        /* esp_partition_munmap 无返回值：无论成败都以释放为准，
+           失败也只会在极端情况下多留几页 MMU（不影响功能）。 */
+        esp_partition_munmap(s_mmap_handle);
+        s_copy = copy;
+        s_base = copy;
+        ESP_LOGI(TAG, "font 镜像已拷入 PSRAM：%u B，%lld ms，释放 %u 个 64KB MMU 页",
+                 (unsigned)total, (long long)((esp_timer_get_time() - t0) / 1000),
+                 (unsigned)((total + CONFIG_MMU_PAGE_SIZE - 1) / CONFIG_MMU_PAGE_SIZE));
+    } else {
+        s_base = mapped;
+        ESP_LOGW(TAG, "PSRAM 分配 %u B 失败，继续使用 flash 映射（flash 写会关 cache）",
+                 (unsigned)total);
+    }
+#else
+    s_base = mapped;
+#endif
 
     const uint8_t *face = s_base + NPF_FACE_BASE;
     uint16_t size_px = npf_u16(face + 0);
