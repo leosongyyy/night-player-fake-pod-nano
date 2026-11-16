@@ -64,7 +64,7 @@ extern "C" {
  *     - 触摸测试白点 touch_test（bool，默认关，见 core/ui/touch_test；
  *       开机读取决定是否创建调试对象，修改需重启生效）
  *     - 画面旋转 rotation（NVS 存"角度/90"的 u8 索引；0/90/180/270 顺时针，
- *       默认 90）：PPA 硬件旋转画面，触摸会跟随旋转，切换**立即生效**
+ *       默认 0）：PPA 硬件旋转画面，触摸会跟随旋转，切换**立即生效**
  *     - 触屏校准 touch_left（bool，默认 false=右撇子）：决定 29/30 缩放的
  *       锚角——右撇子以**旋转后左上角**为原点，左撇子以**右上角**为原点
  *   - 回放增益总开关 replay_gain（bool，默认**开**）：关=所有歌曲按 0dB
@@ -189,7 +189,9 @@ typedef enum {
 } config_store_sleep_auto_t;
 #define CONFIG_STORE_TOUCH_TEST_DEFAULT   0u  /* 触摸测试白点默认关（开发者选项开启） */
 #define CONFIG_STORE_TOUCH_LEFT_DEFAULT   0u  /* 触屏校准默认右撇子（以旋转后左上角为缩放原点） */
-#define CONFIG_STORE_ROTATION_DEFAULT     90u /* 画面旋转默认 90°（PPA 实验，开发者选项可切 0/90/180/270） */
+#define CONFIG_STORE_ROTATION_DEFAULT     0u /* 画面旋转默认 0°（2026-11-16 起；XIP from PSRAM 后 0° 已够快，
+                                               且 0° 不需要 PPA 每块旋转，省掉 s_tile 与 1.2ms/块开销；
+                                               开发者选项可切 0/90/180/270） */
 #define CONFIG_STORE_REPLAY_GAIN_DEFAULT  1u  /* 回放增益总开关默认开（保持既有行为） */
 #define CONFIG_STORE_BATT_CARE_DEFAULT    0u  /* 电池健康保护默认关（标准 4.2V 满电） */
 #define CONFIG_STORE_AUTO_RESCAN_DEFAULT  1u  /* 自动重扫默认开（开机遍历曲库判断增删） */
@@ -337,7 +339,7 @@ uint8_t config_store_get_click_wheel_speed(void);
 bool config_store_get_touch_test(void);
 
 /**
- * @brief 画面旋转角度（顺时针 0/90/180/270；默认 90）
+ * @brief 画面旋转角度（顺时针 0/90/180/270；默认 0）
  *
  * 实验性功能（PPA 硬件旋转，见 ideas_and_exps/PPA_ROTATE.md）：
  * 只旋转画面，**不旋转触摸**。由开发者选项切换，立即生效并持久化；

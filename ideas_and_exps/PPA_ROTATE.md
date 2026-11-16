@@ -97,7 +97,7 @@ PPA 的 `ppa_srm_rotation_angle_t` 只写了"逆时针（CCW）"，但"逆时针
 |---|---|
 | `main/core/ui/lvgl_ppa_rotate.c/.h` | 新增：PPA SRM client、输出缓冲、方向自检、flush 旋转 + 提交、运行时角度切换 |
 | `main/core/ui/lvgl_port.c` | flush_cb 最前面分流到旋转路径；init 里创建（LVGL 任务启动前）；`lvgl_port_set_display_rotation()`（切换 + 整屏重绘）；触摸 read_cb 的旋转逆变换 + 左右手锚角（§3.2） |
-| `main/core/storage/config_store.c/.h` | NVS 键 `rotation`（0/90/180/270，默认 90）与 `touch_left`（0=右撇子/1=左撇子，默认 0） |
+| `main/core/storage/config_store.c/.h` | NVS 键 `rotation`（0/90/180/270，默认 0；2026-11-16 前默认 90）与 `touch_left`（0=右撇子/1=左撇子，默认 0） |
 | `main/ui/settings_menu.c` | 新增「显示设置」页：屏幕超时 / 屏幕旋转方向 / 触屏校准；原根页面「屏幕自动息屏」入口收进本页；开发者选项里的旋转行移除 |
 | `main/Kconfig.projbuild` | `UI_DISPLAY_ROTATE_PPA`（默认 y）、`UI_DISPLAY_ROTATE_STATS`（默认 y，一次性统计） |
 | `main/CMakeLists.txt` | 加入 `core/ui/lvgl_ppa_rotate.c`（内部有 `#if CONFIG_UI_DISPLAY_ROTATE_PPA`） |
@@ -109,7 +109,8 @@ PPA 的 `ppa_srm_rotation_angle_t` 只写了"逆时针（CCW）"，但"逆时针
 
 角度是**运行时状态**，不是编译期常量：
 
-- NVS 键 `rotation`（u8 索引 = 角度/90，默认 90°），开机由 `lvgl_port_init()`
+- NVS 键 `rotation`（u8 索引 = 角度/90，默认 0°；2026-11-16 前默认 90°，
+  因为 XIP from PSRAM 后 0° 已够快、也不需要每块 PPA 旋转），开机由 `lvgl_port_init()`
   读出后交给 `lvgl_ppa_rotate_init()`；
 - **设置 → 显示设置 → 屏幕旋转方向**（列表四选一）→ `lvgl_port_set_display_rotation()`：
   先改模块角度，再把 `lv_screen_active()` + `lv_layer_top()` + `lv_layer_sys()`

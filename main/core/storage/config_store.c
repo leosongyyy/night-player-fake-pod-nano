@@ -137,8 +137,8 @@ static bool     s_cw_reverse  = (CONFIG_STORE_CW_REVERSE_DEFAULT != 0);
 static uint8_t  s_cw_speed    = CONFIG_STORE_CW_SPEED_DEFAULT;
 /* 开发者选项（运行时开关，开机检查、重启生效）：触摸测试白点（默认关） */
 static bool     s_touch_test  = (CONFIG_STORE_TOUCH_TEST_DEFAULT != 0);
-/* 开发者选项：画面旋转角度（顺时针 0/90/180/270，默认 90）。
-   实验性 PPA 硬件旋转（触摸不跟随），切换**立即生效**（不重启），
+/* 开发者选项：画面旋转角度（顺时针 0/90/180/270，默认 0）。
+   实验性 PPA 硬件旋转（触摸按同一角度做逆变换跟随），切换**立即生效**（不重启），
    见 core/ui/lvgl_ppa_rotate.c 与 ideas_and_exps/PPA_ROTATE.md。
    NVS 里存的是角度/90（u8 索引 0~3，因为 270 放不进 uint8）。 */
 static uint16_t s_rotation    = CONFIG_STORE_ROTATION_DEFAULT;
