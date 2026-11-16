@@ -1575,10 +1575,8 @@ static lv_obj_t *time_date_page_build(void)
     /* 说明行：① WiFi 配置放哪；② 功能会重启进里世界（免得用户以为是死机），
        做完点「回到表世界」才回来。 */
     menu_note_row_create(page,
-        "* WiFi 名称/密码写在 SD 卡 .ecov/wifi.txt（第 3 行可选 NTP 服务器）");
-    menu_note_row_create(page,
-        "* WiFi对时在「里世界」里完成：点它会重启进去，对完点「回到表世界」返回");
-
+        "WiFi对时功能的WiFi名称和密码写在 SD 卡 .ecov/wifi.txt（第一行名称，第二行密码，第 3 行可选 NTP 服务器）");
+   
     /* 弹窗保存/对时成功后刷新本页右侧状态 */
     time_date_popup_set_refresh_cb(menu_refresh_time_date);
     menu_refresh_time_date();
