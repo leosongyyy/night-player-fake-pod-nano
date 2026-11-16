@@ -13,7 +13,8 @@ extern "C" {
  * 2026-11 新增。里世界是烧在 ota_0 的独立固件（矩阵 role=inner，见
  * ideas_and_exps/INNER_WORLD.md）：表世界（播放器）点需要网络/独占 SD 卡的
  * 功能时，弹窗确认后重启进来；这里提供两个功能入口，做完点「回到表世界」
- * 重启回播放器（otadata 在里世界启动时已被擦掉，任何重启都回 factory）。
+ * 重启回播放器（RTC 分区位在 bootloader 进 ota_0 时就被清 0，任何重启都回
+ * factory；otadata 不参与，见 RTC_BOOT_PARTITION.md）。
  *
  * 界面结构（全屏黑底，挂屏幕层，不透明）：
  *   ┌──────────────────────────┐

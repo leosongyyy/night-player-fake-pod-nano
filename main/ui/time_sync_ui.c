@@ -6,9 +6,7 @@
 #include "core/network/wifi_time_sync.h"
 #include "core/storage/config_store.h"
 #include "core/ui/lvgl_port.h"
-#if !CONFIG_FIRMWARE_ROLE_SYNC
-#include "core/utils/power_service.h"
-#endif
+#include "core/utils/power_service.h"   /* 两个角色都有 power_service（里世界 2026-11 起） */
 #include "ui/time_date_popup.h"
 #include "ui/toast.h"
 
@@ -65,15 +63,12 @@ static lv_timer_t *s_auto_close_timer = NULL;  /* 结果展示到期后自动结
 static time_sync_ui_done_cb_t s_done_cb = NULL;
 static wifi_time_sync_result_t s_last_result = WIFI_TIME_SYNC_OK;
 
-/* 抑制自动息屏：播放器里有 power_service；对时固件没有（它不跑电源任务，
-   屏幕本来就一直亮到重启），这里直接跳过。 */
+/* 抑制自动息屏：网络对时最长可达一分多钟，期间没有触摸活动，必须拦住
+   "无操作自动息屏"（息屏后再过 10 分钟就是自动关机）。2026-11 起里世界也
+   跑 power_service（自动息屏 + 超时关机），所以两个角色都要真正生效。 */
 static void hold_awake(bool hold)
 {
-#if CONFIG_FIRMWARE_ROLE_SYNC
-    (void)hold;
-#else
     power_service_set_hold_awake(hold);
-#endif
 }
 
 /* 前向声明：按钮回调在 sync_ui_create 里注册，定义在后面 */

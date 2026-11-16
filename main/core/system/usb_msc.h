@@ -28,7 +28,7 @@ extern "C" {
  *   2. usb_msc_start() 重新以**原始块设备**方式初始化 SDMMC（不挂 FATFS）
  *      并安装 TinyUSB MSC；
  *   3. 之后**不要**再调用任何 SD 卡文件系统接口（卡已交给电脑）；
- *   4. 退出方式是 esp_restart()（otadata 已被擦 → 回表世界）。
+ *   4. 退出方式是 esp_restart()（RTC 分区位已被 bootloader 清 0 → 回表世界）。
  *
  * ⚠ 一个容易踩的硬件事实：FakePodNano Pro 的 USB-C 正反插接的是**两个不同
  *   控制器**——默认方向是 USB 串口（烧录/日志），翻面才是 USB OTG（本模块

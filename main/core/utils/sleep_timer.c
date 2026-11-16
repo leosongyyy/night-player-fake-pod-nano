@@ -112,7 +112,10 @@ static void sleep_timer_task(void *arg)
                 continue;
             }
 
-            fake_shutdown_enter();
+            /* 睡眠定时到点 = 用户意图关机：插着充电器时改为"保存现场 + 重启进
+               充电界面"（不断电，保证 4.08V 限充与电量检测继续生效），没插电才
+               走 PMU 真断电。分流逻辑在 fake_shutdown_user_off 里。 */
+            fake_shutdown_user_off();
 
             /* 关机成功：PMU 断电，本任务随整机消失；只有关机失败（PMU 未响应，
                屏幕上会提示「关机失败，请长按电源键 4 秒」）才会回到这里继续空转，

@@ -11,6 +11,7 @@
 #include "core/storage/config_store.h"
 #include "core/system/usb_msc.h"
 #include "core/ui/lvgl_port.h"
+#include "core/utils/power_service.h"
 #include "ui/time_date_popup.h"
 #include "ui/time_sync_ui.h"
 #include "ui/toast.h"
@@ -182,9 +183,9 @@ static void iw_tick_cb(lv_timer_t *timer)
 static void iw_restart_cb(lv_event_t *e)
 {
     (void)e;
-    /* 里世界启动时已擦掉 otadata（fw_switch_to_player），任何重启都会回
-       factory 里的表世界固件；这里不需要再写一次启动分区。 */
-    ESP_LOGI(TAG, "回到表世界：重启（otadata 已空 → 启动 factory 播放器）");
+    /* 分区位是一次性请求：bootloader 进 ota_0 时已清 0，任何重启都会回
+       factory 里的表世界固件；这里不需要再写启动分区（也不碰 otadata）。 */
+    ESP_LOGI(TAG, "回到表世界：重启（分区位已清 → 启动 factory 播放器）");
     vTaskDelay(pdMS_TO_TICKS(120));   /* 让日志先出去 */
     esp_restart();
 }
@@ -363,6 +364,10 @@ static void iw_usb_start_done(usb_msc_result_t result)
         return;
     }
 
+    /* 成功：USB 模式不退出，且**禁止自动息屏**（息屏后会再触发"超时关机"，
+       而 USB 传歌通常没有触摸操作）。传歌期间允许屏幕一直亮着。 */
+    power_service_set_hold_awake(true);
+
     /* 成功：显示容量，切换到"等待电脑"状态，并开始轮询挂载状态 */
     char cap[24];
     format_capacity(usb_msc_capacity_bytes(), cap, sizeof(cap));
@@ -476,7 +481,7 @@ void inner_world_ui_create(void)
     lv_obj_add_flag(usb_row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(usb_row, iw_usb_row_cb, LV_EVENT_CLICKED, NULL);
 
-    /* 底部：回到表世界（otadata 已擦 → 重启即回 factory） */
+    /* 底部：回到表世界（分区位已被 bootloader 消费 → 重启即回 factory） */
     lv_obj_t *btn = lv_obj_create(s_list_root);
     lv_obj_set_size(btn, 260, 56);
     lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -34);

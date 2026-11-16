@@ -19,7 +19,11 @@
 # ============================================================================
 
 # ---- 两个固件都要的：启动入口、屏幕/触摸/PMU/RTC/SD 驱动、LVGL 移植层、
-#      字体、配置存储、WiFi 对时核心与它的进度界面、跨固件切换 ----
+#      字体、配置存储、WiFi 对时核心与它的进度界面、跨固件切换，
+#      以及**电源基础设施**（2026-11 起里世界也要"空闲自动息屏 + 超时关机"：
+#      deep_worker 大栈执行器、power_service 电源服务、fake_shutdown 关机链、
+#      button_service 按键服务 —— 这几个模块内部用 CONFIG_FIRMWARE_ROLE_SYNC
+#      把播放器专属步骤（保存播放位置/停解码/关 DAC）裁掉） ----
 set(MAIN_SRCS_SHARED
     "main.c"
     "core/system/fw_switch.c"      # otadata 切换（表世界 ↔ 里世界）
@@ -29,7 +33,11 @@ set(MAIN_SRCS_SHARED
     "core/hardware/rtc.c"
     "core/hardware/battery.c"
     "core/hardware/sd_card.c"
+    "core/hardware/button_service.c"   # 上/下键事件（里世界只用"任意键亮屏/长按关机"）
     "core/storage/config_store.c"
+    "core/utils/deep_worker.c"         # 息屏/亮屏/关机的内部 RAM 大栈执行器
+    "core/utils/power_service.c"       # 自动息屏 + 息屏未播放超时关机 + 低电关机
+    "core/utils/fake_shutdown.c"       # 关机链（或插电时"重启进充电界面"）
 
     "core/network/wifi_time_sync.c"
     "core/ui/lvgl_port.c"
@@ -48,10 +56,9 @@ set(MAIN_SRCS_SHARED
     # （同一文件里的滚轮弹窗对时固件用不到，但被 --gc-sections 丢掉，不占 Flash）
     "ui/time_date_popup.c")
 
-# ---- 只有播放器要的：播放引擎、蓝牙音频、列表/UI、电源与深链 ----
+# ---- 只有播放器要的：播放引擎、蓝牙音频、列表/UI、播放器专属电源策略 ----
 set(MAIN_SRCS_PLAYER
     "core/hardware/boot_reason.c"
-    "core/hardware/button_service.c"
     "core/hardware/pldata.c"
     "core/hardware/audio/audio.c"
     "core/hardware/audio/resampler.c"
@@ -74,9 +81,6 @@ set(MAIN_SRCS_PLAYER
     "core/ui/virtual_list.c"
     "core/ui/click_wheel.c"
     "core/ui/global_style.c"
-    "core/utils/fake_shutdown.c"
-    "core/utils/deep_worker.c"
-    "core/utils/power_service.c"
     "core/utils/sleep_timer.c"
     "core/utils/quiet_mode.c"
     "core/image/default_cover.c"
@@ -117,15 +121,17 @@ else()
     list(APPEND MAIN_SRCS ${MAIN_SRCS_PLAYER})
 endif()
 
-# 以下三项都是播放器专属（性能监视 / 内存快照 / 封面），对时固件不编。
-if(NOT CONFIG_FIRMWARE_ROLE_SYNC)
+# 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR
+# 开启时编译；关闭可减小固件并省掉监视任务的内存开销（依赖
+# CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS，见 sdkconfig.defaults）。
+# ⚠ **两个角色都编**（2026-11-16 起里世界也调 startPerformanceMonitor）：
+#   只由 debug / release 变体决定开关，不再按角色裁剪。
+if(CONFIG_PERFORMANCE_MONITOR)
+    list(APPEND MAIN_SRCS "core/utils/performance_monitor.c")
+endif()
 
-    # 性能监视（内存 + 双核 CPU 使用率，串口每 2s 输出）仅当 CONFIG_PERFORMANCE_MONITOR
-    # 开启时编译；关闭可减小固件并省掉监视任务的内存开销（依赖
-    # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS，见 sdkconfig.defaults）。
-    if(CONFIG_PERFORMANCE_MONITOR)
-        list(APPEND MAIN_SRCS "core/utils/performance_monitor.c")
-    endif()
+# 以下三项都是播放器专属（内存快照 / 封面），里世界不编。
+if(NOT CONFIG_FIRMWARE_ROLE_SYNC)
 
     # 内存快照诊断（CONFIG_MEM_TRACE，release 关闭）：启动各阶段与封面加载打印
     # 内部 RAM / DMA / PSRAM 占用，用于定位内存消耗者（见 IRAM_DMA_AUDIT.md）。

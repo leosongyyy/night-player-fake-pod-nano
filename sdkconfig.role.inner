@@ -28,10 +28,11 @@ CONFIG_FIRMWARE_ROLE_SYNC=y
 # （控制器初始化要一块 21KB 的连续内部 RAM）。
 CONFIG_BT_ENABLED=n
 
-# 里世界没有播放器那套"性能监视 / 内存快照"的调用点（只有 main.c 的 PLAYER
-# 分支会 startPerformanceMonitor / mem_trace_log），覆盖为 n 省几 KB Flash。
-# ⚠ 不要在这里关 LV_USE_PERF_MONITOR：那是变体级调试设施，debug 要留 FPS。
-CONFIG_PERFORMANCE_MONITOR=n
+# 里世界没有播放器那套"内存快照"的调用点（mem_trace 只在 main.c 的 PLAYER 分支），
+# 覆盖为 n 省几 KB Flash。
+# ⚠ 性能监视（CONFIG_PERFORMANCE_MONITOR）**不在这里关**：2026-11-16 起里世界自己也
+#    调 startPerformanceMonitor()，开关完全交给 debug / release 变体
+#    （debug 开、release 关）。同理不要在这里关 LV_USE_PERF_MONITOR（变体级 FPS 指示器）。
 CONFIG_MEM_TRACE=n
 
 # 封面：里世界没有任何封面/播放界面。release 变体默认开 UI_COVER_FLASH

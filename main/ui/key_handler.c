@@ -119,10 +119,11 @@ static void on_button_event(button_event_t event, void *ctx)
         }
         break;
     case BUTTON_EVENT_UP_LONG:
-        /* 上键长按：关机（不论亮屏/息屏；fake_shutdown 在息屏时会先亮屏
-           显示「正在关机...」，再保存数据并让 PMU 断电） */
+        /* 上键长按：关机（不论亮屏/息屏）。fake_shutdown_user_off 会按"是否在
+           充电"分流：插电 → 保存现场后重启进充电界面（PMU 不断电，继续 4.08V
+           限充与电量检测）；没插电 → 原来的 PMU 真断电。息屏时会先亮屏显示提示。 */
         ESP_LOGW(TAG, "UP key long press: shutdown");
-        fake_shutdown_wait_power_off();
+        fake_shutdown_user_off();
         break;
     case BUTTON_EVENT_DOWN_LONG:
         if (sleeping) {

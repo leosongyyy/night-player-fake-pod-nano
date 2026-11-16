@@ -170,17 +170,42 @@ static void player_app_main(void)
        要读 AXP2101 的 0x20/0x21。 */
     boot_reason_init();
 
-    /* 电池健康保护（NVS 配置 → 4.0V 软件限充）：PMU 每次上电都会把配置
-       恢复成 EFUSE 默认，所以每次开机都要重新下发；关闭时也会恢复充电。
-       ⚠ 不能把 CV 降到 4.0V：电池高于 CV 时 PMU 会断开 BATFET，拔电会硬断电。 */
+    /* 电池健康保护（NVS 配置 → 软件限充，见 BATTERY_CARE_STOP_MV）：PMU 每次
+       上电都会把配置恢复成 EFUSE 默认，所以每次开机都要重新下发；关闭时也会
+       恢复充电。
+       ⚠ 不能把 CV 降到限充电压：电池高于 CV 时 PMU 会断开 BATFET，拔电会硬断电。 */
     battery_set_health_protection(config_store_get_batt_care());
 
-    /* 插充电器自动开机（PMU 0x20 bit2 置位 + 主控"上电类"复位）→ 只进
-       "正在充电"专用界面：不初始化 RTC / 音频 / 播放列表 / SD / 按键 / 电源
-       服务，既省电也不会在充电时放歌。app_main 到此返回，LVGL 任务与充电
-       监控任务继续工作（拔电 → PMU 关机；按住上键 0.6s → esp_restart 进系统）。 */
-    if (boot_reason_is_charger_boot()) {
-        ESP_LOGW(TAG, "charger boot: enter charge-only UI");
+    /* PCF85063A 实时时钟：必须在 touch_init() 之后（复用触摸建立的 I²C0 总线）。
+       ⚠ 位置在充电界面判定**之前**：RTC 的 RAM_byte(0x03) 里放着跨复位的启动
+          标志位（bit2 = 本次启动进充电界面，见 fw_switch.h），判定要用它。
+       ⚠ 只在时间无效（OS=1/出厂默认/字段非法）时用"项目诞生日"校时，
+         有效时不覆盖备用电源保住的走时。失败不致命（时间显示降级为 --:--）。 */
+    ESP_LOGI(TAG, "Initialize PCF85063A RTC");
+    if (rtc_init() != ESP_OK) {
+        ESP_LOGW(TAG, "RTC unavailable (time display disabled)");
+    }
+    mem_trace_log("07b-rtc");
+
+    /* 启动标志：表世界"插着充电器关机"时不是 PMU 断电（断电后固件消失，
+       4.08V 限充与电量计检测都会失效），而是保存现场后置 bit2 再重启。
+       这里读出并**立刻清零**（一次性），然后兜底清掉分区位等陈旧标志。 */
+    const bool charge_flag = fw_switch_charge_ui_requested();
+    if (charge_flag) {
+        ESP_LOGW(TAG, "boot flag: charge-ui requested by previous shutdown");
+        fw_switch_clear_charge_ui_request();
+    }
+    fw_switch_clear_boot_flags();
+
+    /* 插充电器自动开机（PMU 0x20 bit2 置位 + 主控"上电类"复位），或上次"插电
+       关机"留下的充电界面标志 → 只进"正在充电"专用界面：不初始化音频 / 播放
+       列表 / SD / 按键 / 电源服务，既省电也不会在充电时放歌。app_main 到此返回，
+       LVGL 任务与充电监控任务继续工作（拔电 → PMU 关机；按住上键 0.6s →
+       esp_restart 进系统）。 */
+    const bool charger_boot = boot_reason_is_charger_boot();
+    if (charger_boot || charge_flag) {
+        ESP_LOGW(TAG, "enter charge-only UI (reason: %s)",
+                 charger_boot ? "charger power-on boot" : "shutdown reboot flag");
         if (lvgl_port_lock(-1)) {
             boot_flow_run_charger_mode();
             lv_refr_now(NULL);
@@ -199,19 +224,7 @@ static void player_app_main(void)
         return;
     }
 
-    /* PCF85063A 实时时钟：必须在 touch_init() 之后（复用触摸建立的 I²C0 总线）。
-       ⚠ 只在时间无效（OS=1/出厂默认/字段非法）时用"项目诞生日"校时，
-         有效时不覆盖备用电源保住的走时。失败不致命（时间显示降级为 --:--）。 */
-    ESP_LOGI(TAG, "Initialize PCF85063A RTC");
-    if (rtc_init() != ESP_OK) {
-        ESP_LOGW(TAG, "RTC unavailable (time display disabled)");
-    } else {
-        /* 清掉 bootloader 可能没消费干净的启动请求字节（RTC RAM_byte 0x03）：
-           正常情况下自定义 bootloader 读完就清 0；这里兜底，避免陈旧的 0xA5
-           让下一次复位又进里世界。 */
-        rtc_write_reg(RTC_REG_RAM_BYTE, 0x00);
-    }
-    mem_trace_log("07b-rtc");
+    /* RTC 已在充电界面判定之前初始化（启动标志位要用），这里不再重复。 */
 
     ESP_LOGI(TAG, "Initialize audio (I2S + CS43131)");
     audio_init();
@@ -285,9 +298,8 @@ static void player_app_main(void)
        对时结果只在里世界列表里显示，不再写 NVS、也不再弹 Toast。 */
 
     /* 【调试】无人值守测试双固件切换：开机完成即切到里世界固件并重启。
-       ⚠ 里世界启动时把 otadata 擦回表世界，但**不会**自动重启（要等用户点
-          「回到表世界」），所以原来的"播放器 ↔ 对时"自动循环不再成立；本选项
-          现在只用于没有触摸输入时验证"能切过去"。
+       ⚠ 里世界里改用 RTC 分区位（不再碰 otadata），本选项只用于没有触摸输入时
+          验证"能切过去"。
        ⚠ 推荐用 quickconfig 开（`idfc build -qc SYNC_AUTOSTART`），不必改
           sdkconfig/触发全量重配；Kconfig 的 FIRMWARE_SYNC_AUTOSTART 保留兼容。 */
 #if CONFIG_FIRMWARE_SYNC_AUTOSTART || QCONF_SYNC_AUTOSTART

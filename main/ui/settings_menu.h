@@ -18,7 +18,7 @@ extern "C" {
  *   - 虚拟 ClickWheel 选项（开启 / 滑动方向 / 速度三档）
  *   - 时间与日期（子菜单：设置日期 / 时间设置 / WiFi对时 / 时区设置 /
  *     时间格式；日期、时间、时区用滚轮弹窗修改；**WiFi对时 = 双固件切换**：
- *     统一确认弹窗 → 写 otadata 切到 ota_0 里的里世界固件 → 重启，做完点
+ *     统一确认弹窗 → 写 RTC 分区位切到 ota_0 里的里世界固件 → 重启，做完点
  *     「回到表世界」返回，见 ui/time_sync_ui.c、core/system/{fw_switch,
  *     inner_world_app,usb_msc}.c 与 ideas_and_exps/INNER_WORLD.md）
  *   - 电源选项（**占位空页**，本轮先留入口，后续会话继续实现）

@@ -59,19 +59,27 @@ void __attribute__((noreturn)) call_start_cpu0(void)
 }
 
 /* ==================================================================== */
-/* 实验：用 PCF85063A 的 RAM_byte(0x03) 决定本次启动的分区               */
+/* 用 PCF85063A 的 RAM_byte(0x03) 决定本次启动的分区（唯一来源）          */
 /* ==================================================================== */
 /*
  * 协议（bootloader 与 App 必须一致；App 侧常量在
- * main/core/system/fw_switch.c 里重复定义）：
- *   0xA5 -> 下次启动 ota_0（里世界）
- *   0x5A -> 下次启动 factory（表世界）
- *   其它 -> 不干预，走标准 otadata 选择
+ * main/core/system/fw_switch.c 里重复定义，改一处必须改两处）：
  *
- * 读成功后把该字节清 0（"消费"），保证：
- *   · 里世界崩溃/复位时不会因为字节还在而反复进里世界；
- *   · 每次请求只生效一次。
- * 读失败/超时/NACK/目标分区不存在 -> 不改字节、走标准 otadata 选择（降级）。
+ *   bit1:0  分区选择  0b00 = factory（表世界，默认）
+ *                     0b01 = ota_0（里世界）
+ *                     （0b10/0b11 保留未用，读到按无效处理 → factory）
+ *   bit2    充电界面  1 = 本次启动进充电界面（表世界"插电关机"重启用），
+ *                     **由 App 消费后立刻清 0，bootloader 不碰这一位**
+ *   bit7:3  保留（当前恒 0，留给以后跨复位/跨固件的短消息）
+ *
+ * 为什么分区只用 2 bit：原来的 0xA5/0x5A 两个魔法值把整个字节占满了，
+ * 现在要再挤一个"启动进充电界面"的一次性标志，所以改成位域。
+ * ⚠ 旧固件写下的 0xA5 在新协议里 = 分区 0b01（里世界）+ bit2=1（充电界面）。
+ *   实际不会同时生效：bootloader 先按分区启动 ota_0，位 2 留给里世界自己清掉。
+ *
+ * 读成功后只清自己消费的**分区位**（bit1:0），**保留 bit2 与保留位**，
+ * 保证 App 在本次重启前写下的充电界面请求不被 bootloader 抹掉。
+ * 读失败/超时/NACK -> 直接启动 factory（otadata 已不参与启动，见表下方）。
  *
  * ⚠ 这段代码在主核 IRAM 里跑（bootloader 的 main 组件），I²C 用 bit-bang，
  *   不依赖 FreeRTOS / i2c_master。RTC 由 PMU 的 RTCLDO 供电，电池常驻时
@@ -81,8 +89,9 @@ void __attribute__((noreturn)) call_start_cpu0(void)
 #define RTC_BOOT_SDA_GPIO       48
 #define RTC_BOOT_I2C_ADDR       0x51   /* PCF85063A 7-bit 地址 */
 #define RTC_BOOT_RAM_REG        0x03   /* RAM_byte */
-#define RTC_BOOT_REQ_INNER      0xA5
-#define RTC_BOOT_REQ_PLAYER     0x5A
+#define RTC_BOOT_PART_MASK      0x03   /* bit1:0 分区选择 */
+#define RTC_BOOT_PART_INNER     0x01   /* 0b01 = ota_0（里世界） */
+#define RTC_BOOT_FLAG_CHARGE_UI 0x04   /* bit2 = 本次启动进充电界面（bootloader 不消费） */
 #define RTC_BOOT_HALF_US        5      /* 半周期 5 µs ≈ 100 kHz */
 #define RTC_BOOT_NO_REQUEST     INT32_MAX
 
@@ -339,7 +348,13 @@ static bool rtc_write_ram(uint8_t value)
  * 返回：
  *   0                  -> ota_0（里世界）
  *   FACTORY_INDEX(-1)  -> factory（表世界）
- *   RTC_BOOT_NO_REQUEST-> 没有请求 / 读取失败，调用方走 otadata
+ *   RTC_BOOT_NO_REQUEST-> RTC 读不到（由调用方决定降级策略）
+ *
+ * 2026-11-16 起**全面迁移到 RTC 字节**：otadata 不再参与启动决策。
+ *   bit1:0 = 0b01 → ota_0；其它（0b00 / 保留值 / 无效）→ factory。
+ * 这样"回表世界"不需要擦 otadata（旧实现要擦 8KB，非 RTC 主路径时还会每次擦）。
+ * 代价：RTC 读失败时不再回退 otadata，而是直接走 factory（表世界是主固件，
+ * 这个降级方向更安全；里世界只在显式请求时才进）。
  */
 static int rtc_boot_select(const bootloader_state_t *bs)
 {
@@ -353,35 +368,36 @@ static int rtc_boot_select(const bootloader_state_t *bs)
         /* 一次重试：瞬态干扰/总线没释放干净时很常见 */
         rtc_i2c_bus_recover();
         if (!rtc_read_ram(&req)) {
-            esp_rom_printf("[boot] rtc03 read failed -> otadata fallback\n");
+            esp_rom_printf("[boot] rtc03 read failed -> factory (no otadata any more)\n");
             return RTC_BOOT_NO_REQUEST;
         }
     }
 
-    int index = RTC_BOOT_NO_REQUEST;
+    const uint8_t part = (uint8_t)(req & RTC_BOOT_PART_MASK);
+    const bool want_inner = (part == RTC_BOOT_PART_INNER);
+    int index;
 
-    if (req == RTC_BOOT_REQ_INNER) {
-        if (bs->ota[0].offset != 0) {
-            index = 0;
-        }
-    } else if (req == RTC_BOOT_REQ_PLAYER) {
-        if (bs->factory.offset != 0) {
-            index = FACTORY_INDEX;
+    if (want_inner && bs->ota[0].offset != 0) {
+        index = 0;
+    } else {
+        /* 0b00 / 保留值 / 请求了但 ota_0 不存在 → factory */
+        index = FACTORY_INDEX;
+        if (want_inner) {
+            esp_rom_printf("[boot] rtc03=0x%02x wants ota_0 but slot is missing -> factory\n",
+                           req);
         }
     }
 
-    if (index != RTC_BOOT_NO_REQUEST) {
-        /* 消费掉请求，防止里世界复位后又进里世界 */
-        if (!rtc_write_ram(0x00)) {
+    /* 消费分区位（只清 bit1:0）：bit2（充电界面请求）与保留位必须原样留给 App。
+       这样里世界崩溃/复位后不会因为分区位还在又进里世界。 */
+    if (part != 0) {
+        if (!rtc_write_ram((uint8_t)(req & (uint8_t)~RTC_BOOT_PART_MASK))) {
             esp_rom_printf("[boot] rtc03 clear failed (request consumed anyway)\n");
         }
-        esp_rom_printf("[boot] rtc03=0x%02x -> %s\n", req,
-                       index == 0 ? "ota_0 (inner)" : "factory (player)");
-    } else if (req == RTC_BOOT_REQ_INNER || req == RTC_BOOT_REQ_PLAYER) {
-        /* 请求了但目标分区不存在：清掉这个无效请求，降级走 otadata */
-        rtc_write_ram(0x00);
-        esp_rom_printf("[boot] rtc03=0x%02x ignored (target partition missing)\n", req);
     }
+    esp_rom_printf("[boot] rtc03=0x%02x -> %s (flags kept 0x%02x)\n", req,
+                   index == 0 ? "ota_0 (inner)" : "factory (player)",
+                   (unsigned)(req & (uint8_t)~RTC_BOOT_PART_MASK));
 
     return index;
 }
@@ -405,8 +421,6 @@ static int select_partition_number(bootloader_state_t *bs)
  */
 static int selected_boot_partition(const bootloader_state_t *bs)
 {
-    int boot_index = bootloader_utility_get_selected_boot_partition(bs);
-
     if (esp_rom_get_reset_reason(0) != RESET_REASON_CORE_DEEP_SLEEP) {
         // Factory firmware.
 #ifdef CONFIG_BOOTLOADER_FACTORY_RESET
@@ -450,16 +464,24 @@ static int selected_boot_partition(const bootloader_state_t *bs)
 #endif // CONFIG_BOOTLOADER_APP_TEST
         // Customer implementation: PCF85063A RAM_byte 启动请求。
         // 放在 factory reset / test 之后：那两个调试入口优先级更高。
+        // ⚠ 2026-11-16 起**这是唯一的分区来源**：otadata 不再参与决策，
+        //   "回表世界"因此不需要任何 flash 擦写。
         int rtc_index = rtc_boot_select(bs);
         if (rtc_index != RTC_BOOT_NO_REQUEST) {
             return rtc_index;
         }
+
+        /* RTC 读不到（芯片不在/总线故障）：直接走 factory。
+           表世界是主固件，这个降级方向比"按陈旧 otadata 启动"安全。 */
+        if (bs->factory.offset != 0) {
+            esp_rom_printf("[boot] rtc unavailable -> factory (player)\n");
+            return FACTORY_INDEX;
+        }
     }
 
-    if (boot_index == INVALID_INDEX) {
-        return boot_index; // Unrecoverable failure (not due to corrupt ota data or bad partition contents)
-    }
-    return boot_index;
+    /* 深睡眠唤醒 / factory 分区不存在：交回 IDF 默认选择（最后的兜底，
+       只在上面两条都没给出结论时才会用到） */
+    return bootloader_utility_get_selected_boot_partition(bs);
 }
 
 #if CONFIG_LIBC_NEWLIB

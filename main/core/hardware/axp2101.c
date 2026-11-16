@@ -559,7 +559,7 @@ esp_err_t axp2101_set_charge_enable(bool enable)
         }
     }
     ESP_LOGI(TAG, "charge %s (0x18: 0x%02X -> 0x%02X)",
-             enable ? "enabled" : "disabled (4.0V limit)", v, nv);
+             enable ? "enabled" : "disabled (charge limit)", v, nv);
     return ESP_OK;
 }
 

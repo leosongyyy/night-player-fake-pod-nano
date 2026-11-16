@@ -10,21 +10,27 @@
 
 static const char *TAG = "fw_switch";
 
-/* 与 bootloader_components/main/bootloader_start.c 的协议保持一致：
-   PCF85063A RAM_byte(0x03)：0xA5=下次启动 ota_0（里世界），0x5A=factory，
-   其它=不干预。bootloader 读完会清 0，所以这里的写是一次性请求。 */
-#define RTC_BOOT_RAM_REG     0x03
-#define RTC_BOOT_REQ_INNER   0xA5
+/* 与 bootloader_components/main/bootloader_start.c 的协议保持一致（改一处必须
+   改两处）：PCF85063A RAM_byte(0x03) 是一个**位域**，跨 SoC 复位/跨固件保持：
 
-/* 1 = 自定义 bootloader（bootloader_components/main）在场：RTC 主路径，
-       切换不写/不擦 otadata（0 次 flash 擦除）；
-   0 = 纯 otadata 路径（原来的行为）。
+     bit1:0  分区选择  0b00 = factory（表世界，默认）；0b01 = ota_0（里世界）
+     bit2    充电界面  1 = 本次启动进充电界面（App 消费后立刻清 0）
+     bit7:3  保留（恒 0）
 
-   ⚠ 这两个开关必须和 bootloader 的实际烧录内容匹配：
-      · 保留 bootloader_components/main 时用 1；
-      · 移除自定义 bootloader（恢复 IDF 默认 bootloader）时必须改 0，
-        否则 App 只写 RTC、默认 bootloader 不认，切换会静默失败（重启回表世界）。 */
-#define FW_SWITCH_USE_RTC_BOOT  1
+   · bootloader 只读/清分区位，**不碰 bit2**；
+   · 本模块写请求时都是"读-改-写"，不会顺手抹掉另一位。 */
+#define RTC_BOOT_RAM_REG        0x03
+#define RTC_BOOT_PART_MASK      0x03u
+#define RTC_BOOT_PART_INNER     0x01u
+#define RTC_BOOT_FLAG_CHARGE_UI 0x04u
+
+/* 2026-11-16 起**全面迁移到 RTC 字节**（原来的 FW_SWITCH_USE_RTC_BOOT 开关已删除）：
+   bootloader_components/main 是**必备件**，启动分区只由 PCF85063A 的
+   RAM_byte(0x03) 决定，otadata 完全不参与（见 bootloader_start.c 的 rtc_boot_select）。
+   · 请求里世界 = 分区位写 0b01（SRAM，0 次 flash 擦写）；
+   · 回表世界 = 分区位清 0（同样 0 次擦写），bootloader 见 0b00 直接选 factory。
+   ⚠ 如果把自定义 bootloader 换回 IDF 默认版本，本模块的切换会失效（默认
+     bootloader 只认 otadata）——那时必须同时把切换实现改回 esp_ota_set_boot_partition()。 */
 
 bool fw_role_is_sync(void)
 {
@@ -92,95 +98,134 @@ esp_err_t fw_switch_to_sync(void)
         return verr;
     }
 
-#if FW_SWITCH_USE_RTC_BOOT
-    /* 主路径：只写 RTC 的一次性启动请求（SRAM，无擦写），再读回确认。
-       成功就**完全不碰 otadata** —— 这次切换 0 次 flash 擦除。 */
-    esp_err_t rtc_err = rtc_write_reg(RTC_BOOT_RAM_REG, RTC_BOOT_REQ_INNER);
-    if (rtc_err == ESP_OK) {
-        uint8_t rb = 0;
-        if (rtc_read_reg(RTC_BOOT_RAM_REG, &rb) == ESP_OK && rb == RTC_BOOT_REQ_INNER) {
-            ESP_LOGI(TAG, "RTC boot request 0x%02X written; otadata untouched "
-                          "(no flash erase)", RTC_BOOT_REQ_INNER);
-            return ESP_OK;
-        }
-        ESP_LOGW(TAG, "RTC boot request readback mismatch, falling back to otadata");
-    } else {
-        ESP_LOGW(TAG, "RTC boot request write failed (%s), falling back to otadata",
-                 esp_err_to_name(rtc_err));
+    /* 唯一路径（2026-11-16 起全面迁移到 RTC 字节，otadata 不再参与启动）：
+       只写 RTC 分区位（SRAM，无擦写），再读回确认 → 这次切换 0 次 flash 擦除。
+       ⚠ 读-改-写：只替换分区位，bit2（充电界面请求）与保留位原样保留。 */
+    uint8_t cur = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &cur) != ESP_OK) {
+        cur = 0;   /* 读失败按 0 处理（写成功与否由读回校验决定） */
     }
-#endif  /* FW_SWITCH_USE_RTC_BOOT */
+    const uint8_t want = (uint8_t)((cur & (uint8_t)~RTC_BOOT_PART_MASK)
+                                   | RTC_BOOT_PART_INNER);
+    esp_err_t rtc_err = rtc_write_reg(RTC_BOOT_RAM_REG, want);
+    if (rtc_err != ESP_OK) {
+        /* 没有 otadata 兜底了：写不进去就让调用方报"里世界固件不可用"，
+           这比悄悄按 otadata 切换更安全（那会让 RTC 与 otadata 两套状态打架）。 */
+        ESP_LOGE(TAG, "RTC boot request write failed: %s", esp_err_to_name(rtc_err));
+        return rtc_err;
+    }
+    uint8_t rb = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &rb) != ESP_OK
+            || (rb & (uint8_t)RTC_BOOT_PART_MASK) != RTC_BOOT_PART_INNER) {
+        ESP_LOGE(TAG, "RTC boot request readback mismatch (0x%02X), abort switch", rb);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "RTC boot request written (rtc03=0x%02X): next boot = ota_0; "
+                  "no flash erase (otadata unused)", rb);
+    return ESP_OK;
+}
 
-    /* 兜底：RTC 不可用时才走原来的 otadata 写入（擦 1 个 4KB 扇区）。
-       ⚠ 会先做 ESP_IMAGE_VERIFY；槽损坏时返回 ESP_ERR_OTA_VALIDATE_FAILED，
-       otadata 不会被改动，表世界不受影响。 */
-    esp_err_t err = esp_ota_set_boot_partition(p);
+/* ------------------------------------------------------------------ */
+/* 启动标志：本次启动是否要进充电界面（bit2）                            */
+/* ------------------------------------------------------------------ */
+
+esp_err_t fw_switch_request_charge_ui(void)
+{
+    uint8_t b = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &b) != ESP_OK) {
+        b = 0;   /* 读失败：从 0 起写（分区位为 0 = 不切分区，正是我们要的） */
+    }
+    const uint8_t want = (uint8_t)(b | RTC_BOOT_FLAG_CHARGE_UI);
+    esp_err_t err = rtc_write_reg(RTC_BOOT_RAM_REG, want);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_set_boot_partition(%s) failed: %s", p->label,
-                 esp_err_to_name(err));
-        /* 撤销刚写的 RTC 请求，避免下次启动被一个失效请求带进 ota_0 */
-#if FW_SWITCH_USE_RTC_BOOT
-        rtc_write_reg(RTC_BOOT_RAM_REG, 0x00);
-#endif
+        ESP_LOGE(TAG, "charge-ui request write failed: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "otadata updated: next boot = %s", p->label);
+    uint8_t rb = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &rb) != ESP_OK
+            || (rb & RTC_BOOT_FLAG_CHARGE_UI) == 0) {
+        ESP_LOGE(TAG, "charge-ui request readback mismatch (0x%02X)", rb);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "RTC boot flag set: next boot -> charging UI (rtc03=0x%02X)", rb);
     return ESP_OK;
+}
+
+bool fw_switch_charge_ui_requested(void)
+{
+    uint8_t b = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &b) != ESP_OK) {
+        return false;
+    }
+    return (b & RTC_BOOT_FLAG_CHARGE_UI) != 0;
+}
+
+void fw_switch_clear_charge_ui_request(void)
+{
+    uint8_t b = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &b) != ESP_OK) {
+        return;
+    }
+    if ((b & RTC_BOOT_FLAG_CHARGE_UI) == 0) {
+        return;
+    }
+    const uint8_t want = (uint8_t)(b & (uint8_t)~RTC_BOOT_FLAG_CHARGE_UI);
+    if (rtc_write_reg(RTC_BOOT_RAM_REG, want) != ESP_OK) {
+        ESP_LOGW(TAG, "clear charge-ui flag failed (still 0x%02X)", b);
+    } else {
+        ESP_LOGI(TAG, "charge-ui flag consumed (rtc03 0x%02X -> 0x%02X)", b, want);
+    }
+}
+
+void fw_switch_clear_boot_flags(void)
+{
+    /* 兜底清掉所有一次性标志（分区位 + 充电界面位），保留 bit7:3 给以后用。
+       正常情况 bootloader 已消费分区位、App 已消费 bit2，这里只是防止陈旧值
+       把下一次复位带错（例如 bootloader 读 RTC 失败时没消费）。 */
+    uint8_t b = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &b) != ESP_OK) {
+        return;
+    }
+    const uint8_t want = (uint8_t)(b & (uint8_t)~(RTC_BOOT_PART_MASK
+                                                  | RTC_BOOT_FLAG_CHARGE_UI));
+    if (want != b && rtc_write_reg(RTC_BOOT_RAM_REG, want) == ESP_OK) {
+        ESP_LOGI(TAG, "stale boot flags cleared (rtc03 0x%02X -> 0x%02X)", b, want);
+    }
 }
 
 esp_err_t fw_switch_to_player(void)
 {
     const esp_partition_t *p = find_app_partition(ESP_PARTITION_SUBTYPE_APP_FACTORY);
     if (p == NULL) {
-        /* factory 不存在时才退而求其次：擦 otadata 同样让 bootloader 回默认分区 */
-        const esp_partition_t *ota = esp_partition_find_first(
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, NULL);
-        if (ota == NULL) {
-            return ESP_ERR_NOT_FOUND;
-        }
-        return esp_partition_erase_range(ota, 0, ota->size);
+        /* 分区表里没有 factory：bootloader 也就没有"表世界"可回，直接报错。
+           （旧实现在这里擦 otadata 兜底，但 otadata 已不参与启动决策。） */
+        ESP_LOGE(TAG, "factory partition missing: cannot switch back to player");
+        return ESP_ERR_NOT_FOUND;
     }
 
-    /* RTC 主路径不会写 otadata：里世界开机时它已经是空的。
-       只有 otadata 非空（上次是 RTC 失败后的兜底切换）才需要擦 8KB。
-       每 4KB 扇区只读前 32 字节（otadata entry 的固定位置）判断是否为空。 */
-    const esp_partition_t *ota = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, NULL);
-    if (ota != NULL) {
-        bool blank = true;
-        for (uint32_t off = 0; off < ota->size; off += ota->erase_size) {
-            uint8_t entry[32];
-            if (esp_partition_read(ota, off, entry, sizeof(entry)) != ESP_OK) {
-                blank = false;
-                break;
-            }
-            for (size_t i = 0; i < sizeof(entry); i++) {
-                if (entry[i] != 0xFF) {
-                    blank = false;
-                    break;
-                }
-            }
-            if (!blank) {
-                break;
-            }
-        }
-        if (blank) {
-            ESP_LOGI(TAG, "otadata already empty (RTC path), skip erase");
-            return ESP_OK;
-        }
+    /* 2026-11-16 起**不再擦 otadata**：bootloader 只认 RTC 字节（bit1:0=0b00 →
+       factory），"回表世界"只需把分区位清 0（读-改-写，保留 bit2 等标志）。
+       以前要判断 otadata 是否为空、非空就擦 8KB —— 现在完全没必要；而且 otadata
+       里可能还躺着旧固件写下的"下次启动 ota_0"，新 bootloader 已经不看它了。 */
+    uint8_t b = 0;
+    if (rtc_read_reg(RTC_BOOT_RAM_REG, &b) != ESP_OK) {
+        /* RTC 读不到：bootloader 也读不到 → 它同样走 factory，降级方向一致。 */
+        ESP_LOGW(TAG, "RTC unavailable: bootloader will fall back to factory anyway");
+        return ESP_OK;
     }
-
-    ESP_LOGI(TAG, "switch next boot -> %s @0x%06x (擦 otadata)", p->label,
-             (unsigned)p->address);
-
-    /* 目标为 factory 时 IDF 的实现就是"擦掉 otadata"（见 esp_ota_ops.c 的
-       esp_ota_set_boot_partition_internal），所以之后任何复位都回播放器。 */
-    esp_err_t err = esp_ota_set_boot_partition(p);
+    if ((b & (uint8_t)RTC_BOOT_PART_MASK) == 0) {
+        ESP_LOGI(TAG, "rtc03=0x%02X already has no partition request; next boot = "
+                      "factory @0x%06x (no otadata erase)", b, (unsigned)p->address);
+        return ESP_OK;
+    }
+    const uint8_t want = (uint8_t)(b & (uint8_t)~RTC_BOOT_PART_MASK);
+    esp_err_t err = rtc_write_reg(RTC_BOOT_RAM_REG, want);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_set_boot_partition(%s) failed: %s", p->label,
-                 esp_err_to_name(err));
+        ESP_LOGE(TAG, "clear partition request failed: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "otadata erased: next boot = %s", p->label);
+    ESP_LOGI(TAG, "switch next boot -> factory: rtc03 0x%02X -> 0x%02X "
+                  "(no flash erase)", b, want);
     return ESP_OK;
 }
 

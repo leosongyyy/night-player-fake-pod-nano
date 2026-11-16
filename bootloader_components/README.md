@@ -9,12 +9,23 @@ PCF85063A 的 `RAM_byte(0x03)`，按协议决定进 `factory`（表世界）还�
 
 ## 协议
 
-| `0x03` | 行为 |
+`RAM_byte(0x03)` 是一个**位域**（2026-11-16 起；bootloader 与 App 必须一致）：
+
+| 位 | 含义 |
 |---|---|
-| `0xA5` | 选 `ota_0`；成功后清 `0x00`（一次性请求） |
-| `0x5A` | 选 `factory`；成功后清 `0x00` |
-| 其它 | 走标准 otadata 选择 |
-| 读失败/超时/NACK | 走标准 otadata 选择（降级） |
+| `bit1:0` | 分区：`0b01` → `ota_0`（里世界）；其它（`0b00`/保留值）→ `factory` |
+| `bit2` | `1` = 本次启动进充电界面（App 消费，bootloader **不碰**） |
+| `bit7:3` | 保留 |
+
+| 情况 | 行为 |
+|---|---|
+| `bit1:0 == 0b01` 且 `ota_0` 存在 | 选 `ota_0`；成功后只清 `bit1:0`（保留 bit2/保留位） |
+| `bit1:0 == 0b01` 但槽不存在 | 选 `factory` + 清分区位 |
+| `bit1:0` 其它值 | 选 `factory`（`0b00` 就是表世界） |
+| 读失败/超时/NACK | 选 `factory`（**不再**回退 otadata：otadata 已不参与启动） |
+
+- **otadata 已完全不参与启动决策**（2026-11-16 全面迁移到 RTC 字节）：
+  "回表世界"只需把分区位清 0，**0 次 flash 擦写**；otadata 分区保留但不再读写。
 
 - I²C：SCL=GPIO47 / SDA=GPIO48，开漏模拟，依赖板载外部上拉；地址 `0x51`。
 - SCL 等待上限 500 µs、9 时钟总线恢复、失败重试 1 次。
@@ -27,16 +38,17 @@ PCF85063A 的 `RAM_byte(0x03)`，按协议决定进 `factory`（表世界）还�
 `idfc idfpy -B build\player.debug bootloader`：
 
 ```
-Bootloader binary size 0x4100 bytes. 0x1f00 bytes (32%) free.
+Bootloader binary size 0x4140 bytes. 0x1ec0 bytes (32%) free.
 ```
 
-上限 `0x8000-0x2000` = 24,576 B；当前 16,640 B。
+上限 `0x8000-0x2000` = 24,576 B；当前 16,704 B。
 
 ## 怎么禁用 / 恢复默认 bootloader
 
 1. 删除本目录（`bootloader_components/`）；
-2. 把 `main/core/system/fw_switch.c` 的 `FW_SWITCH_USE_RTC_BOOT` 改成 **0**
-   （否则 App 只写 RTC，默认 bootloader 不认，切换会静默失败）；
+2. **同时**把 `main/core/system/fw_switch.c` 的切换实现改回
+   `esp_ota_set_boot_partition()` —— 2026-11-16 起本 bootloader 是**必备件**
+   （App 只写 RTC 字节，IDF 默认 bootloader 不认，切换会静默失败）；
 3. `idfc build`（必要时先删 `build\<cell>\bootloader-prefix\src\bootloader-stamp\bootloader-configure`，
    新增/删除 `bootloader_components` 不会自动触发 reconfigure）；
 4. `idfc flash`（会写回 IDF 默认 bootloader 到 0x2000）。

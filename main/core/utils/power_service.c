@@ -2,7 +2,6 @@
 
 #include <assert.h>
 
-#include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/storage/config_store.h"
@@ -10,6 +9,10 @@
 #include "core/utils/deep_worker.h"
 #include "core/utils/fake_shutdown.h"
 #include "core/utils/task_psram.h"
+
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
+#include "core/hardware/audio/mp3_player.h"
+#endif
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -114,17 +117,28 @@ static volatile bool s_quiet = false;
    **调用侧按 S31 平台**：触发的是 `fake_shutdown_enter()`（AXP2101 真断电），
    不是 S3 的 deepsleep 伪关机。
    ⚠ 放在变量定义之后：需要读 s_screen_off / s_quiet。 */
+/* 是否正在播放音频。
+   ⚠ 里世界（role=inner）不编译播放器：它永远"不在播放"，息屏后按超时关机
+   的规则因此与表世界一致（表世界：息屏 + 不在播放 + 未充电 → 10 分钟关机）。 */
+static bool power_service_is_playing(void)
+{
+#ifdef CONFIG_FIRMWARE_ROLE_SYNC
+    return false;
+#else
+    return mp3_player_get_state() == MP3_STATE_PLAYING;
+#endif
+}
+
 static void power_service_check_pause_shutdown(void)
 {
 #if PAUSE_SHUTDOWN_MIN > 0
     battery_info_t binfo;
     const bool charging = (battery_read_info(&binfo) == ESP_OK)
                           && (binfo.vbus_present || binfo.charging);
-    const mp3_player_state_t st = mp3_player_get_state();
 
     /* 不满足条件（亮屏 / 播放中 / 安静模式 / 充电中）：清零，下次重新起算。
        ⚠ 充电中不关机是 S31 的新增条件（S3 时代没有充电检测）。 */
-    if (!s_screen_off || s_quiet || charging || st == MP3_STATE_PLAYING) {
+    if (!s_screen_off || s_quiet || charging || power_service_is_playing()) {
         s_prev_paused = false;
         return;
     }
@@ -204,8 +218,8 @@ static void power_service_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(POWER_SVC_CHECK_MS));
 
-        /* 电池健康保护（4.0V 软件限充）：每秒检查一次，达到 4.0V 停充、
-           降到 3.9V 恢复；保护关闭时几乎零开销（快速返回）。 */
+        /* 电池健康保护（软件限充，阈值见 BATTERY_CARE_STOP_MV）：每秒检查一次，
+           达到停充上限停充、降到恢复点恢复；保护关闭时几乎零开销（快速返回）。 */
         battery_health_protection_tick();
 
         /* 低电自动关机：电量 < 5% 且未充电**持续** 60s → PMU 真关机。

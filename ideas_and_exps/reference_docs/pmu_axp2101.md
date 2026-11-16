@@ -3,7 +3,7 @@
 > **本文依据**：`tempdir/newhwadapter/AXP2101_datasheet.pdf` —— X-Powers *AXP2101 Single Cell NVDC PMU with E-gauge*，Rev 1.4（2022-10-13），共 63 页。文中 `[p.N]` 指该 PDF 页码。
 > **适用硬件**：FakePodNano Pro V1（ESP32-S31），AXP2101 挂 **I²C0（7-bit 地址 `0x34`）**，PMU 中断接 **GPIO49**，上方电源键接 **PWRON**（无主控 GPIO）。引脚/总线定义见 [hardware_v1.md](hardware_v1.md)。
 > **本文覆盖**：① 读电池电压 / ② 读电量百分比 / ③ 读充放电状态与（缺失的）电流 / ④ 读电源键事件、配置长按开关机阈值 / ⑤ 软关机与开机来源 / ⑥ 充电参数（按 600 mAh、3.7 V 标称、4.2 V 满电整定）/ ⑦ 本项目落地设计。
-> **状态**：**AXP2101 已接入**——`main/core/hardware/axp2101.c` + `battery.c` 已实现电压 / E-Gauge 电量 / 充电状态 / 电源键 IRQ / 软关机 / 开机原因 / 电池健康保护（4.0V 软件限充），实现与真机实测见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 与 `POWER_OPTIONS_AND_CHARGE_BOOT.md`。本文其余内容保留为**适配前的设计依据**（S3 时代末期所写），寄存器/协议部分仍然有效。
+> **状态**：**AXP2101 已接入**——`main/core/hardware/axp2101.c` + `battery.c` 已实现电压 / E-Gauge 电量 / 充电状态 / 电源键 IRQ / 软关机 / 开机原因 / 电池健康保护（软件限充，阈值见 `BATTERY_CARE_STOP_MV`），实现与真机实测见 `ideas_and_exps/PMU_RTC_DRIVERS.md` 与 `POWER_OPTIONS_AND_CHARGE_BOOT.md`。本文其余内容保留为**适配前的设计依据**（S3 时代末期所写），寄存器/协议部分仍然有效。
 
 ---
 
@@ -655,11 +655,13 @@ void pmu_charge_limit_tick(const axp2101_status_t *st)
 > 的瞬间 VSYS 没有电池来源 → DCDC 欠压保护直接断电**（`0x21=0x20`）。
 > 所以"降 CV 做保养"只适合电池本来就低于目标电压的场合，正常使用会被坑；
 > 先把电放到 4.0V 以下再开保护也只能把问题推迟到下一次充满（到 4.0V 又会断 BATFET）。
-> 本项目最终采用 **CV 保持 4.2V + 软件 `0x18[1]=0` 停充（4.0V 停 / 3.9V 恢复）**，
+> 本项目最终采用 **CV 保持 4.2V + 软件 `0x18[1]=0` 停充**（阈值见 `battery.h` 的
+> `BATTERY_CARE_STOP_MV` / `BATTERY_CARE_RESUME_MV`，当前 4.08V 停 / 3.98V 恢复；
+> 早期版本是 4.0V / 3.9V），
 > 避免进入"完成"态、BATFET 保持导通；实现见
 > [`../POWER_OPTIONS_AND_CHARGE_BOOT.md`](../POWER_OPTIONS_AND_CHARGE_BOOT.md) §3。
 
-- **已实现**：`axp2101_set_charge_voltage(axp2101_cv_t)`（CV 档位枚举）与 `axp2101_set_charge_enable(bool)`（读-改-写 `0x18` bit1，**保留 bit3=1、bit0=0**）都在 `main/core/hardware/axp2101.h` 里；电池健康保护就是"CV 保持 4.2 V + 4.0 V 写 `0x18[1]=0` 停充 / 3.9 V 恢复"，见 `POWER_OPTIONS_AND_CHARGE_BOOT.md` §3；
+- **已实现**：`axp2101_set_charge_voltage(axp2101_cv_t)`（CV 档位枚举）与 `axp2101_set_charge_enable(bool)`（读-改-写 `0x18` bit1，**保留 bit3=1、bit0=0**）都在 `main/core/hardware/axp2101.h` 里；电池健康保护就是"CV 保持 4.2 V + 到限充上限（当前 4.08 V）写 `0x18[1]=0` 停充 / 3.98 V 恢复"，见 `POWER_OPTIONS_AND_CHARGE_BOOT.md` §3；
 - Kconfig 建议：`CONFIG_PMU_CHARGE_CV`（choice：4.0 / 4.1 / 4.2 V）与 `CONFIG_PMU_CHARGE_LIMIT_PERCENT`（0=关 / 80 / 90），默认都取"关/4.2 V"，避免改变现有行为。
 
 #### 10.5.6 明确走不通的思路

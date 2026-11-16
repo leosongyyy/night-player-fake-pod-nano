@@ -437,7 +437,7 @@ static void power_tick_cb(lv_timer_t *timer)
     menu_refresh_power();
 }
 
-/* 电池健康保护开关：点击切换 → 写 NVS → 立即下发 PMU（CV 4.0V / 4.2V）。
+/* 电池健康保护开关：点击切换 → 写 NVS → 立即下发 PMU（软件限充 / 标准 4.2V）。
    不需要重启即可生效；PMU 不在时只保存配置并打日志。 */
 static void batt_care_row_cb(lv_event_t *e)
 {
@@ -449,8 +449,9 @@ static void batt_care_row_cb(lv_event_t *e)
         ESP_LOGW(TAG, "battery health protection apply failed: %s",
                  esp_err_to_name(err));
     }
-    ESP_LOGI(TAG, "battery health protection -> %s (4.0V charge limit: %s)",
-             on ? "on" : "off", on ? "stop at 4.0V" : "standard 4.2V");
+    ESP_LOGI(TAG, "battery health protection -> %s (charge limit %u mV: %s)",
+             on ? "on" : "off", (unsigned)BATTERY_CARE_STOP_MV,
+             on ? "stop charging at limit" : "standard 4.2V");
     menu_refresh_power();
 }
 
@@ -1316,9 +1317,9 @@ static void time_date_time_row_cb(lv_event_t *e)
    表世界是日常播放器，不含 WiFi 协议栈、也不含 USB 设备栈；WiFi对时与
    USB传歌都放进独立的**里世界固件**（矩阵 role=inner，烧在 ota_0）：
 
-     点功能行 → 统一确认弹窗 → 保存播放现场 → 写 otadata 切到 ota_0 → 重启
-     → 里世界（功能列表）→「回到表世界」→ esp_restart()（otadata 已被里世界
-       开机擦掉，重启即回 factory）
+     点功能行 → 统一确认弹窗 → 保存播放现场 → 写 RTC 分区位（0b01）→ 重启
+     → 里世界（功能列表）→「回到表世界」→ esp_restart()（分区位已被 bootloader
+       消费，重启即回 factory；otadata 不参与）
    为什么不在表世界里直接做：WiFi 协议栈常驻约 27KB 内部 RAM（静态）+ 65KB
    运行时峰值，USB MSC 也要常驻缓冲，都会挤占播放器的 UI 帧率与 DMA 余量；
    而这两件事都只是"偶尔用一次"。放进里世界后表世界一个字节都不给它们。
@@ -1349,7 +1350,7 @@ static void inner_confirm_ok_cb(lv_event_t *e)
     (void)e;
     inner_confirm_close();
 
-    /* ⚠ 顺序：先把"播到哪 + 当前配置"落盘，再关音频，最后动 otadata。
+    /* ⚠ 顺序：先把"播到哪 + 当前配置"落盘，再关音频，最后写 RTC 分区位。
        中途断在这里最多是"没切成"，不会丢播放现场（与关机保存走同一条路径）。 */
     player_controller_save_last_position();
     config_store_flush_pending(true);
@@ -1504,7 +1505,7 @@ static void time_date_fmt_row_cb(lv_event_t *e)
       右侧显示当前值。
       日期/时间/时区点击后弹出滚轮弹窗（ui/time_date_popup.c）；
       **WiFi对时 = 切到「里世界」固件**（2026-11 双固件方案）：点击先弹统一
-      确认窗，再写 otadata + 重启，见上方 time_date_sync_row_cb 的说明。
+      确认窗，再写 RTC 分区位 + 重启，见上方 time_date_sync_row_cb 的说明。
       RTC 里存的是本地墙钟时间，时区只影响网络对时的 UTC 换算；
       改时区时由弹窗把 RTC 平移，保持绝对时刻不变。 */
 static lv_obj_t *time_date_page_build(void)
@@ -1561,7 +1562,8 @@ static lv_obj_t *time_date_page_build(void)
 /* 5. 电源选项子页（2026-11）：
       · 电池信息（无分组标题）：典型容量（Kconfig 固定值，仅展示）/ 当前电量 /
         充电中 / 电池电压；后三项每 1 秒刷新（仅本页可见时读 PMU）。
-      · 电池健康保护开关（4.0V 软件限充），点击立即生效；下方只有一条说明。
+      · 电池健康保护开关（软件限充，停充点见 BATTERY_CARE_STOP_MV），点击立即
+        生效；下方只有一条说明。
       ⚠ PMU 不可用 / 读数越界时统一显示"未知"，不显示假的 0。 */
 static lv_obj_t *power_page_build(void)
 {

@@ -46,6 +46,11 @@ sdkconfig.dac_chip.pcm5102    dac_chip 维度 = pcm5102（S3 时代 overlay，�
 | `HEAP_POISONING` | 堆毒化（越界写在释放时立即报 CORRUPT HEAP + 调用栈） | 关（`DISABLED`） | 关（`DISABLED`） | 关 |
 | `MEM_TRACE` | 内存快照诊断日志（各阶段内部 RAM/DMA/PSRAM 占用） | 开 | 开 | **关** |
 
+> **角色维度补充（2026-11-16）**：`PERFORMANCE_MONITOR` / `LV_USE_PERF_MONITOR`
+> 只由 variant 决定，**两个角色共用**——里世界（role=inner）的 debug 构建同样有
+> 双核 CPU/内存监视与 LVGL FPS 指示器；`sdkconfig.role.inner` 只关 `MEM_TRACE`
+> 与播放器专属项（蓝牙/封面）。
+
 > ⚠ 触摸区域测试（白色圆点）**已改为运行时开关**，不再是构建差异：
 > 设置菜单 → 关于 → 开发者选项（config_store/NVS，**默认关**，开机检查、修改需重启生效），
 > 详见 `main/core/storage/config_store`、`main/core/ui/touch_test`。

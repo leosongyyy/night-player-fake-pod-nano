@@ -1,18 +1,25 @@
 #include "core/utils/fake_shutdown.h"
 
 #include "core/fonts/system_font.h"
-#include "core/hardware/audio/audio.h"
-#include "core/hardware/audio/mp3_player.h"
 #include "core/hardware/axp2101.h"
+#include "core/hardware/battery.h"
 #include "core/hardware/display.h"
 #include "core/hardware/sd_card.h"
-#include "core/player/player_controller.h"
 #include "core/storage/config_store.h"
+#include "core/system/fw_switch.h"
 #include "core/ui/lvgl_port.h"
 #include "core/utils/deep_worker.h"
 #include "core/utils/power_service.h"
 
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
+/* 表世界专属：播放现场/解码/I2S+DAC。里世界没有这些模块（也不该拉进来）。 */
+#include "core/hardware/audio/audio.h"
+#include "core/hardware/audio/mp3_player.h"
+#include "core/player/player_controller.h"
+#endif
+
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -136,10 +143,14 @@ static void fake_shutdown_run(void *arg)
     ESP_LOGI(TAG, "shutdown: UI shown \"%s\", saving data", msg);
 
     /* 2. 保存现场：先存播放位置（内部会写一次配置槽位 blob），再补写
-          "延迟落盘"的亮度/音量（顺序同旧版：反过来会多写一次 4KB 页）。 */
+          "延迟落盘"的亮度/音量（顺序同旧版：反过来会多写一次 4KB 页）。
+          ⚠ 里世界没有播放现场（player_controller 不编译），只落配置。 */
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
     player_controller_save_last_position();
+#endif
     config_store_flush_pending(true);
 
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
     /* 3. 停止播放并等待解码任务退出（释放文件句柄/I2S，避免卸载 SD 时
           还有任务在读卡） */
     if (mp3_player_get_state() != MP3_STATE_IDLE) {
@@ -159,6 +170,7 @@ static void fake_shutdown_run(void *arg)
           才停 I2S 时钟。没在播放时 DAC/耳放同样是上电状态，所以这步不能
           只依赖上一步的"停播放"。 */
     audio_shutdown();
+#endif  /* !CONFIG_FIRMWARE_ROLE_SYNC */
 
     /* 5. 挂起 LVGL：停止刷屏/触摸轮询/封面任务，保证卸载 SD 时没有别的
           任务还在读卡；屏幕保留最后一帧「正在关机...」。 */
@@ -193,10 +205,96 @@ static void fake_shutdown_run(void *arg)
 
     /* 关机失败：设备会继续运行，必须把刚被"优雅关掉"的音频重新拉起来，
        否则出现"机器还开着但完全没声音"的假故障 */
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
     audio_recover_after_failed_shutdown();
+#endif
 
     /* 允许用户再次长按重试（例如拔掉 USB 后再试一次） */
     s_shutting_down = false;
+}
+
+/* ------------------------------------------------------------------ */
+/* 「插着充电器关机」→ 保存现场后重启进充电界面（不断电）               */
+/* ------------------------------------------------------------------ */
+/* 为什么不断电：AXP2101 的 4.08V 软件限充、电量计读数、低电保护全靠固件
+   常驻；PMU 断电后固件消失，插着电的一整夜就会充满到 4.2V，电量计也重新
+   起算。所以插电时的"关机"改成"进充电界面待机"：
+     · 屏幕显示充电大环（仍是同一个界面，拔电即真断电、按住上键 0.6s 回系统）；
+     · 固件继续跑 1s 一次的 battery_health_protection_tick()，限充照旧生效。
+   没插充电器时**仍然真断电**（见 fake_shutdown_user_off）：不插电还赖在充电
+   界面只会白白耗电，而且充电界面唯一的"真关机"入口就是拔电。
+
+   顺序：提示 → 保存播放现场/NVS → 停解码 + CS43131 pop-free 掉电 → 置 RTC
+   启动标志 → 等提示可见 → esp_restart()。⚠ 不做 SD 卸载/挂起 LVGL：马上复位。
+
+   执行体跑在 deep_worker（内部 RAM 栈，可写 flash）；调用方只做浅投递。 */
+static void fake_charge_ui_run(void *arg)
+{
+    (void)arg;
+    const char *msg = "正在进入充电界面...";
+
+    fake_shutdown_ui_show(msg);
+    const int64_t t_shown_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "charge-ui switch: UI shown, saving data");
+
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
+    player_controller_save_last_position();
+#endif
+    config_store_flush_pending(true);
+
+#ifndef CONFIG_FIRMWARE_ROLE_SYNC
+    /* 停解码 → CS43131 pop-free 掉电 → 停 I2S。
+       ⚠ 不做这步：复位瞬间 I2S 时钟直接停掉，而 DAC/耳放仍在上电状态，会在
+         耳机里留下一声爆音（充电界面与里世界都不初始化音频，余音会一直挂着）。 */
+    player_controller_shutdown_audio_for_switch();
+#endif
+
+    esp_err_t err = fw_switch_request_charge_ui();
+    if (err != ESP_OK) {
+        /* RTC 标志写不进去：退回原来的 PMU 真关机（同一执行体直接调用，
+           deep_worker 里禁止再次投递）。 */
+        ESP_LOGE(TAG, "charge-ui flag write failed (%s), fall back to PMU power-off",
+                 esp_err_to_name(err));
+        fake_shutdown_run(NULL);
+        return;
+    }
+
+    fake_shutdown_ui_hold(t_shown_us);
+
+    ESP_LOGW(TAG, "restarting into charging UI (PMU stays on)");
+    vTaskDelay(pdMS_TO_TICKS(50));   /* 让串口日志先出去 */
+    esp_restart();
+
+    /* 不会返回 */
+}
+
+/* 统一入口：先亮屏（若已息屏），再委托 deep_worker 执行。 */
+static void fake_charge_ui_start(const char *reason)
+{
+    if (s_shutting_down) {
+        ESP_LOGW(TAG, "shutdown already in progress, ignore (%s)", reason);
+        return;
+    }
+    s_shutting_down = true;
+    ESP_LOGW(TAG, "=== charge-ui switch requested: %s ===", reason);
+
+    /* 息屏时先亮屏，否则用户看不到提示。
+       ⚠ 必须在 deep_worker_call 之前做（power_service_screen_on 自己也投递
+       deep_worker，在执行体里调用会死锁）。 */
+    if (power_service_is_screen_off()) {
+        ESP_LOGI(TAG, "screen off, waking up to show charge-ui message");
+        power_service_screen_on();
+    }
+
+    if (!deep_worker_call(fake_charge_ui_run, NULL)) {
+        /* deep_worker 未初始化/卡死：不能在调用方（可能是 PSRAM 栈的电源任务）
+           里跑会写 flash 的关机链，退化为最直接的 PMU 断电。 */
+        ESP_LOGE(TAG, "deep_worker unavailable, PMU power-off without shutdown chain");
+        s_shutting_down = false;
+        if (axp2101_power_off() != ESP_OK) {
+            ESP_LOGE(TAG, "PMU power-off failed as well, device keeps running");
+        }
+    }
 }
 
 /* 统一入口：先亮屏（若已息屏），再委托 deep_worker 执行关机链。
@@ -239,10 +337,21 @@ void fake_shutdown_enter(void)
     fake_shutdown_start("auto/regular");
 }
 
-void fake_shutdown_wait_power_off(void)
+void fake_shutdown_user_off(void)
 {
-    /* 电源键长按关机（PMU 按键事件调用）：走同一条「正在关机...」流程 */
-    fake_shutdown_start("power key long press");
+    /* 用户意图关机（上键长按 / 睡眠定时到点）。两条分支：
+       · 正在充电（VBUS 在位或充电中）→ 重启进充电界面，**不断电**：固件留着
+         才能继续执行 4.08V 软件限充与电量计读数（PMU 断电后这两件事全没了）；
+       · 未充电 / 读数不可用 → 原来的 PMU 真断电（不插电还留在充电界面只会
+         耗电，且那里唯一的真关机入口就是拔电）。 */
+    battery_info_t info;
+    const bool charging = (battery_read_info(&info) == ESP_OK)
+                          && (info.vbus_present || info.charging);
+    if (!charging) {
+        fake_shutdown_start("user off (not charging)");
+        return;
+    }
+    fake_charge_ui_start("user off while charging");
 }
 
 void fake_shutdown_charger_unplugged(void)

@@ -1,11 +1,11 @@
-# 用 PCF85063A 的 RAM_byte 选启动分区（自定义 bootloader，默认 RTC-only）
+# 用 PCF85063A 的 RAM_byte 选启动分区（自定义 bootloader，RTC-only，otadata 已弃用）
 
-> **状态：已升级为默认切换路径（RTC-only，2026-11-16 真机验证）**。
-> 正常切换只写 PCF85063A 的 `RAM_byte(0x03)`，不再写/擦 otadata；otadata 仅在
-> RTC 不可用时作为兜底。实验代码、失败降级和验证结果全部保留。
+> **状态（2026-11-16 第二次改版）：启动分区 100% 由 RTC 字节决定，otadata 彻底退出启动路径。**
+> 切换只写 PCF85063A 的 `RAM_byte(0x03)`（一个位域）；RTC 读不到时**直接启动 factory
+> （表世界）**，不再回退 otadata。所以「回表世界」是 0 次 flash 擦写。
 >
-> 目标：不再靠 otadata 的 flash 擦写来切「表世界 / 里世界」，改用 RTC 芯片里那 1 字节
-> RAM_byte；读不到/超时就降级回 otadata，绝不因为 I²C 失败而变砖。
+> 目标：不再靠 otadata 的 flash 擦写来切「表世界 / 里世界」，改用 RTC 芯片里那 1 字节；
+> 且这一字节现在同时承载"启动进充电界面"的一次性标志（bit2）。
 >
 > 相关：只做 hook 的体积实验见 [`BOOTLOADER_I2C_SIZE.md`](BOOTLOADER_I2C_SIZE.md)；
 > 本文是「整份 override」版本。代码在 `bootloader_components/main/`。
@@ -16,37 +16,53 @@
 
 | 项目 | 结果 |
 |---|---|
-| bootloader 体积 | **16,640 B（0x4100）**，上限 24,576 B，余 **7,936 B（32%）** |
-| 相比默认 bootloader | +1,264 B（默认 15,376 B） |
-| 切换方式 | RTC `0x03`：`0xA5` → `ota_0`（里世界），`0x5A` → `factory`，其它 → otadata |
-| 读完处理 | bootloader 读成功后**清 0**（一次性请求） |
-| 失败降级 | NACK / 超时 / 读回不一致 / 目标分区不存在 → 走 otadata；镜像坏了 → IDF 自带的 factory 回退 |
-| 一次往返的 otadata 擦除 | **0 次**（旧路径 3 次 × 4 KB） |
+| bootloader 体积 | **16,720 B（0x4150）**，上限 24,576 B，余 **7,856 B（32%）** |
+| 相比默认 bootloader | +1,344 B（默认 15,376 B） |
+| 切换方式 | RTC `0x03` 的**位域**：`bit1:0` = 分区（`0b01` → `ota_0` 里世界，其它 → `factory` 表世界），`bit2` = 本次启动进充电界面，`bit7:3` 保留 |
+| 读完处理 | bootloader **只清分区位**（`bit1:0`），`bit2` 与保留位留给 App 消费 |
+| 失败降级 | NACK / 超时 / 读回不一致 / 目标分区不存在 → **选 factory**；镜像坏了 → IDF 自带的 factory 回退 |
+| 一次往返的 otadata 擦除 | **0 次**（otadata 已不参与启动；旧路径 3 次 × 4 KB） |
 | `fw_switch_to_sync()` 耗时 | **~220 ms，与旧路径相当**（仍做 1.5 MB 全量镜像校验；省的是擦除，不是时间） |
 | 仍存在的 flash 写 | NVS 播放现场（`last_song`/`last_pos` 等，约 2 个 entry，页擦除摊销） |
 
 **能减少，而且减少的正是切换路径上最“硬”的那几次扇区擦除**；NVS 的播放现场保存
 仍在（那是恢复播放所必需的），所以不是“整个切换 0 flash 写”。
 
-> **默认值**：`main/core/system/fw_switch.c` 的 `FW_SWITCH_USE_RTC_BOOT` 已置 **1**。
-> 只有把自定义 bootloader 换回 IDF 默认版时，才需要改成 0（改用纯 otadata 路径）。
+> **⚠ 自定义 bootloader 现在是必备件**：`FW_SWITCH_USE_RTC_BOOT` 开关已删除。换回 IDF
+> 默认 bootloader 会让 App 的切换静默失效（它只认 otadata），那时必须把
+> `fw_switch.c` 改回 `esp_ota_set_boot_partition()`。
 
 ---
 
 ## 1. 协议
 
 PCF85063A 的 `0x03` 是 NXP 定义的 free RAM byte（复位 `0x00`，SR/掉电才清）。
-电池常驻时它跨 SoC 复位保持：
+电池常驻时它跨 SoC 复位、跨固件保持。**2026-11-16 起整个字节改成一个位域**
+（原来用 `0xA5`/`0x5A` 两个魔法值把整字节占满，再加"启动进充电界面"就没地方了）：
 
-| `0x03` 值 | bootloader 行为 |
+| 位 | 含义 |
 |---|---|
-| `0xA5` | 选 `ota_0`（里世界）；成功后清 `0x00` |
-| `0x5A` | 选 `factory`（表世界）；成功后清 `0x00` |
-| 其它（含 `0x00`） | 不干预，走标准 otadata 选择 |
-| 读失败 / 超时 | 不写、不清，走标准 otadata 选择（降级） |
+| `bit1:0` | 分区选择：`0b00` = `factory`（表世界，默认）、`0b01` = `ota_0`（里世界）；`0b10/0b11` 保留未用（读到按无效处理 → factory） |
+| `bit2` | `1` = 本次启动进充电界面（表世界"插着充电器关机"时置位，App 消费后立刻清 0） |
+| `bit7:3` | 保留（当前恒 0，留给以后的一次性短消息） |
 
-“消费”语义很重要：里世界崩溃/复位时，不能因为字节还是 `0xA5` 又进里世界。
-App 侧还有两道兜底（见 §3），但主保证在 bootloader。
+bootloader 行为（2026-11-16 起**不再看 otadata**）：
+
+| 读到的值 | bootloader 行为 |
+|---|---|
+| `bit1:0 == 0b01` 且 `ota_0` 存在 | 选 `ota_0`（里世界）；成功后写回 `值 & ~0b11`（**保留 bit2/保留位**） |
+| `bit1:0 == 0b01` 但槽不存在 | 选 `factory`；清分区位 |
+| `bit1:0 == 0b00` / `0b10` / `0b11` | 选 `factory`（`bit2` 不动，留给 App） |
+| 读失败 / 超时 | 选 `factory`（表世界是主固件；这是比"按陈旧 otadata 启动"更安全的降级） |
+
+“消费”语义很重要：里世界崩溃/复位时，不能因为分区位还在又进里世界。
+App 侧还有兜底（见 §3），但主保证在 bootloader。
+
+> ⚠ **兼容性**：旧固件写的 `0xA5 = 0b1010_0101` 在新协议里 = 分区 `0b01`（里世界）
+> + `bit2=1`（充电界面）。实际不会同时生效——bootloader 先按分区进 `ota_0`，
+> bit2 由里世界开机时 `fw_switch_clear_boot_flags()` 清掉。
+> `0x5A`（旧"显式回 factory"值）在新协议里 = `bit1:0 = 0b10`（保留值）→ 同样选
+> `factory`，语义没变。
 
 ---
 
@@ -65,10 +81,10 @@ App 侧还有两道兜底（见 §3），但主保证在 bootloader。
   - 9 时钟总线恢复；
   - 失败重试 1 次；
   - 全部失败 → 返回 `RTC_BOOT_NO_REQUEST`，不影响启动。
-- `selected_boot_partition()` 里，先算标准 otadata 的 `boot_index`，再在
-  factory-reset / test 检查之后读 RTC 请求；有请求就覆盖 `boot_index`。
+- `selected_boot_partition()` 里，factory-reset / test 调试检查之后**直接按 RTC 字节
+  决定**（不再先算 otadata 的 `boot_index`）；RTC 读失败才用 factory 兜底。
 - 目标分区不存在（`bs->ota[0].offset == 0` / `bs->factory.offset == 0`）时
-  清掉无效请求并降级。
+  清掉无效请求并降级到 factory。
 - ⚠ 镜像校验**不在 bootloader**：本机 `CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON/
   ALWAYS=y`，bootloader 不校验 SHA；所以 App 在写 RTC 请求前必须自己
   `esp_image_verify()`（见 §2.2）。如果镜像在“App 校验完 → 重启”之间损坏，
@@ -81,18 +97,21 @@ App 侧还有两道兜底（见 §3），但主保证在 bootloader。
      镜像。⚠ 不能只查 4 字节头：本机 `CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON/
      ALWAYS=y`，bootloader 自己**不做**镜像校验（见 `esp_image_format.c` 的
      `bootloader_load_image`），损坏镜像会被直接加载；
-  2. 写 RTC `0x03 = 0xA5` 并**读回确认**；
-  3. 成功 → 直接返回，**完全不碰 otadata**（0 次擦除）；
-  4. 失败 → 走原来的 `esp_ota_set_boot_partition()`（擦 1 个 4 KB 扇区）。
+  2. 写 RTC `0x03` 的分区位（读-改-写：`(旧值 & ~0b11) | 0b01`，保留 bit2/保留位）
+     并**读回确认**该字段；
+  3. 成功 → 返回，**完全不碰 otadata**（0 次擦除）；
+  4. 写失败/读回不一致 → 返回错误（**没有 otadata 兜底了**）：调用方提示
+     "里世界固件不可用"，不再出现"RTC 与 otadata 两套状态打架"。
 - `fw_switch_to_player()`（里世界开机调用）：
-  - 先读 otadata 两个 4 KB 扇区的前 32 字节；
-  - 全是 `0xFF` → 说明上次走的是 RTC 主路径，**跳过 8 KB 擦除**；
-  - 非空 → 才擦（上次是 RTC 失败后的兜底切换）。
-- `main/main.c` / `inner_world_app.c` 在 `rtc_init()` 后清一次 `0x03` 作为兜底
-  （正常情况下 bootloader 已经消费）。
-- 编译开关 `FW_SWITCH_USE_RTC_BOOT`（`fw_switch.c` 顶部）：
-  - `1`：RTC 主路径（当前，配套自定义 bootloader）；
-  - `0`：纯 otadata 路径（移除自定义 bootloader 时必须改 0）。
+  - 只把分区位清 0（读-改-写，保留 bit2/保留位），**不读也不擦 otadata**；
+  - RTC 读不到 → 直接返回 ESP_OK（bootloader 同样会回 factory，降级方向一致）。
+- 启动标志（同一字节的 bit2，见 `fw_switch.h`）：
+  - `fw_switch_request_charge_ui()`：表世界"插着充电器关机"时置位，随后 `esp_restart()`；
+  - 表世界开机在 `rtc_init()` 之后**立刻** `fw_switch_charge_ui_requested()` +
+    `fw_switch_clear_charge_ui_request()` 消费（进充电界面），末尾再
+    `fw_switch_clear_boot_flags()` 兜底清分区位/旧值；
+  - 里世界开机只 `fw_switch_clear_boot_flags()`（不实现充电界面）。
+- 编译开关 `FW_SWITCH_USE_RTC_BOOT` **已删除**：自定义 bootloader 是必备件。
 
 ---
 
@@ -182,21 +201,22 @@ Bootloader binary size 0x4100 bytes. 0x1f00 bytes (32%) free.
 
 | 场景 | 行为 |
 |---|---|
-| RTC NACK（芯片不在/地址错） | 读失败 → otadata 选择 |
-| SCL 被拉死/时钟拉伸 | 500 µs 上限 + 9 时钟恢复 + 1 次重试 → otadata |
-| App 写 RTC 失败/读回不一致 | 走 `esp_ota_set_boot_partition()`（1 次扇区擦除） |
-| `0xA5` 但 `ota_0` 分区不存在 | 清请求 → otadata |
+| RTC NACK（芯片不在/地址错） | bootloader 读失败 → **选 factory**（表世界） |
+| SCL 被拉死/时钟拉伸 | 500 µs 上限 + 9 时钟恢复 + 1 次重试 → 仍失败则 factory |
+| App 写 RTC 失败/读回不一致 | 返回错误，"里世界固件不可用"提示；**不再写 otadata** |
+| 分区位 `0b01` 但 `ota_0` 分区不存在 | 清分区位 → factory |
 | `ota_0` 镜像损坏 | App 的 `esp_image_verify()` 在写请求前拦截，不切换；若损坏发生在“校验后→重启”之间，bootloader 因 skip-validate 不校验，可能加载失败（与旧路径同样的已知风险） |
-| 自定义 bootloader 被换回默认 | **必须把 `FW_SWITCH_USE_RTC_BOOT` 改 0**，否则 App 只写 RTC，默认 bootloader 不认，切换会静默失败（重启回表世界） |
-| 里世界崩溃/复位 | bootloader 已消费字节；里世界启动也清一次 → 回 factory |
+| 自定义 bootloader 被换回默认 | App 的切换会静默失效（默认 bootloader 只认 otadata）——必须同时把 `fw_switch.c` 改回 `esp_ota_set_boot_partition()` |
+| 里世界崩溃/复位 | bootloader 已消费分区位；里世界启动也清一次 → 回 factory |
+| otadata 里残留旧值 | **无影响**：bootloader 不再读 otadata |
 
 ---
 
 ## 6. 未验证 / 风险
 
-- **0x5A（显式要求 factory）路径没有单独真机跑过**：代码与 0xA5 对称，且
-  “回到表世界”走的是 otadata 空/消费路径；如果要严格验证，需要在 App 里加一个
-  一次性写 `0x5A` 的测试入口。
+- **显式要求 factory 的 RTC 路径已删除**（原 `0x5A`）：分区位只留
+  `0b00/0b01`，且 `0b00` 本身就是 factory——"回表世界"只需清分区位，**不擦 otadata**。
+  `0x5A` 在新协议里落在保留值 `0b10`，同样落到 factory。
 - **切换瞬间掉电**：RTC 写是 SRAM，不存在“写坏”问题；但 App 在切换前还会
   `config_store_flush_pending` 写 NVS，掉电风险仍在 NVS 那边（与旧路径相同）。
 - **自定义 bootloader 与 App 的耦合**：`FW_SWITCH_USE_RTC_BOOT` 是手动契约；

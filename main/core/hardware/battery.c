@@ -15,13 +15,12 @@ static const char *TAG = "battery";
    用户以为已经充满（充到 100% 后还有一段恒压涓流），只有阶段 DONE 才给 100 */
 #define BATT_CHG_MAX_DISPLAY 99
 
-/* 电池健康保护（4.0V 限充）阈值：充到 4.0V 停、放电到 3.9V 恢复。
-   ⚠ 为什么不用 CV=4.0V：PMU 在 VBAT **高于** CV 时会断开 BATFET（充电完成保护），
+/* 电池健康保护（软件限充）阈值：充到 4.08V 停、放电到 3.98V 恢复（数值在
+   battery.h，充电专用界面也要用它判定"已到上限"，避免两处写死不同数字）。
+   ⚠ 为什么不用 CV=4.08V：PMU 在 VBAT **高于** CV 时会断开 BATFET（充电完成保护），
      此时拔掉充电器 VSYS 没有来源 → DCDC 欠压保护硬断电（真机 0x21=0x20 已证实）。
      保持 CV=4.2V + 软件停充（0x18[1]=0），PMU 不会进入"完成"态，BATFET 常闭，
      正常使用拔电不会关机。 */
-#define BATT_CARE_STOP_MV    4000u
-#define BATT_CARE_RESUME_MV  3900u
 
 static bool              s_care_on = false;         /* 保护功能是否开启 */
 static bool              s_charge_stopped = false;  /* 是否由保护功能停充 */
@@ -123,11 +122,11 @@ esp_err_t battery_set_health_protection(bool on)
 
     s_care_on = on;
     /* CV 始终保持在 4.2V：PMU 的充电目标电压不能低于当前电池电压，
-       限充由软件写 0x18[1]=0 完成（见 BATT_CARE_STOP_MV 注释）。 */
+       限充由软件写 0x18[1]=0 完成（见 BATTERY_CARE_STOP_MV 注释）。 */
     esp_err_t err = axp2101_set_charge_voltage(AXP2101_CV_4V2);
     uint16_t mv = 0;
     if (err == ESP_OK && axp2101_read_vbat_mv(&mv) == ESP_OK) {
-        err = care_set_stopped(on && mv >= BATT_CARE_STOP_MV);
+        err = care_set_stopped(on && mv >= BATTERY_CARE_STOP_MV);
     } else if (err == ESP_OK) {
         /* 读不到电压：保守起见恢复充电（关闭保护时也必须恢复充电） */
         err = care_set_stopped(false);
@@ -138,7 +137,7 @@ esp_err_t battery_set_health_protection(bool on)
     }
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "battery health protection %s (CV 4.2V, stop at %u mV, now %s)",
-                 on ? "ON" : "OFF", (unsigned)BATT_CARE_STOP_MV,
+                 on ? "ON" : "OFF", (unsigned)BATTERY_CARE_STOP_MV,
                  s_charge_stopped ? "charging stopped" : "charging enabled");
     }
     return err;
@@ -166,13 +165,13 @@ void battery_health_protection_tick(void)
     uint16_t mv = 0;
     if (axp2101_read_vbat_mv(&mv) == ESP_OK) {
         if (s_care_on) {
-            if (!s_charge_stopped && mv >= BATT_CARE_STOP_MV) {
+            if (!s_charge_stopped && mv >= BATTERY_CARE_STOP_MV) {
                 ESP_LOGI(TAG, "battery care: %u mV >= %u mV -> stop charging",
-                         (unsigned)mv, (unsigned)BATT_CARE_STOP_MV);
+                         (unsigned)mv, (unsigned)BATTERY_CARE_STOP_MV);
                 care_set_stopped(true);
-            } else if (s_charge_stopped && mv <= BATT_CARE_RESUME_MV) {
+            } else if (s_charge_stopped && mv <= BATTERY_CARE_RESUME_MV) {
                 ESP_LOGI(TAG, "battery care: %u mV <= %u mV -> resume charging",
-                         (unsigned)mv, (unsigned)BATT_CARE_RESUME_MV);
+                         (unsigned)mv, (unsigned)BATTERY_CARE_RESUME_MV);
                 care_set_stopped(false);
             }
         } else if (s_charge_stopped) {

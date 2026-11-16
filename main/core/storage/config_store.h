@@ -72,10 +72,11 @@ extern "C" {
  *     第 8 格切换并持久化；控制器轮询到变化后重新应用到音频链路（见
  *     player_controller 的开关同步），设置页底部文字随之显示"关闭"
  *   - 电池健康保护 batt_care（bool，默认**关**）：设置菜单 →「电源选项」切换。
- *     开启时把 AXP2101 的恒压充电目标从 4.2V 降到 **4.0V**（约 75~80% 电量，
- *     减少满电存放对电芯的损耗），关闭则写回 4.2V。真正写 PMU 寄存器由
- *     battery_set_health_protection() 完成（本模块只存储）；PMU 每次上电都会
- *     回默认 CV，故 main.c 开机时按本配置重新下发。全局键，不进配置槽位。
+ *     开启时充电到约 **4.08V** 由 battery 模块软件停充（CV 仍 4.2V，≈85%
+ *     电量，减少满电存放对电芯的损耗），关闭则恢复充电到 4.2V 满电。
+ *     真正操作 PMU 由 battery_set_health_protection() 完成（本模块只存储）；
+ *     PMU 每次上电都会回默认，故 main.c 开机时按本配置重新下发。全局键，
+ *     不进配置槽位。
  *   - 关机前播放状态 was_playing（bool，默认 true）：关机（普通/A 键长按）
  *     前记录"当时是否在播放"，开机按记忆恢复——关机前在播放则自动续播，
  *     已暂停/停止则只恢复现场不自动播放（避免开机突然出声）
@@ -342,7 +343,7 @@ bool config_store_get_touch_left_handed(void);
 bool config_store_get_replay_gain(void);
 
 /**
- * @brief 电池健康保护开关（true=PMU 恒压目标 4.0V，约 75~80% 电量；默认关）
+ * @brief 电池健康保护开关（true=充电到约 4.08V 软件停充，≈85% 电量；默认关）
  *
  * 读取后由 main.c 在开机时调用 battery_set_health_protection() 下发到 PMU；
  * 设置菜单切换时也由页面回调立即下发。PMU 每次上电都会回 4.2V，故不能只

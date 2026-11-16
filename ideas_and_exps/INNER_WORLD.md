@@ -1,11 +1,13 @@
 # 双固件：「表世界」播放器 + 「里世界」维护固件（2026-11）
 
-> **2026-11-16 更新（RTC-only 切换，已落地）**：日常切换不再写/擦 otadata。
-> 表世界把 `PCF85063A RAM_byte(0x03)=0xA5`，自定义 bootloader
-> （`bootloader_components/main/`）读它并选 `ota_0`，读完清 0；RTC 读失败才回退
-> otadata。里世界开机检查 otadata：为空则跳过 8 KB 擦除。一次往返的 otadata
-> 擦除从 **3 个 4 KB 扇区降到 0**。完整设计/实测/体积见
-> [`RTC_BOOT_PARTITION.md`](RTC_BOOT_PARTITION.md)。
+> **2026-11-16 更新（RTC-only 切换 + 充电界面标志，已落地）**：日常切换完全不碰
+> otadata。表世界把 `PCF85063A RAM_byte(0x03)` 的**分区位**（bit1:0）写 `0b01`，
+> 自定义 bootloader（`bootloader_components/main/`，**必备件**）读它并选 `ota_0`，
+> 读完只清分区位；`0b00`/读失败 → `factory`（表世界）。**otadata 已彻底退出启动
+> 决策**（RTC 读失败也不再回退它）。「回到表世界」= 把分区位清 0，**0 次 flash
+> 擦写**；一次往返的 otadata 擦除从 **3 个 4 KB 扇区降到 0**。
+> 同一字节的 bit2 用来做"表世界插着充电器关机 → 重启进充电界面"的一次性标志。
+> 完整设计/实测/体积见 [`RTC_BOOT_PARTITION.md`](RTC_BOOT_PARTITION.md)。
 > 下文 §1「不需要自定义 bootloader」是 2026-11-15 的历史结论，已被此更新取代。
 >
 > 动机一（2026-11-15 已落地并真机验证）：WiFi 对时那套协议栈
@@ -24,14 +26,13 @@
 >
 > 表世界里需要网络或需要独占 SD 卡的功能，统一弹同一个确认窗：
 > 「该功能需要前往「里世界」完成，点击确认重启到里世界。」
-> 确认后写 RTC 的一次性请求字节（`0x03=0xA5`）→ 重启；自定义 bootloader 读到
-> 请求后选 `ota_0` 并清 0 → 进里世界。里世界开机检查 otadata：为空（正常 RTC
-> 路径）就**跳过擦除**，非空（RTC 失败后的兜底切换）才擦；用户做完点
-> 「回到表世界」重启回 `factory`。
+> 确认后写 RTC 的分区位（`0x03` 的 `bit1:0 = 0b01`，读-改-写）→ 重启；自定义
+> bootloader 读到后选 `ota_0`、只清分区位 → 进里世界。用户做完点「回到表世界」：
+> 里世界开机已把分区位清 0（0 次 flash 擦写），重启回 `factory`；otadata 全程不参与。
 >
-> 结论（2026-11-16 起）：**需要一个自定义 bootloader** 来读 RTC 字节选分区；
-> 它只是 `bootloader_components/main` 覆盖 IDF 的 main 组件，体积 16,640 B /
-> 24,576 B（余 32%）。RTC 读失败/超时会自动降级回原来的 otadata 路径，不会变砖。
+> 结论（2026-11-16 起）：**必需一个自定义 bootloader** 来读 RTC 字节选分区；
+> 它只是 `bootloader_components/main` 覆盖 IDF 的 main 组件，体积 16,720 B /
+> 24,576 B（余 32%）。RTC 读失败时直接启动 `factory`（表世界），不会变砖。
 
 ---
 
@@ -120,17 +121,21 @@ else { ui_toast_show("里世界固件未烧录"); } /* ESP_ERR_OTA_VALIDATE_FAIL
 ### 3.2 里世界侧（`core/system/inner_world_app.c`）
 
 ```c
-fw_switch_to_player();   /* 回 factory：otadata 空（RTC 主路径）则跳过擦除，非空才擦 */
-/* 之后才做耗时的初始化 + 显示功能列表 */
+/* 不再需要"开机先擦 otadata / 先写回表世界"：分区位是**一次性请求**，
+   bootloader 在进 ota_0 之前就清 0 了（日志 [boot] rtc03=0x01 -> ota_0
+   (inner) (flags kept 0x00)），所以里世界内任何复位都回 factory。
+   唯一要做的清理在 rtc_init() 之后：fw_switch_clear_boot_flags()
+   （清掉陈旧分区位 + bit2 充电界面标志，0 次 flash 擦写）。 */
 ```
 
 于是——里世界中途断电 / 崩溃 / 看门狗复位 / 用户直接按电源键关机，下次启动都是
 表世界（只是没完成对时/传歌）；不存在"卡在里世界反复重启"的状态。
 
 **⚠ 与旧对时固件的关键差别**：旧版跑完对时**自动**重启回表世界；里世界是常驻的
-功能列表，**不会自己重启**——退出只有两条路：
-1. 用户点底部「回到表世界」→ `esp_restart()`（otadata 已空 → 回 factory）；
-2. 用户按电源键关机再开（同样回 factory）。
+功能列表，**不会自己重启**——退出只有三条路：
+1. 用户点底部「回到表世界」→ `esp_restart()`（分区位 0 → 回 factory）；
+2. 用户按电源键长按关机（插电时改为重启进充电界面，见 §6.1）；
+3. 空闲超时自动关机（§6.1）。
 
 ---
 
@@ -290,6 +295,38 @@ idfc build -o role=inner   # 输出 build\inner.debug\FakePodNanoNightPlayer.bin
 | SPI flash 驱动 fork | `components/spi_flash` 的 S31 分支预测补丁两个固件都要（都由依赖图带入） |
 | 蓝牙 / 音频 / 播放列表 | 只编进表世界；里世界里 `CONFIG_BT_ENABLED=n`，bt 组件退化成 INTERFACE 库 |
 | TinyUSB / WiFi 栈 | 只被里世界引用；表世界构建会编这些组件，但静态库成员没被引用 → **镜像里 0 个符号**（见 §7） |
+| 电源基础设施（2026-11-16 起共享） | `deep_worker` / `power_service` / `fake_shutdown` / `button_service` 编两个固件；模块内部用 `CONFIG_FIRMWARE_ROLE_SYNC` 裁掉播放器专属步骤（保存播放位置 / 停解码 / 关 DAC） |
+
+---
+
+## 6.1 里世界的电源行为（2026-11-16 新增）
+
+里世界以前是"屏一直亮、不关机"，整夜插着电做对时/传歌会把电池充到 4.2V（4.08V
+软件限充只在表世界执行）。现在里世界也跑与表世界同一套电源框架：
+
+- **自动息屏**：`power_service`，无操作 `screen_off_s`（默认 30s）→ AMOLED SLEEP IN +
+  挂起 LVGL + CPU 固定 80MHz；任意键 / 触摸亮屏（320MHz）。
+- **超时关机**：息屏 + 未充电 + 不在播放（里世界永远不在播放）持续
+  `CONFIG_PAUSE_AUTO_SHUTDOWN_MIN`（默认 10 分钟）→ `fake_shutdown_enter()`，
+  即 PMU 真断电。与表世界完全同一条判定与同一条关机链。
+- **上键长按关机**：`fake_shutdown_user_off()` —— 插着充电器时改为"保存后重启进
+  充电界面"（和表世界一致），没插电才真断电。⚠ USB 传歌期间忽略该请求（SD 已被
+  TinyUSB 接管）。
+- **限充继续生效**：`power_service` 的 1s 守护任务同样调用
+  `battery_health_protection_tick()`，所以里世界插着电也不会充过 4.08V。
+- **不抑制息屏的例外**：WiFi 对时期间 `power_service_set_hold_awake(true)`；
+  USB 传歌启动后同样一直保持亮屏（USB 模式不能退出，息屏会被误当成空闲）。
+- **双键**：手动息屏/亮屏（与表世界一致）。
+- **性能监视**：里世界也调 `startPerformanceMonitor()`（debug 变体开、release 关，
+  由 `CONFIG_PERFORMANCE_MONITOR` 决定；`sdkconfig.role.inner` 不再单独关它）。
+  串口每 2s 一行 `MEM: heap=... cpu0=...% fps=...`，任务栈高水位列表里的播放器
+  任务（mp3_play/cover_load 等）在里世界自然为 NULL、自动跳过。
+- **亮度**：与表世界一致，直接用用户配置值（下限由 config_store 钳到 16），不再
+  单独抬亮到 96——否则从里世界回表世界会突然变暗。
+
+⚠ 里世界关机只走 `fake_shutdown_enter()` / `fake_shutdown_user_off()`，**全程不碰 otadata**：
+进里世界时 `fw_switch_to_player()` 已把 RTC 分区位清 0，任何重启都回 `factory`；
+重启进充电界面靠 RTC `0x03` 的 bit2（`fw_switch_request_charge_ui()`），同样不碰 otadata。
 
 ---
 
