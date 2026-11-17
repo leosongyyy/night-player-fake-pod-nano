@@ -105,26 +105,7 @@ set(MAIN_SRCS_PLAYER
     "ui/settings_menu.c"
     "ui/settings_page.c"
     "ui/eq_popup.c"
-    "ui/config_slot_popup.c"
-
-    # ---- 袖珍磁带机 UI（T01/T02：基础设施 + 全局框架） ----
-    # ⚠ 新增源文件必须显式登记（F2），否则"代码在但没编译"。
-    "core/image/cassette_tape.c"          # 320x320 RGB565，200KiB const/Flash
-    "core/fonts/cassette_font.c"          # F5：FALLBACK 时指向 UI_SYSTEM_FONT
-    "ui/cassette/cassette_theme.c"        # 15 色 Palette / CAS_CQW / 共享样式
-    "ui/cassette/cassette_fallback.c"     # NVS ui_mode + 开机 A+B 组合键
-    "ui/cassette/cassette_state.c"        # P0 全局 RAM 状态
-    "ui/cassette/cassette_ui.c"           # 总装：cas_root/shell/pages/drawer
-    "ui/cassette/cassette_nav.c"          # 7 页注册与 A/B 键路由
-    "ui/cassette/cassette_drawer.c"       # 全局抽屉（T03 已接真实 M2 控件体）
-    "ui/cassette/cassette_widgets.c"      # 10 类复用拟物控件工厂（T03）
-    "ui/cassette/m1_player.c"             # M1 磁带仓（T03）
-    "ui/cassette/m2_quick.c"              # M2 快捷中心（T03）
-    "ui/cassette/m3_weather.c"            # M3 天气盘（T04）
-    "ui/cassette/m4_clock.c"              # M4 精密时钟（T04）
-    "ui/cassette/m5_list.c"               # M5 播放列表（T04）
-    "ui/cassette/m6_settings.c"           # M6 系统设置（T05）
-    "ui/cassette/m7_files.c")             # M7 文件管理（T05）
+    "ui/config_slot_popup.c")
 
 # AAC-LC（m4a/aac）：由 CONFIG_AUDIO_ENABLE_AAC 一键裁剪；关闭时这三个源文件
 # 完全不进构建，audio_decoder.c / cover_art.c 里的对应分支也被同一宏挡住。
@@ -133,34 +114,6 @@ if(CONFIG_AUDIO_ENABLE_AAC)
         "core/audio_decoders/aac_decoder.c"
         "core/audio_decoders/mp4_demux.c"
         "core/audio_decoders/adts_parser.c")
-endif()
-
-# ---- 袖珍磁带机 UI 的两个互斥/可选编译产物 ----
-# LQ 版（2bit 索引，25KiB）与 RGB565 版（200KiB）只编一个：
-# cassette_tape.h 的 CAS_TAPE_IMG 按同一个 Kconfig 宏选择描述符。
-if(CONFIG_CASSETTE_TAPE_LQ)
-    list(REMOVE_ITEM MAIN_SRCS_PLAYER "core/image/cassette_tape.c")
-    list(APPEND MAIN_SRCS_PLAYER "core/image/cassette_tape_lq.c")
-endif()
-
-# 复古子集字库由 tools/cassette/bake_font.sh 离线生成。每个字体各占一个 .c：
-# lv_font_conv 输出 file-static 的 glyph_bitmap/glyph_dsc/cmaps，合并会重名。
-# fallback 链：mono -> cn -> sym（sym 补 ZCOOL 缺的 7 个 UI 符号）。
-# 文件存在才编入（cassette_font.c 用 __has_include 感知头文件）。
-set(CAS_BAKED_FONT_COUNT 0)
-foreach(baked_src IN ITEMS
-        "core/fonts/cassette_font_sym_baked.c"
-        "core/fonts/cassette_font_cn_baked.c"
-        "core/fonts/cassette_font_mono_baked.c")
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${baked_src}")
-        list(APPEND MAIN_SRCS_PLAYER "${baked_src}")
-        math(EXPR CAS_BAKED_FONT_COUNT "${CAS_BAKED_FONT_COUNT} + 1")
-    endif()
-endforeach()
-if(CAS_BAKED_FONT_COUNT GREATER 0)
-    message(STATUS "cassette UI: baked retro font found (${CAS_BAKED_FONT_COUNT} subsets)")
-else()
-    message(STATUS "cassette UI: 字库未烘焙，使用 CONFIG_CASSETTE_FONT_FALLBACK")
 endif()
 
 # ---- 只有里世界固件要的：主界面 + 两个功能（WiFi对时复用 time_sync_ui，

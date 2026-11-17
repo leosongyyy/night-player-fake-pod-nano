@@ -30,10 +30,6 @@
 #include "lvgl.h"
 #include "ui/app.h"
 #include "ui/toast.h"
-#if CONFIG_CASSETTE_UI
-#include "ui/cassette/cassette_fallback.h"
-#include "ui/cassette/cassette_ui.h"
-#endif
 
 static const char *TAG = "boot_flow";
 
@@ -417,22 +413,8 @@ static void boot_enter_normal(void)
     }
     mem_trace_log("ui:after player_ctrl");
 
-    /* 新旧界面唯一切换点（F15）：磁带模式**不调用** app_ui_create()，
-       因此旧状态栏/通知栏/ClickWheel 均不创建；新 UI 自带时钟
-       （clock_display_attach，接真机 RTC）与电池（battery_indicator_text）、
-       5s 刷新 timer。组合键/NVS 写 LEGACY 时仍走原路径。 */
     mem_trace_log("ui:before app_ui_create");
-#if CONFIG_CASSETTE_UI
-    if (cassette_ui_mode_get() == CAS_UI_MODE_CASSETTE) {
-        cassette_ui_create();
-        ESP_LOGI(TAG, "enter cassette UI (new skeuomorphic 7 modules)");
-    } else {
-        app_ui_create();
-        ESP_LOGI(TAG, "enter legacy UI (cassette fallback: ui_mode=LEGACY)");
-    }
-#else
     app_ui_create();
-#endif
     mem_trace_log("ui:after app_ui_create");
 
     /* 开机默认开启睡眠定时（设置 → 睡眠定时器 → 开机默认开启）时，主界面
