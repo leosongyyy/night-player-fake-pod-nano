@@ -29,6 +29,18 @@ menu "FakePodNanoNightPlayer 应用配置"
             ⚠ release 构建关闭（正式版不需要这些诊断日志）。
             关闭时所有调用点编译为空语句，不产生任何代码与日志。
 
+    config AUDIO_ENABLE_AAC
+        bool "启用 AAC-LC 播放（.m4a / .aac）"
+        default y
+        help
+            打开后编译器加入 aac_decoder/mp4_demux/adts_parser 与 vendored
+            libhelix-aac 组件，播放器可播放 MP4 容器内的 AAC-LC 与 ADTS 裸流
+            （32/44.1/48kHz、单/双声道）；HE-AAC/SBR/PS 明确拒绝。
+            关闭时这三个源文件与 Helix 组件均不编译，.m4a/.aac 按"不支持格式"
+            处理，可用于新解码器出问题时一键回退到原有格式集合。
+            ⚠ 本组件为 RealNetworks RPSL/RCSL 双许可（非 Apache-2.0），详见
+            components/libhelix-aac/README.md 与 LICENSE.RPSL。
+
     # 系统字体固定走**位图**：font 分区里的 spiffs/system.npf（NPF1 预烘焙 24px 全字库，
     # 运行时 esp_partition_mmap 直读；见 core/fonts/font_npf.c 与
     # ideas_and_exps/NPF_FONT.md），**没有构建期开关**；NPF 挂载失败（分区为空/
@@ -315,5 +327,55 @@ menu "FakePodNanoNightPlayer 应用配置"
         help
             用户可见的固件版本标识，仅用于"关于"页展示，不影响功能。
             发版时修改此值即可（idfc 的过期检测会自动重新配置构建）。
+
+endmenu
+
+# ============================================================================
+# 袖珍磁带机 · 纳米版 UI（拟物 7 模块）
+# ----------------------------------------------------------------------------
+# 默认完全替换旧的扁平四页 UI；三重回退路径见
+# ideas_and_exps/CASSETTE_UI_FALLBACK.md。四个开关只影响播放器固件。
+# ============================================================================
+menu "Cassette UI (skeuomorphic 7 modules)"
+
+    config CASSETTE_UI
+        bool "启用袖珍磁带机拟物 UI（替换旧四页 tabview）"
+        default y
+        depends on !FIRMWARE_ROLE_SYNC
+        help
+            打开后 boot_enter_normal() 按 NVS 的 ui_mode 二选一：CASSETTE
+            走新 UI，LEGACY 走原来的 app_ui_create()。关闭则无条件走旧 UI。
+            新 UI 不破坏底层播放/按键/通知服务；开机按住 A+B 3 秒可临时
+            切回旧 UI（L1），本开关是 L2（重新编译烧录）。
+
+    config CASSETTE_TAPE_LQ
+        bool "磁带图用 2bit 索引低清版（省 ~175KiB Flash）"
+        default n
+        depends on CASSETTE_UI
+        help
+            默认用 320x320 RGB565（200KiB）；打开后改用 25KiB 的 I2 索引版。
+            仅用于 Flash 极端紧张或调试，画质有调色板断层。
+
+    config CASSETTE_LAZY_PAGES
+        bool "7 页按需创建/销毁（PSRAM 应急，默认全量常驻）"
+        default n
+        depends on CASSETTE_UI
+        help
+            默认 7 页常驻 PSRAM（约 70~120KiB），切页只切 HIDDEN 无抖动。
+            打开后改为按页 create/destroy，状态由 cas_state_t 序列化保存；
+            P0 版本仅预留此开关，实际按需逻辑随后续任务启用。
+
+    config CASSETTE_FONT_FALLBACK
+        bool "复古字库未就绪时使用系统字体兜底"
+        default n
+        depends on CASSETTE_UI
+        help
+            关闭（默认）：使用 tools/cassette/bake_font.sh 烘焙的
+                  站酷庆科黄油体中文子集 + JetBrains Mono 等宽数字子集
+                  （SIL OFL 1.1；assets/fonts/ 含字体源与许可证）。
+            打开：仅当烘焙产物 cassette_font_baked.c/.h 缺失时的应急路径，
+                  CAS_FONT_CN -> UI_SYSTEM_FONT，
+                  CAS_FONT_MONO -> &lv_font_montserrat_24（非等宽，秒位会抖）。
+            ⚠ 烘焙产物由 CMake 按 EXISTS 自动登记，不需要手改 CMakeLists。
 
 endmenu

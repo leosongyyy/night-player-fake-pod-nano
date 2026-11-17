@@ -1,6 +1,6 @@
-# MULTI_FORMAT_AUDIO — MP3 / FLAC / OGG / WAV 多格式流式播放
+# MULTI_FORMAT_AUDIO — MP3 / FLAC / OGG / WAV / AAC 多格式流式播放
 
-> 2026-11 从 hello_world 测试固件反哺。本文记录解码层结构、格式限制、OGG/Tremor、WAV 与息屏 80MHz、播放爆音修复的验证状态。
+> 2026-11 从 hello_world 测试固件反哺。本文记录解码层结构、格式限制、OGG/Tremor、WAV、AAC/m4a 与息屏 80MHz、播放爆音修复的验证状态。
 
 ## 1. 背景
 
@@ -12,6 +12,8 @@
 | FLAC | dr_flac | 自定义 read/seek/tell 回调 + 16KB stdio 读缓冲（可 setvbuf，close 时自行 fclose） |
 | OGG Vorbis | **Tremor / libvorbisidec** | `ov_open()` 文件流 + 64KB stdio 读缓冲；仅 Vorbis |
 | WAV | **自研**（`core/audio_decoders/wav_decoder.c`） | 解析 RIFF 头后按帧 `fread`（关闭 stdio 缓冲，每次 512 帧），纯整数/float→16bit 转换 |
+| m4a | Helix AAC-LC（vendored `components/libhelix-aac`）+ 自研 `mp4_demux.c` | moov/stbl 建 sample 表（PSRAM），逐 sample 读 mdat 原始帧，16KB PSRAM stdio 缓冲 |
+| aac | Helix AAC-LC + 自研 `adts_parser.c` | 全文件轻量帧计数得精确时长，逐帧读整帧（含 ADTS 头），比例 seek + 64 帧重同步 |
 
 Tremor 是 **定点整数** Vorbis 解码器，配 libogg 容器库；源码在 `components/tremor` 与 `components/libogg`。OGG 的所有堆分配通过 `ogg_psram_alloc_init()` 的 **1MB PSRAM 专用 arena**（`multi_heap`），不再使用默认 `malloc`。
 
@@ -21,15 +23,16 @@ Helix 托管依赖已从 `main/idf_component.yml` 删除；旧的 `main/core/aud
 
 ## 2. 支持范围与限制
 
-- 扩展名：`.mp3` / `.flac` / `.ogg` / `.wav`（大小写不敏感）。
+- 扩展名：`.mp3` / `.flac` / `.ogg` / `.wav` / `.m4a` / `.aac`（大小写不敏感；AAC 由 `CONFIG_AUDIO_ENABLE_AAC` 控制）。
 - 采样率：**32kHz / 44.1kHz / 48kHz**；其它采样率按“格式不支持”跳过并提示。
 - 声道：单声道、双声道；单声道在播放任务内复制成双声道。
 - OGG：仅 Vorbis，不支持 Opus。
 - WAV：仅**线性 PCM（8/16/24/32bit）与 IEEE float32**，含 `WAVE_FORMAT_EXTENSIBLE` 的 PCM/float 子格式；
   ADPCM / A-law / mu-law / 64bit float / RIFX（大端）打开即报错（避免播成噪声）；>2 声道直接拒绝。
   `block_align` 以 fmt 推算值为准（个别写入端会写错）；data 长度缺省（RF64 或写 0）时按文件长度兜底。
-- 不支持：APE、ALAC、AAC、Opus。
-- 曲库扫描的 `is_audio_file()` 与播放器使用同一套扩展名；pldata 版本升到 **v4**（加 WAV 后再升一次，升级后旧缓存自动重扫）。
+- AAC：仅 **AAC-LC（AOT=2）**，32/44.1/48kHz、单/双声道；HE-AAC/SBR/PS、22.05kHz、损坏帧、伪装扩展名一律报错跳过，不输出满幅 PCM。
+- 不支持：APE、ALAC、Opus、HE-AAC。
+- 曲库扫描的 `is_audio_file()` 与播放器使用同一套扩展名；pldata 版本升到 **v5**（加 m4a/aac 后再升一次，升级后旧缓存自动重扫一次）。
 
 ## 3. 解码层接口
 
@@ -52,6 +55,11 @@ void audio_decoder_close(audio_decoder_t *dec);
 - seek 由各解码器按样本位置执行；MP3 首次 seek 可能需要建索引。
 - WAV 的 seek 最简单：定长帧，直接 `data_offset + seconds × rate × block_align`；越界钳到 data 末尾。
 - WAV 的 `total_frames = data_size / block_align`，因此进度条/时长与 MP3 一样可靠。
+- AAC 的 `total_frames = sample_count × 1024`（m4a）或 `帧数 × 1024`（ADTS），打开时一次算准；
+  m4a seek 走 stts 精确到 sample，ADTS 按帧比例粗定位 + 最多 64 帧重同步（误差 ≤ 1 帧）。
+- **残帧契约**：Helix 每帧输出 1024 帧，播放任务每次只要 512 帧。`aac_decoder.c` 常驻
+  1024 帧 × 2ch × 2B = 4KB 的 PSRAM 残帧缓冲，用 `full_pos` 分两次吐出；EOF/错误时先吐完
+  已解码残帧再返回 0/-1，且解错帧绝不写进输出缓冲（对齐 WAV 尾部噪声事故的教训）。
 
 ## 4. 播放任务与爆音修复
 
@@ -96,6 +104,13 @@ void audio_decoder_close(audio_decoder_t *dec);
 - 打开日志：`OGG/Tremor stream opened: ...`；arena 初始化日志：`OGG arena ready: 1MB PSRAM ...`；
 - 这样 OGG 解码不再挤占 SDMMC/I2S 依赖的内部 DMA 池。
 
+AAC 侧的内存归属（全部显式 PSRAM，分配失败直接报错不降级）：
+
+- Helix 状态用 `AACInitDecoderPre()` 从 32KB PSRAM arena  carving（实测状态约 20.7KB）；
+  关闭时**不调用 `AACFreeDecoder()`**（它会 free arena 内部指针），直接释放整块 arena。
+- 残帧 4KB、单帧原始 AAC ≤ 8KB、stdio IO 16KB、MP4 的 stsz/stco/co64/stts/stsc 表均在 PSRAM。
+- m4a 内嵌封面由 `cover_art.c` 的 `ca_mp4_find()` 从 covr 取 JPEG，仍走同一条 PSRAM 回退链。
+
 WAV 侧的内存占用可以忽略：
 
 - 只有 **一个帧缓冲**（`512 帧 × block_align`，双声道 16bit 时 2KB、float32 时 4KB），按需 `realloc`，close 释放；
@@ -115,6 +130,11 @@ WAV 侧的内存占用可以忽略：
 - `components/libogg`：bitwise/framing/ogg_psram_alloc，固定 `-O2`。
 - `components/tremor`：定点 Vorbis 解码，固定 `-O2 -fno-strict-aliasing`。
 - `main/CMakeLists.txt` 仍编译 minimp3/dr_flac 单文件库并对其关警告；`stb_vorbis.c` 已删除。
+- `components/libhelix-aac` 为 vendored Helix 定点 AAC-LC 解码器，根 CMake 白名单已加入；
+  固定 `-O2 -fno-strict-aliasing -w -DCONFIG_LIB_HELIX_AAC_PNS=1`。
+  ⚠ 许可证是 **RPSL/RCSL 双许可，非 Apache-2.0**，详见该组件 README 与 LICENSE.RPSL。
+- `main/Kconfig.projbuild` 的 `CONFIG_AUDIO_ENABLE_AAC`（默认 y）关闭时，三个 AAC 源文件、
+  Helix 组件、分发层分支、扫描扩展名与封面 covr 分支一起裁掉。
 - 不再需要整文件 OGG PSRAM 分配，因此没有 `OGG_MEMORY_MAX`/512KB 文件流分支。
 
 ## 8. 验证状态
@@ -150,8 +170,18 @@ WAV 侧的内存占用可以忽略：
     ⚠ 该打印是**剩余**字节（FreeRTOS `uxTaskGetStackHighWaterMark` 从栈底数未触碰的 0xA5），
     不是已用字节。
 
+### AAC / m4a（2026-11 代码完成，待真机回归）
+
+- 已实现：MP4 demux（esds→ASC、AOT=2 校验、stbl sample 表）、ADTS 帧计数与重同步 seek、
+  Helix 定点解码 + 1024→512 残帧、covr JPEG 封面、pldata v5 缓存失效。
+- 本机没有 `idfc` 且 esp-idf 是 5.x（项目要求 6.1），**未在本机编译**；已做严格静态审查
+  （接口签名、分支覆盖、内存归属、缓冲区边界、CMake/Kconfig 接线）。
+- 待 QA 在 IDF 6.1 环境完成：32/44.1/48k 单/双声道样本、HE-AAC/坏帧/伪装扩展名拒绝、
+  seek 精度、残帧连续性、息屏 80MHz 无爆音、`MEM: stk:` 高水位与 heap 稳定性。
+
 ## 9. 相关文档
 
+- `AAC_M4A.md`：AAC/m4a 实现细节、许可证说明与真机验证清单。
 - `PLAYLIST_SCAN_SUMMARY.md`：曲库扫描与指纹。
 - `COVER_ART.md`：内嵌/目录封面。
 - `PLAYER_CONTROLLER_SUMMARY.md`：播放控制与停止回调。

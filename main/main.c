@@ -53,6 +53,9 @@
 #include "core/utils/sleep_timer.h"
 #include "ui/boot_flow.h"
 #include "ui/key_handler.h"
+#if CONFIG_CASSETTE_UI
+#include "ui/cassette/cassette_fallback.h"
+#endif
 #endif
 
 static const char *TAG = "app_main";
@@ -260,6 +263,13 @@ static void player_app_main(void)
     button_service_init();
     mem_trace_log("10-button");
     /* 按键分发（亮屏/息屏两套映射）在 LVGL 初始化后统一注册（见下） */
+
+#if CONFIG_CASSETTE_UI
+    /* L1 应急回退：开机瞬间 A+B 同按 3s → ui_mode=LEGACY（不碰 LVGL，
+       正常开机此处立即返回）。必须在 button_service_init() 之后：GPIO61
+       此时才配成输入上拉；上键按住状态由 AXP2101 中断任务提供。 */
+    cassette_boot_combo_check();
+#endif
 
     ESP_LOGI(TAG, "Initialize SD card (SDMMC)");
     sd_card_init();   // 挂载失败不阻塞，由 boot_flow 依据 sd_card_is_mounted() 决定流程

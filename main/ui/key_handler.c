@@ -10,6 +10,10 @@
 #include "core/utils/power_service.h"
 #include "core/utils/quiet_mode.h"
 #include "core/utils/sleep_timer.h"
+#if CONFIG_CASSETTE_UI
+#include "ui/cassette/cassette_fallback.h"
+#include "ui/cassette/cassette_nav.h"
+#endif
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -92,6 +96,28 @@ static void on_button_event(button_event_t event, void *ctx)
         }
         return;
     }
+
+#if CONFIG_CASSETTE_UI
+    /* 磁带模式：亮屏短按优先用于模块导航（P0-2），消费则直接返回，
+       不执行原 vol± / vol-10。UP_LONG=关机、BOTH=息屏以及息屏下的
+       播放/切歌映射由 cas_nav_on_key() 显式放行，安全语义不变。
+       ⚠ 本回调运行在 button_service 任务，导航会操作 LVGL 对象，
+         必须像 key_adjust_volume() 一样持锁（F13：只有一个按键回调，
+         不能再注册第二个，只能在这里前置转发）。 */
+    if (cassette_ui_is_active()) {
+        bool cas_consumed = false;
+        if (lvgl_port_lock(1000)) {
+            cas_consumed = cas_nav_on_key(event);
+            lvgl_port_unlock();
+        } else {
+            ESP_LOGW(TAG, "cassette nav skipped: LVGL lock timeout");
+        }
+        if (cas_consumed) {
+            power_service_note_activity();
+            return;
+        }
+    }
+#endif
 
     /* 任何按键事件都算一次用户活动（刷新自动息屏计时） */
     power_service_note_activity();

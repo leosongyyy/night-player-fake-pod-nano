@@ -11,6 +11,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#if CONFIG_AUDIO_ENABLE_AAC
+#include "core/audio_decoders/mp4_demux.h"
+#endif
+
 static const char *TAG = "cover_art";
 
 /* 单张封面上限：常见 1000x1000 JPEG 约 100~500KB，2MB 足够且不会让
@@ -935,6 +939,40 @@ static esp_err_t ca_folder_find(const char *song_path, uint8_t **out,
     return ESP_OK;
 }
 
+#if CONFIG_AUDIO_ENABLE_AAC
+/* ------------------------------------------------------------------ */
+/* MP4/M4A：moov/udta/meta/ilst/covr                                  */
+/* ------------------------------------------------------------------ */
+
+/* 只取 JPEG 封面；PNG covr 明确打一行日志后回退同目录/默认图 */
+static esp_err_t ca_mp4_find(const char *path, uint8_t **out, uint32_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    uint8_t *data = NULL;
+    uint32_t len = 0;
+    esp_err_t err = mp4_demux_find_cover(f, &data, &len);
+    fclose(f);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (!ca_is_jpeg(data, len)) {
+        ESP_LOGI(TAG, "m4a covr 不是 JPEG（PNG 等），走封面回退链");
+        free(data);
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (len > CA_MAX_JPEG) {
+        free(data);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *out = data;
+    *out_len = len;
+    return ESP_OK;
+}
+#endif /* CONFIG_AUDIO_ENABLE_AAC */
+
 /* ------------------------------------------------------------------ */
 /* 对外接口                                                            */
 /* ------------------------------------------------------------------ */
@@ -988,6 +1026,16 @@ esp_err_t cover_art_find(const char *song_path, uint8_t **jpeg_out,
                          (unsigned)*len_out);
                 return ESP_OK;
             }
+#if CONFIG_AUDIO_ENABLE_AAC
+        } else if (strcasecmp(dot, ".m4a") == 0) {
+            err = ca_mp4_find(song_path, jpeg_out, len_out);
+            embed_err = err;
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "embedded cover: MP4 covr JPEG (%u B)",
+                         (unsigned)*len_out);
+                return ESP_OK;
+            }
+#endif
         }
     }
 

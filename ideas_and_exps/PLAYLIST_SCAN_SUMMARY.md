@@ -13,7 +13,7 @@
 
 ## 1. 目标与背景
 
-- 设备：**ESP32-S31**（FakePodNano Pro V1，16MB Flash + 16MB Octal PSRAM），SD 卡（64GB，FAT32/exFAT）存放约 5000+ 首音频文件（MP3 / FLAC / OGG）。
+- 设备：**ESP32-S31**（FakePodNano Pro V1，16MB Flash + 16MB Octal PSRAM），SD 卡（64GB，FAT32/exFAT）存放约 5000+ 首音频文件（MP3 / FLAC / OGG / WAV / m4a / aac）。
 - 需求：开机扫描 SD 卡，把**目录结构**与**用户自建的 `.pl` 播放列表**持久化到独立 Flash 分区，运行期通过**内存映射只读**访问（省 RAM）。
 - 数据源：`musics/` 下的音频文件 + 根目录/`playlists/` 下的 `.pl` 歌单文件。
 
@@ -100,7 +100,7 @@ name_str(4) + path_str(4)
 ### 目录遍历
 - 用**显式栈**（PSRAM 分配）替代递归，避免深目录栈溢出。
 - `collect_dir()` 优先用 `readdir` 的 `d_type` 判断条目类型，只有 `DT_UNKNOWN` 才回退 `stat()`（详见 4.1），收集三类：
-  - **音频文件**（`is_audio_file`：`.mp3` / `.flac` / `.ogg`）
+  - **音频文件**（`is_audio_file`：`.mp3` / `.flac` / `.ogg` / `.wav`，`CONFIG_AUDIO_ENABLE_AAC=y` 时再加 `.m4a` / `.aac`）
   - **`.pl` 播放列表**（`is_pl_file`）
   - **子目录**
 - 目录/文件/歌单各自按**名称前 4 字节 + 大小写不敏感**排序（`name_key` + `strcasecmp`）。
@@ -132,7 +132,7 @@ name_str(4) + path_str(4)
 | `file_count` (u32) | 物理音频文件数（不含 `.pl` 内引用） |
 | `reserved` (u32) | 0 |
 
-**版本从 v1 升到 v2（自动发现），再升到 v3（多格式）**：旧缓存没有这些字段或格式范围不同，首次启动会判为无效并自动重扫一次。分区布局与数据区偏移（0x1000）未变。
+**版本从 v1 升到 v2（自动发现），v3（多格式），v4（加 WAV），v5（加 m4a/aac）**：旧缓存因为格式范围不同，首次启动会判为无效并自动重扫一次，之后稳定。PLST 二进制布局与数据区偏移（0x1000）始终未变，无需迁移数据。
 
 ### 曲库指纹
 
@@ -241,7 +241,8 @@ scan done: dirs=168 songs=8828 str_len=349169 total=611313 truncated=0
 ### 已完成
 - [x] PLST 格式定义
 - [x] 目录 + `.pl` 播放列表扫描构建器（顺序正确、大小写不敏感排序；音频支持 MP3 / FLAC / OGG）
-- [x] **多格式扫描（2026-11）**：`is_audio_file` 扩展为 `.mp3/.flac/.ogg`，pldata 版本升到 v3 触发旧缓存重扫
+- [x] **多格式扫描（2026-11）**：`is_audio_file` 扩展为 `.mp3/.flac/.ogg/.wav`，pldata 版本升到 v4 触发旧缓存重扫
+- [x] **AAC 扫描（2026-11）**：`is_audio_file` 再加 `.m4a/.aac`（受 `CONFIG_AUDIO_ENABLE_AAC` 控制），pldata 版本升到 **v5**，旧缓存自动重扫一次；探针与构建器共用该函数
 - [x] 读取/解析 API（mmap 省 RAM）
 - [x] 内存模式（仅扫描不写回）用于测试
 - [x] 真机验证（168 目录 / 8828 首歌，无截断）
@@ -252,7 +253,7 @@ scan done: dirs=168 songs=8828 str_len=349169 total=611313 truncated=0
 
 ### 待办 / 规划
 - [ ] （可选）扫描逻辑做成 Kconfig 开关
-- [ ] 播放引擎已支持 MP3 / FLAC / OGG；APE/WAV/ALAC/Opus 仍未支持
+- [ ] APE / ALAC / Opus / HE-AAC 仍未支持（本次只做有损 AAC-LC）
 
 ---
 

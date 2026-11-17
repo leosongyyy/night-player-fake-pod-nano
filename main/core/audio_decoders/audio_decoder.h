@@ -16,6 +16,7 @@ typedef enum {
     AUDIO_DEC_FLAC,
     AUDIO_DEC_OGG,
     AUDIO_DEC_WAV,
+    AUDIO_DEC_AAC,
 } audio_dec_type_t;
 
 typedef struct audio_decoder audio_decoder_t;
@@ -25,13 +26,19 @@ typedef struct audio_decoder audio_decoder_t;
  *
  * 支持 .mp3（minimp3，128KB IO 缓冲）、.flac（dr_flac 文件流）、
  * .ogg（Tremor/libvorbisidec 定点解码，文件流，仅 Vorbis）、
- * .wav（RIFF 容器内的线性 PCM / IEEE float，见下方说明）。
+ * .wav（RIFF 容器内的线性 PCM / IEEE float，见下方说明）、
+ * .m4a（MP4 容器内 AAC-LC）与 .aac（ADTS 裸流，见下方说明）。
  *
  * WAV 支持范围（2026-11 加入）：RIFF/WAVE 的 PCM（fmt=1，8/16/24/32bit）与
  * IEEE float（fmt=3，32bit），含 WAVE_FORMAT_EXTENSIBLE（0xFFFE）的 PCM/float
  * 子格式；单声道/双声道；块大小由 fmt 的 block_align 决定，按帧流式读取，
  * **不整文件读入内存**（49MB 的 WAV 也只占几 KB 缓冲）。ADPCM / mu-law /
  * A-law 等压缩 WAV 不支持，打开时直接报错（避免播成噪声）。
+ *
+ * AAC 支持范围（CONFIG_AUDIO_ENABLE_AAC=y 时编入）：仅 AAC-LC（AOT=2），
+ * 32k/44.1k/48kHz、单/双声道；HE-AAC/SBR/PS、22.05kHz、损坏帧与伪装扩展名
+ * 一律报错跳过，绝不输出满幅 PCM。Helix 每次解出 1024 帧，由 aac_decoder.c
+ * 内部残帧缓冲拆成播放任务要求的 512 帧。
  *
  * @param path    文件路径
  * @param err     失败原因输出（可为 NULL）
@@ -54,7 +61,7 @@ uint32_t audio_decoder_channels(const audio_decoder_t *dec);
 uint64_t audio_decoder_total_frames(const audio_decoder_t *dec);
 const char *audio_decoder_type_name(const audio_decoder_t *dec);
 
-/** 跳转到指定秒数（MP3/FLAC/OGG/WAV 均支持；MP3 首次 seek 可能扫描建索引） */
+/** 跳转到指定秒数（MP3/FLAC/OGG/WAV/AAC 均支持；MP3 首次 seek 可能扫描建索引） */
 esp_err_t audio_decoder_seek(audio_decoder_t *dec, uint32_t seconds);
 
 void audio_decoder_close(audio_decoder_t *dec);

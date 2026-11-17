@@ -17,6 +17,9 @@
 #include "ogg/ogg_alloc.h"
 
 #include "core/audio_decoders/wav_decoder.h"
+#if CONFIG_AUDIO_ENABLE_AAC
+#include "core/audio_decoders/aac_decoder.h"
+#endif
 
 static const char *TAG = "audio_dec";
 
@@ -45,8 +48,11 @@ struct audio_decoder {
         mp3_stream_t mp3;
         flac_stream_t flac;
         OggVorbis_File vorbis;
-        /* WAV 由独立单元实现（本工程唯一自己写的格式），这里只存句柄 */
+        /* WAV / AAC 由独立单元实现，这里只存句柄 */
         wav_decoder_t *wav;
+#if CONFIG_AUDIO_ENABLE_AAC
+        aac_decoder_t *aac;
+#endif
     } u;
     char *io_buf;   /* MP3/FLAC/OGG 共用的 stdio 缓冲（close 时释放） */
 };
@@ -134,6 +140,10 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
         type = AUDIO_DEC_OGG;
     } else if (strcasecmp(ext, "wav") == 0) {
         type = AUDIO_DEC_WAV;
+#if CONFIG_AUDIO_ENABLE_AAC
+    } else if (strcasecmp(ext, "m4a") == 0 || strcasecmp(ext, "aac") == 0) {
+        type = AUDIO_DEC_AAC;
+#endif
     } else {
         snprintf(err, err_len, "不支持的音频格式：.%s", ext ? ext : "");
         return NULL;
@@ -277,6 +287,19 @@ audio_decoder_t *audio_decoder_open(const char *path, char *err, size_t err_len)
         dec->sample_rate = wav_decoder_sample_rate(dec->u.wav);
         dec->channels = wav_decoder_channels(dec->u.wav);
         dec->total_frames = wav_decoder_total_frames(dec->u.wav);
+#if CONFIG_AUDIO_ENABLE_AAC
+    } else if (type == AUDIO_DEC_AAC) {
+        /* MP4/ADTS 解析与 Helix 解码全在 aac_decoder.c；它自己分配 16KB
+           PSRAM stdio 缓冲并负责 fclose，分发层不为 AAC attach_io_buf */
+        dec->u.aac = aac_decoder_open(path, err, err_len);
+        if (dec->u.aac == NULL) {
+            free(dec);
+            return NULL;   /* aac_decoder_open 已写好中文原因 */
+        }
+        dec->sample_rate = aac_decoder_sample_rate(dec->u.aac);
+        dec->channels = aac_decoder_channels(dec->u.aac);
+        dec->total_frames = aac_decoder_total_frames(dec->u.aac);
+#endif
     }
 
     return dec;
@@ -322,6 +345,12 @@ int audio_decoder_read(audio_decoder_t *dec, int16_t *out, int max_frames)
         /* 具体解析/位宽转换都在 wav_decoder.c；这里只做转发 */
         return wav_decoder_read(dec->u.wav, out, max_frames);
     }
+#if CONFIG_AUDIO_ENABLE_AAC
+    if (dec->type == AUDIO_DEC_AAC) {
+        /* Helix 1024 帧 → 512 帧的残帧拼接在 aac_decoder.c 内部完成 */
+        return aac_decoder_read(dec->u.aac, out, max_frames);
+    }
+#endif
     return -1;
 }
 
@@ -348,6 +377,11 @@ esp_err_t audio_decoder_seek(audio_decoder_t *dec, uint32_t seconds)
     if (dec->type == AUDIO_DEC_WAV) {
         return wav_decoder_seek(dec->u.wav, seconds);
     }
+#if CONFIG_AUDIO_ENABLE_AAC
+    if (dec->type == AUDIO_DEC_AAC) {
+        return aac_decoder_seek(dec->u.aac, seconds);
+    }
+#endif
     return ESP_ERR_INVALID_STATE;
 }
 
@@ -376,6 +410,9 @@ const char *audio_decoder_type_name(const audio_decoder_t *dec)
     case AUDIO_DEC_FLAC: return "FLAC";
     case AUDIO_DEC_OGG: return "OGG";
     case AUDIO_DEC_WAV: return "WAV";
+#if CONFIG_AUDIO_ENABLE_AAC
+    case AUDIO_DEC_AAC: return "AAC";
+#endif
     default: return "?";
     }
 }
@@ -401,6 +438,10 @@ void audio_decoder_close(audio_decoder_t *dec)
         ov_clear(&dec->u.vorbis);   /* 内部经 close 回调 fclose(fp) */
     } else if (dec->type == AUDIO_DEC_WAV) {
         wav_decoder_close(dec->u.wav);   /* 内部负责 fclose 与帧缓冲释放 */
+#if CONFIG_AUDIO_ENABLE_AAC
+    } else if (dec->type == AUDIO_DEC_AAC) {
+        aac_decoder_close(dec->u.aac);   /* 内部负责 fclose 与 PSRAM 释放 */
+#endif
     }
     free(dec->io_buf);
     free(dec);

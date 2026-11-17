@@ -135,7 +135,7 @@ static void make_full_path(const char *rel, char *out, size_t outsz)
     }
 }
 
-/* ---------------- 音频扩展名判断（播放引擎支持 MP3/FLAC/OGG/WAV） ---------------- */
+/* ---------------- 音频扩展名判断（播放引擎支持 MP3/FLAC/OGG/WAV/AAC） ---------------- */
 
 static bool is_audio_file(const char *name)
 {
@@ -144,10 +144,17 @@ static bool is_audio_file(const char *name)
         return false;
     }
     const char *ext = dot + 1;
-    return (strcasecmp(ext, "mp3") == 0) ||
-           (strcasecmp(ext, "flac") == 0) ||
-           (strcasecmp(ext, "ogg") == 0) ||
-           (strcasecmp(ext, "wav") == 0);
+    bool audio = (strcasecmp(ext, "mp3") == 0) ||
+                 (strcasecmp(ext, "flac") == 0) ||
+                 (strcasecmp(ext, "ogg") == 0) ||
+                 (strcasecmp(ext, "wav") == 0);
+#if CONFIG_AUDIO_ENABLE_AAC
+    /* .m4a = MP4 容器 AAC-LC，.aac = ADTS 裸流；大小写不敏感 */
+    if (strcasecmp(ext, "m4a") == 0 || strcasecmp(ext, "aac") == 0) {
+        audio = true;
+    }
+#endif
+    return audio;
 }
 
 /* ---------------- 播放列表（.pl）文件 ---------------- */

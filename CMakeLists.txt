@@ -60,6 +60,7 @@ set(COMPONENTS
     # 实现选成 ANSI C，Xtensa 汇编在源文件内部被条件编译掉了）。
     esp-dsp
     tremor                         # OGG Vorbis 定点解码（audio_decoder.c），依赖 libogg 自动带入
+    libhelix-aac                   # AAC-LC 定点解码（RPSL/RCSL 双许可，非 Apache-2.0；CONFIG_AUDIO_ENABLE_AAC 关闭时组件注册为空）
 
     # ---- main 直接 include 头文件的 IDF 组件 ----
     esp_lcd                        # esp_lcd_panel_*.h / esp_lcd_panel_io.h
