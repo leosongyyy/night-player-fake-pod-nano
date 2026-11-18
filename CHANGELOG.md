@@ -16,6 +16,10 @@
 15. **「重新扫描」改成子菜单 + 自动重扫开关**（2026-11-16）：设置 →「重新扫描」现在点进去是子页，含「自动重扫（开/关，默认开）」「立即重新扫描」（= 原来那条删缓存文件 → 重启的路径，带确认页）与一行说明「开启自动重扫可能会减慢开机速度。」。**关闭自动重扫后，开机只校验播放列表缓存文件是否完好（magic/版本/长度/整块 CRC32）就直接进主界面，跳过曲库指纹探针（5838 个文件实测 1.27 s）**——真机实测 `App started` 从 **3.52 s 降到 2.25 s**；代价是卡上曲库增删/改名/换歌单不会被自动发现，需要点「立即重新扫描」。换卡不需要额外判断：缓存文件跟着卡走，新卡上没有文件自然会重扫。
 16. **删掉 4MB 的 `pldata` 分区，重新划分 flash（第六次重排）**：播放列表已经搬到 SD 卡（见上一条），flash 里那块分区成了死数据，于是整块让给里世界固件：`factory` 3MB → **5.93MB**，`otadata` 挪到 **0x5FE000**（夹在 factory 与 font 之间，仅为占位——启动选择只看 RTC 字节），`font` **原地不动**（0x600000 6MB，**不需要重刷字体**），`ota_0` 从 0x310000 挪到 **0xC00000（4MB，顶到 16MB 末尾）**。**里世界固件的烧录地址随之变成 `0xC00000`**；两个 app 槽现在都很宽裕（release 2.81MB / 里世界 1.65MB）。本版尚未发布、用户首次全量刷入，所以这次重排不需要任何升级兼容代码。已用全量固件整片验证：开机、字体、播放列表命中、里世界往返切换全部正常。
 
+17. **M4A / AAC 解码支持**（2026-11-17）：新增 AAC-LC 播放链路（`aac_decoder` + `mp4_demux` + `adts_parser`，解码用 vendored `libhelix-aac`），`.m4a`（MP4 容器）与 `.aac`（ADTS 裸流）都能播，32/44.1/48kHz、单/双声道；HE-AAC / SBR / PS 明确拒绝。播放列表扩展名识别、`.npd` 之外的 MP4 内嵌封面提取（`mp4_demux_find_cover`）一并接上。由 Kconfig `CONFIG_AUDIO_ENABLE_AAC`（默认开）统一裁剪——关闭时这三个源文件与 Helix 组件都不编译，`.m4a/.aac` 按不支持格式处理，可一键回退。⚠ `components/libhelix-aac` 为 RealNetworks RPSL/RCSL 双许可（非 MIT），详见该组件目录内的 LICENSE。
+18. **exFAT TF 卡支持**：给 IDF 本体 FatFs 打开 `FF_FS_EXFAT=1`（`esp-idf/components/fatfs/src/ffconf.h`），exFAT 格式 TF 卡可正常挂载。注意这是 IDF 组件层的补丁，换电脑 / 重装 IDF 需重新应用。
+19. **GitHub 仓库与固件 Release**：源码在保留 Gitee 主仓库之外，同步到 <https://github.com/leosongyyy/night-player-fake-pod-nano>（Public），两处内容一致。预编译全量固件通过 GitHub Releases 分发，当前推荐版本 `v1.0-origUI`（原版四页 UI + exFAT + m4a/aac，SHA256 `3b5c53c3…adc7d73`）。
+
 ### Bug 修复
 1. **扫描任务栈实际只有 8KB**：`xTaskCreatePinnedToCore` 的栈单位是字节，原调用多除了 4；现改为真正的 32KB（失败回退 16KB），并新增「扫描失败」页，避免读取/写入失败时带着空列表进入主界面。
 
